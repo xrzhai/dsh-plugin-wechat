@@ -21,6 +21,7 @@
  */
 import { createHash } from 'node:crypto'
 import { readAssistantReply, readSettledTurns, describePending } from './session-reader.js'
+import { SessionDispatcher } from './session-dispatcher.js'
 import { baseSessionIdFor, scopedLineKey, SessionLines, runSessionCommand } from './sessions.js'
 
 /**
@@ -196,6 +197,18 @@ export class AgentBridge {
     this.lateReplyMaxWaitMs = options.lateReplyMaxWaitMs ?? 60 * 60_000
     /** @type {Map<string, { agent: any, dispose: () => Promise<void>, busy: boolean, queue: any[], cancelled: boolean }>} */
     this.sessions = new Map()
+    this.sessionDispatcher = new SessionDispatcher({
+      ctx: this.ctx,
+      config: options.sessionDispatcherConfig,
+      sourceFor: (agent) => {
+        const record = this.sessions.get(agent?.session?.id)
+        if (!record || record.agent !== agent) return undefined
+        return { accountId: record.accountId, conversationId: record.conversationId,
+          senderId: record.auditMeta?.senderId, isSideSession: record.isSideSession || record.dispatchSenderMixed === true }
+      },
+      notify: options.onDispatchReply,
+      warn: this.errLog,
+    })
     /**
      * In-flight attach() creations, so two messages for the same conversation
      * never build two sessions.
@@ -533,6 +546,7 @@ export class AgentBridge {
         existing.conversationId = conversationId
         if (accountId !== undefined) existing.accountId = accountId
       }
+      if (!isSide) this.sessionDispatcher.mount(existing.agent)
       return existing
     }
 
@@ -552,6 +566,7 @@ export class AgentBridge {
         record.conversationId = conversationId
         if (accountId !== undefined) record.accountId = accountId
       }
+      if (!isSide) this.sessionDispatcher.mount(record.agent)
       return record
     } finally {
       this.attachPromises.delete(sessionId)
@@ -732,6 +747,9 @@ export class AgentBridge {
       // command exists precisely to reach a turn that is already running.
       const steerCommand = parseSteerCommand(text)
       if (mode === 'steer' || steerCommand !== undefined) {
+        // A second group sender must not inherit the first sender's dispatcher
+        // permission by steering their still-running controller turn.
+        if (senderId !== record.auditMeta?.senderId) record.dispatchSenderMixed = true
         const payload = steerCommand !== undefined ? steerCommand : text
         const createUserMessage = await loadCreateUserMessage()
         record.agent.steer?.(
@@ -944,6 +962,7 @@ export class AgentBridge {
     record.auditSeq = -1
     record.auditCalls = new Map()
     record.auditMeta = meta
+    record.dispatchSenderMixed = record.agent?.status === 'running' || !meta.senderId
   }
 
   /**
@@ -1294,6 +1313,7 @@ export class AgentBridge {
 
   /** Tear down every session this bridge created. */
   async dispose() {
+    await this.sessionDispatcher.dispose()
     if (this.#spontaneousTimer !== undefined) {
       clearInterval(this.#spontaneousTimer)
       this.#spontaneousTimer = undefined

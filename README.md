@@ -1383,3 +1383,10 @@ node bin/release.mjs --finish 0.9.11   # 补齐 tag / Release / 核验 / 装本�
 | `contactStaleDays` | `45` | 群成员名片超过这么多天没更新内容，注入时会注明「可能已过时」；0 关闭 |
 | `contactRefreshEnabled` | `true` | 过时且最近说过话的群成员名片，用**一次后台调用**从他自己说的话里补一遍（过时只是提醒，事实还是旧的） |
 | `contactRefreshPerDay` | `2` | 每次最多重写几张名片；`0` 等于关掉自动补全 |
+
+
+## 平行会话调度（1.6.0，默认关闭）
+
+微信主会话可通过 `session_list`、`session_query`、`session_dispatch` 查看和推进已授权的 DSH 项目会话。先在设置卡「平行会话调度」中明确授权发送者和目标会话 ID，再开启功能；两个名单为空时均拒绝访问。普通微信发送者白名单仍然生效。
+
+完整配置、安全边界、宿主能力和隔离验收步骤：[平行会话调度](docs/session-dispatcher.md)。此版本未在真实 DSH/微信环境验收，不会自动开启或改动本机配置。

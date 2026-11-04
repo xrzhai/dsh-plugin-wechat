@@ -1321,3 +1321,10 @@ When you are mentioned in a group, the model sees only the message that mentione
 | `contactStaleDays` | `45` | Days before a group member card is marked possibly out of date when injected (0 disables) |
 | `contactRefreshEnabled` | `true` | Stale member cards whose owner has been talking get rewritten from their own words in one background call (staleness is only a warning; the facts are still old) |
 | `contactRefreshPerDay` | `2` | How many cards one run may rewrite; `0` turns automatic refresh off |
+
+
+## Parallel session dispatcher (1.6.0, opt-in)
+
+`session_list`, `session_query` and `session_dispatch` let a Weixin controller inspect and advance explicitly authorized host project sessions. Both dispatcher sender IDs and exact target session IDs must be configured; empty lists deny access. The normal gateway sender/chat allowlists still apply.
+
+See [configuration, safety boundaries and validation](docs/session-dispatcher.md). This release has not been verified against a real DSH/Weixin deployment and does not enable itself or alter a profile.

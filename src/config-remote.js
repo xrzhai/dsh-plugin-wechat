@@ -42,6 +42,31 @@ const T = {
  */
 export const FIELDS = [
   {
+    group: "平行会话调度", groupEn: "Parallel Session Dispatcher",
+    fields: [
+      { path: "sessionDispatcherEnabled", type: T.boolean, default: false,
+        label: "启用平行会话调度", labelEn: "Enable session dispatcher",
+        hint: "默认关闭。开启后，下方单独授权的微信发送者可读取下方授权的项目会话并派发任务；不用于隔离不可信用户。下一次微信消息挂载工具。",
+        hintEn: "Off by default. Explicitly listed senders can read host project sessions and send tasks. Tools mount on the next inbound message." },
+      { path: "sessionDispatcherSenders", type: T.stringList, default: [], emptyMeansAll: false,
+        label: "调度者发送者 ID", labelEn: "Dispatcher sender IDs",
+        hint: "每行一个，须同时在网关发送者白名单中。空列表拒绝所有调度读取和写入。",
+        hintEn: "One sender ID per line; must also be gateway-allowed. Empty denies all dispatcher access." },
+      { path: "sessionDispatcherTargets", type: T.stringList, default: [], emptyMeansAll: false,
+        label: "允许访问的目标会话 ID", labelEn: "Allowed target session IDs",
+        hint: "每行一个精确会话 ID。空列表拒绝所有目标，无通配符。上方授权的调度者共享此名单；请只授予同一信任范围的用户。",
+        hintEn: "Exact session IDs, one per line. Empty denies all, no wildcard. All authorized dispatcher senders share this target list." },
+      { path: "protectedSessions", type: T.stringList, default: [],
+        label: "只读会话 ID", labelEn: "Protected session IDs",
+        hint: "每行一个；仍允许读取，但拒绝 followup、steer 和 cancel。",
+        hintEn: "Readable, but followup, steer and cancel are refused." },
+      { path: "readOnlyPaths", type: T.stringList, default: [],
+        label: "只读工作区根目录", labelEn: "Read-only workspace roots",
+        hint: "每行一个绝对路径；包括子目录与符号链接别名。仅约束调度工具，不是文件系统沙箱。",
+        hintEn: "Absolute roots, including descendants and symlink aliases. Dispatcher policy, not a filesystem sandbox." },
+    ],
+  },
+  {
     group: "基本与模型路由",
     groupEn: "Basics & Model Routing",
     fields: [

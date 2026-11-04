@@ -22,7 +22,7 @@ import { fileURLToPath } from 'node:url'
 import fs from 'node:fs'
 import { randomBytes } from 'node:crypto'
 import { dirname, join, resolve as resolvePath } from 'node:path'
-import { configureWeixinStateDir, accountsDir, configFile, ensureSessionsDir, inboxDir, stateDir, withSavedConfig } from './state.js'
+import { configureWeixinStateDir, accountsDir, configFile, readSavedConfig, ensureSessionsDir, inboxDir, stateDir, withSavedConfig } from './state.js'
 import { quietDelay } from './message/quiet-hours.js'
 import {
   MAX_TEMP_QUIET_MS,
@@ -232,6 +232,11 @@ export const inject = ['agents']
  */
 export const Config = z.object({
   enabled: z.boolean().default(true).description('Start the Weixin long-poll loop when the plugin loads.'),
+  sessionDispatcherEnabled: z.boolean().default(false).description('Opt in to explicitly authorized session read/control for dispatcher senders. Never enables itself.'),
+  sessionDispatcherSenders: z.array(z.string()).default([]).description('Explicit sender IDs allowed to read and control host project sessions; empty denies everyone.'),
+  sessionDispatcherTargets: z.array(z.string()).default([]).description('Exact target session IDs visible to all dispatcher senders; empty denies access. No wildcard.'),
+  protectedSessions: z.array(z.string()).default([]).description('Session IDs that session_dispatch must treat as read-only.'),
+  readOnlyPaths: z.array(z.string()).default([]).description('Absolute workspace roots that session_dispatch must treat as read-only, including descendants and symlink aliases.'),
   accountId: z.string().default('').description('Weixin account id to use; empty means the only saved account.'),
   cwd: z.string().default('').description('Working directory the agent operates in; empty inherits the session default.'),
   allowedSenders: z.array(z.string()).default([]).description('Weixin user ids allowed to drive the agent. Empty denies everyone.'),
@@ -524,6 +529,17 @@ export function apply(ctx, config) {
   // Keep the composition separately: resetting a saved switch must not fall
   // back to the overlay value captured when the plugin first loaded.
   const gatewayEnabled = () => withSavedConfig(baseConfig).enabled !== false
+  const sessionDispatcherConfig = () => {
+    const live = withSavedConfig(baseConfig)
+    const saved = readSavedConfig()
+    // Empty security lists revoke access. The legacy general config overlay
+    // treats empty arrays as defaults, which must not resurrect these grants.
+    for (const key of ['allowedSenders', 'allowedChats', 'sessionDispatcherSenders',
+      'sessionDispatcherTargets', 'protectedSessions', 'readOnlyPaths']) {
+      if (Object.hasOwn(saved, key)) live[key] = saved[key]
+    }
+    return live
+  }
 
   const disabled = !gatewayEnabled()
   if (disabled) {
@@ -666,6 +682,22 @@ export function apply(ctx, config) {
       bridge = new AgentBridge({
         ctx,
         cwd,
+        sessionDispatcherConfig,
+        onDispatchReply: async ({ accountId, conversationId, senderId, targetSessionId, text }) => {
+          // Exact origin only. Never fall back to another bot or interpret
+          // project output as attachments. Recheck after the async refresh.
+          const allowed = (live) => live.enabled !== false && live.sessionDispatcherEnabled === true
+            && Array.isArray(live.sessionDispatcherSenders) && live.sessionDispatcherSenders.includes(senderId)
+            && Array.isArray(live.sessionDispatcherTargets) && live.sessionDispatcherTargets.includes(targetSessionId)
+            && isAllowedSender(live, senderId, conversationId)
+          if (!allowed(sessionDispatcherConfig())) return
+          const transport = transports.get(accountId)
+          if (!transport || !conversationId) throw new Error('Originating Weixin account is unavailable for dispatch notification.')
+          try { await transport.refreshConfig() } catch {}
+          const current = sessionDispatcherConfig()
+          if (transports.get(accountId) !== transport || !allowed(current)) return
+          await sendChunked(transport, current, { conversationId, text, contextToken: '' })
+        },
         // 账本：桥每完成一个真正跑完的回合就报一次（谁会调用由它决定，写去哪
         // 由这里决定 —— 桥不认识 stateRoot）。
         onUsage: (usage) => recordModelUsage(stateRoot, withSavedConfig(config), warn, usage),

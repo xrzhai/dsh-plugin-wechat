@@ -1,5 +1,12 @@
 ## 版本
 
+- **1.6.0（待本机 DSH / 微信验证）** —— **显式授权的平行会话调度（#27）**：
+  - 新增主会话专属 `session_list` / `session_query` / `session_dispatch`，支持现有会话发现、只读快照、followup、steer、cancel 和同步/异步结果。
+  - 默认关闭；独立调度发送者和目标会话白名单均默认空。拒绝自调用、继承工具的子代理、其他微信控制会话、归档和受保护目标；只读路径包含符号链接检查。
+  - 用真实执行 Agent 身份、派发 ID 和目标 turn 关联结果，超时转后台凭证而不重投；异步结果只作为文本发回原账号/聊天，不解析附件路径。
+  - 修复 Windows / 完整依赖测试：现代模型 notice 安装器检查 `.on()` 能力，测试使用独立 Cordis 上下文；目录别名在 Windows 使用 junction，不跳过只读路径断言。冷恢复明确要求现代持久模型选择契约，拒绝 rc.6 旧双参数接口及未知宿主，避免修复 fixture 后首个模型请求才失败。新增真实已安装 peer 的 `test:host-contract` 验证入口。
+  - 已同步 main 中 PR #28 的按回合自发回复修复，调度结果仍独立关联到派发 ID 和目标 turn。仅插件存活期内监控，不承诺重启恢复或微信端送达确认；宿主接口没有 expected-turn 原子控制参数，具体边界与验收步骤见 `docs/session-dispatcher.md`。
+
 - **1.5.3** —— **修复多回合自发回复覆盖与静默吞没**：
   - `src/session-reader.js` 增加 `readSettledTurns({ events, afterSeq })`：以回合（turn）为粒度切分和收集已完成的回合，彻底解决单个 poll 周期内多个回合到来时后一回合覆盖前一回合的缺陷。
   - `src/agent-bridge.js` 的 `#pollSpontaneous()` 遍历每个已 settled 回合按序交付：非静默回复按序触发 `onSpontaneousReply` 并推进游标，`[SILENT]` 心跳静默推进游标，确保 Subagent 汇报结果后紧随其后的静默回合绝不会吞掉先前的真实交付物。
