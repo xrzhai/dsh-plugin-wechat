@@ -175,7 +175,7 @@ window.__ModuleLoader__.load({
 							dirty ? createElement("span", { style: pillStyle("warn") }, t("Unsaved changes", "未保存改动")) : null,
 							createElement("button", { onClick: load, disabled: busy, style: buttonStyleFor(busy) },
 								t("Reload", "重新读取")),
-							createElement("button", { onClick: save, disabled: busy || !dirty, style: primaryButtonStyle(busy || !dirty) },
+							createElement("button", { onClick: save, disabled: busy || !dirty, style: busy || !dirty ? { ...primaryButtonStyle, opacity: 0.5, cursor: "default" } : primaryButtonStyle },
 								busy ? t("Saving…", "正在保存…") : t("Save AGENTS.md", "保存 AGENTS.md")))),
 					filePath ? createElement("div", { style: { ...captionStyle, display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8 } },
 						createElement("span", null, `${t("Path", "文件路径")}：${filePath}`),

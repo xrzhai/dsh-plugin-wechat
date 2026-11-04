@@ -1281,6 +1281,43 @@ window.__ModuleLoader__.load({
 			// (plugins.bundle.config) and the shell Settings navigation
 			// (settings.section — the slot dsh-im uses for its「IM机器人」page).
 			// One component, two registrations, so the copy never forks.
+			// A render-time throw inside the card used to blank the whole main pane
+			// (React unmounts the subtree when nothing catches it; the sidebar
+			// survives, so it reads as a mysterious white screen). This boundary
+			// keeps the failure local and prints the real message + stack, so a
+			// regression is diagnosable from the UI instead of a blank pane.
+			class WeixinCardErrorBoundary extends react.Component {
+				constructor(props) {
+					super(props);
+					this.state = { error: null };
+				}
+				static getDerivedStateFromError(error) {
+					return { error };
+				}
+				componentDidCatch(error, info) {
+					try {
+						// eslint-disable-next-line no-console
+						console.error("dsh-weixin settings card render error:", error, info);
+					} catch {}
+				}
+				render() {
+					const error = this.state.error;
+					if (error === null || error === undefined) return this.props.children;
+					const detail = String((error && (error.stack || error.message)) || error);
+					return createElement("div", {
+							style: {
+								display: "flex", flexDirection: "column", gap: 8,
+								padding: "13px 15px", color: C.danger, whiteSpace: "pre-wrap",
+								fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+								fontSize: 12, lineHeight: "18px",
+							},
+						},
+						createElement("p", { style: { margin: 0, fontWeight: 600 } },
+							"微信网关设置卡渲染出错（已拦截，避免整页白屏）："),
+						createElement("pre", { style: { margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word" } }, detail));
+				}
+			}
+
 			function WeixinSettingsCard() {
 				if (cardLoadError !== "") {
 					return createElement("div", { style: noticeStyle },
@@ -1292,7 +1329,8 @@ window.__ModuleLoader__.load({
 				if (cardModule === null) {
 					return createElement("p", { style: captionStyle }, "正在加载设置卡…");
 				}
-				return createElement(cardModule.WeixinSettingsCard, {});
+				return createElement(WeixinCardErrorBoundary, null,
+					createElement(cardModule.WeixinSettingsCard, {}));
 			}
 
 
