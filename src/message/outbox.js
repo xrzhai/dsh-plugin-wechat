@@ -134,12 +134,38 @@ export function createOutbox({ stateRoot, transportFor, warn = () => {}, log = (
   }
 
   /**
+   * Drop dead letters that can never be delivered: an item whose context token
+   * expired *after* it had already burned its retry budget. A still-retryable
+   * item whose token expired is NOT dropped — `flush` retries it tokenless — but
+   * a parked one has nothing left to try, so it only fills `/outbox` and the
+   * pending gauge until it ages out. This is the cleanup that keeps the durable
+   * outbox from slowly becoming a graveyard (issue #21).
+   *
+   * @returns {number} how many items were dropped
+   */
+  const prune = () => {
+    const store = readOutbox(stateRoot, { warn })
+    const before = store.items.length
+    const at = now()
+    store.items = store.items.filter((item) => !(Number(item.attempts ?? 0) >= MAX_ATTEMPTS && tokenExpired(item, at)))
+    if (store.items.length !== before) {
+      save(store)
+      log(`outbox: pruned ${before - store.items.length} undeliverable dead letter(s)`)
+    }
+    return before - store.items.length
+  }
+
+  /**
    * Try to deliver everything that is due. Items stay in order per conversation.
    *
    * @param {{ force?: boolean }} [options] force ignores notBefore (manual retry)
    * @returns {Promise<{ sent: number, failed: number, remaining: number }>}
    */
   const flush = async (options = {}) => {
+    // Clear the parked dead letters first: they are the residue of the old
+    // "retry an expired token until it parks" behaviour, and nothing below can
+    // ever send them.
+    prune()
     const store = readOutbox(stateRoot, { warn })
     if (store.items.length === 0) return { sent: 0, failed: 0, remaining: 0 }
     const at = now()
@@ -161,15 +187,15 @@ export function createOutbox({ stateRoot, transportFor, warn = () => {}, log = (
           remaining.push(item)
           continue
         }
-        // A reply riding an expired context token cannot be delivered by this
-        // server (issue #9). Park it with a reason instead of retrying a
-        // guaranteed failure — the operator sees why in /outbox and can decide.
+        // A reply riding an expired context token can no longer be routed by it
+        // — iLink answers `prepare failed` (issue #9/#21). The text is still
+        // worth delivering, so drop the token and fall through to the tokenless
+        // path (the account's typing ticket, or the bare conversation route).
+        // Only an item that is ALSO out of retries is a genuine dead letter, and
+        // `prune()` has already removed those above.
         if (tokenExpired(item, at)) {
-          item.attempts = MAX_ATTEMPTS
-          item.lastError = 'context token expired (iLink accepts a reply for ten minutes after the message arrives)'
-          remaining.push(item)
-          blocked = false
-          continue
+          delete item.contextToken
+          item.lastError = 'context token expired; retrying without it'
         }
         if (item.attempts >= MAX_ATTEMPTS) {
           remaining.push(item)
@@ -231,7 +257,7 @@ export function createOutbox({ stateRoot, transportFor, warn = () => {}, log = (
     timer = undefined
   }
 
-  return { enqueue, flush, pending, drop, start, stop }
+  return { enqueue, flush, pending, drop, prune, start, stop }
 }
 
 /**

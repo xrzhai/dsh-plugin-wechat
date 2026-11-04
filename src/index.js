@@ -46,7 +46,7 @@ import { DEFAULT_RETENTION, SWEEP_INTERVAL_MS, describeSweep, directoryUsage, en
 import { DEFAULT_KEEP, createBackup } from './backup.js'
 import { DEFAULT_DIGEST_WHEN, DEFAULT_REVIEW_WHEN, ReportScheduler, buildDigestPrompt, buildReviewPrompt, describeReport, pickConversation } from './message/reports.js'
 import { HEARTBEAT_MS, acquireInstanceLock, heartbeatInstanceLock, releaseInstanceLock } from './instance-lock.js'
-import { createOutbox, formatOutbox } from './message/outbox.js'
+import { createOutbox, formatOutbox, CONTEXT_TOKEN_TTL_MS } from './message/outbox.js'
 import { configureOutbound, sendChunked, sendProducedFiles, sleep } from './outbound.js'
 import { channelFor } from './channel.js'
 import { HOOK_POINTS, createHooks } from './hooks.js'
@@ -2599,6 +2599,27 @@ function createInboundHandler({ config, accountId, transport, bridge, memorySumm
       }
     }
     const journaledAt = Date.now()
+    // iLink only honours an inbound `context_token` for about ten minutes after
+    // the message arrives (issue #9); reusing it past that is answered with
+    // `prepare failed`. A long turn, its progress notes and its final reply can
+    // all outlive the window, which is exactly how they used to fall into the
+    // durable outbox and die there (issue #21). `sendToken()` hands back the
+    // inbound token while it is still safe and, once it is past the TTL, asks
+    // the transport to refresh its typing ticket and returns `undefined` so the
+    // send rides the no-token fallback path instead of a dead token.
+    let tokenRefreshed = false
+    const sendToken = async () => {
+      const token = message.contextToken
+      if (typeof token !== 'string' || token === '') return token
+      if (Date.now() - journaledAt < CONTEXT_TOKEN_TTL_MS) return token
+      if (!tokenRefreshed) {
+        tokenRefreshed = true
+        try {
+          await transport.refreshConfig()
+        } catch {}
+      }
+      return undefined
+    }
     // Before anything reads the config for this message: layer the
     // conversation's overrides (if any) onto the account config.
     applyScope(message.conversationId)
@@ -3105,10 +3126,14 @@ ${neutralizeTags(ocr.text)}
         senderId: message.senderId,
         busyMessageMode: effectiveConfig.current.busyMessageMode,
         onProgress: async (note) => {
+          // Ephemeral: a "still working" line is meaningful only right now, so
+          // a failed send is dropped rather than queued (issue #21). `sendToken`
+          // keeps even a late note deliverable on the tokenless path.
           await sendChunked(transport, config, {
             conversationId: message.conversationId,
             text: `（${note}）`,
-            contextToken: message.contextToken,
+            contextToken: await sendToken(),
+            durable: false,
           })
         },
         onSpontaneousReply: async ({ conversationId: targetConvId, text: spontaneousText }) => {
@@ -3144,7 +3169,8 @@ ${neutralizeTags(ocr.text)}
             await sendChunked(transport, config, {
               conversationId: message.conversationId,
               text: '（这条消息处理时间较长，先回复别的消息不影响它；结果出来后会直接发到这里）',
-              contextToken: message.contextToken,
+              contextToken: await sendToken(),
+              durable: false,
             })
             return
           }
@@ -3199,6 +3225,10 @@ ${neutralizeTags(ocr.text)}
       }
       // Media first, text second: the send already degrades to text when an
       // upload fails, and everything the user is about to see is decided here.
+      // A turn can settle minutes after it began; if its inbound token is past
+      // the safe window, `sendToken()` refreshes the typing ticket and this
+      // reply rides the tokenless path instead of failing into the outbox.
+      const replyToken = await sendToken()
       const outbound = await resolveOutboundReply({
         config,
         transport,
@@ -3206,14 +3236,14 @@ ${neutralizeTags(ocr.text)}
         stateRoot,
         reply: reply.text,
         conversationId: message.conversationId,
-        contextToken: message.contextToken,
+        contextToken: replyToken,
         warn,
         fileLog,
       })
       await sendChunked(transport, config, {
         conversationId: message.conversationId,
         text: outbound.text,
-        contextToken: message.contextToken,
+        contextToken: replyToken,
       })
       await sendProducedFiles({
         config,
@@ -3222,7 +3252,7 @@ ${neutralizeTags(ocr.text)}
         sinceMs: startedAt,
         alreadySent: outbound.sent,
         conversationId: message.conversationId,
-        contextToken: message.contextToken,
+        contextToken: replyToken,
         warn,
         fileLog,
       })
@@ -3231,7 +3261,7 @@ ${neutralizeTags(ocr.text)}
       await sendChunked(transport, config, {
         conversationId: message.conversationId,
         text: `（处理失败：${String(error)}）`,
-        contextToken: message.contextToken,
+        contextToken: await sendToken(),
       })
     } finally {
       if (config.typingIndicator) await transport.setTyping(false, message.conversationId)

@@ -97,7 +97,9 @@ export async function sendProducedFiles(params) {
  *
  * @param {ILinkTransport} transport
  * @param {{ maxMessageLength: number, markdownMode?: 'strip'|'off', richContent?: boolean, codeFileThreshold?: number }} config
- * @param {{ conversationId: string, text: string, contextToken?: string }} message
+ * @param {{ conversationId: string, text: string, contextToken?: string, durable?: boolean }} message
+ *   `durable: false` marks a transient note (progress, timeout notice): if it
+ *   fails it is dropped, never queued. Everything else defaults to durable.
  */
 export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -142,6 +144,22 @@ export async function sendChunked(transport, config, message) {
       // failing chunk is queued together with the rest, so a reply does not
       // arrive half-delivered out of order later on.
       const pending = chunks.slice(index).join('')
+      // Ephemeral sends (progress notes, "still working" lines) must never
+      // become durable dead letters: a "running: pwsh (13m)" note retried an
+      // hour later is noise at best, and it rides an inbound context token that
+      // iLink has long since stopped accepting (issue #21). `durable: false`
+      // turns a failed ephemeral send into one logged drop instead of a row in
+      // outbox.json that can never be delivered.
+      if (message.durable === false) {
+        runtime.hooks?.emit(HOOK_POINTS.outboundSettled, {
+          accountId: transport.accountId,
+          conversationId: message.conversationId,
+          sent: false,
+          dropped: pending.length,
+        })
+        runtime.warn(`ephemeral send failed (${String(error?.message ?? error)}); dropped ${pending.length} chars`)
+        return
+      }
       if (runtime.outbox !== undefined) {
         runtime.outbox.enqueue({ accountId: transport.accountId, conversationId: message.conversationId, text: pending, contextToken: message.contextToken })
         runtime.hooks?.emit(HOOK_POINTS.outboundSettled, { accountId: transport.accountId, conversationId: message.conversationId, sent: false, queued: pending.length })
