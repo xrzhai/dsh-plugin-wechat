@@ -12,7 +12,7 @@
 //   channel.capabilities            { text, media, typing, voice, stickers }
 //   channel.accountId               the account this channel speaks for
 //   channel.sendText({ conversationId, text, contextToken })
-//   channel.sendMedia({ conversationId, filePath, text, contextToken, cdnBaseUrl })
+//   channel.sendMedia({ conversationId, filePath, text, contextToken, cdnBaseUrl, maxBytes })
 //   channel.setTyping(active, conversationId)
 //
 // Anything a channel cannot do is announced through `capabilities` instead of
@@ -47,8 +47,9 @@ export function createChannel(transport) {
     transport,
     sendText: ({ conversationId, text, contextToken }) =>
       transport.send({ conversationId, type: 'text', text, contextToken }),
-    sendMedia: ({ conversationId, filePath, text = '', contextToken, cdnBaseUrl }) =>
-      transport.sendMedia({ conversationId, filePath, text, contextToken, cdnBaseUrl }),
+    sendMedia: ({ conversationId, filePath, text = '', contextToken, cdnBaseUrl, maxBytes }) =>
+      transport.sendMedia({ conversationId, filePath, text, contextToken, cdnBaseUrl,
+        ...(maxBytes === undefined ? {} : { maxBytes }) }),
     setTyping: (active, conversationId) => transport.setTyping(active, conversationId),
   };
 }
@@ -76,3 +77,4 @@ export function channelFor(transport) {
 export function canSendText(channel) {
   return channel !== undefined && channel.capabilities?.text === true;
 }
+

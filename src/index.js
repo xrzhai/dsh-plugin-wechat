@@ -47,6 +47,7 @@ import { DEFAULT_KEEP, createBackup } from './backup.js'
 import { DEFAULT_DIGEST_WHEN, DEFAULT_REVIEW_WHEN, ReportScheduler, buildDigestPrompt, buildReviewPrompt, describeReport, pickConversation } from './message/reports.js'
 import { HEARTBEAT_MS, acquireInstanceLock, heartbeatInstanceLock, releaseInstanceLock } from './instance-lock.js'
 import { createOutbox, formatOutbox, CONTEXT_TOKEN_TTL_MS } from './message/outbox.js'
+import { createGatewayControl } from './gateway-control.js'
 import { configureOutbound, sendChunked, sendProducedFiles, sleep } from './outbound.js'
 import { channelFor } from './channel.js'
 import { HOOK_POINTS, createHooks } from './hooks.js'
@@ -518,9 +519,13 @@ export function apply(ctx, config) {
   // they survive a reinstall of the package. They fill in what the composition
   // did not set; an explicit value in the profile YAML still wins, because the
   // YAML is the live decision and an overlay must not make it lie.
-  config = withSavedConfig(config ?? {})
+  const baseConfig = config ?? {}
+  config = withSavedConfig(baseConfig)
+  // Keep the composition separately: resetting a saved switch must not fall
+  // back to the overlay value captured when the plugin first loaded.
+  const gatewayEnabled = () => withSavedConfig(baseConfig).enabled !== false
 
-  const disabled = config.enabled === false
+  const disabled = !gatewayEnabled()
   if (disabled) {
     // Deliberately NOT an early return. The settings card is the only way to
     // turn the plugin back on, and it reads its own options from the
@@ -583,7 +588,7 @@ export function apply(ctx, config) {
   // by hand while DSH is running, is reflected without a reload.
   let configController
   try {
-    configController = new ConfigController(ctx, { config })
+    configController = new ConfigController(ctx, { config: baseConfig })
   } catch (error) {
     warn(`settings config service unavailable: ${String(error)}`)
     configController = undefined
@@ -1364,6 +1369,9 @@ export function apply(ctx, config) {
       contactRefreshTimer.unref?.()
 
     })()
+    // A disabled gateway has no startLoop awaiting setup, but setup failures
+    // still need an observer and disposal must wait for its resources.
+    void setup.catch((error) => warn(`gateway setup failed: ${String(error)}`))
 
     // Bring the loop up for one account (or every account on disk), replacing a
     // transport that is already running for it. Called for every account when
@@ -1379,7 +1387,7 @@ export function apply(ctx, config) {
     // and why a per-account failure only skips that account.
     const bringUpLoop = async (wantedAccountId, { force = false } = {}) => {
       await setup
-      if (cancelled) return
+      if (!gateway.enabled()) return
 
       const accounts = await resolveAccounts(config, wantedAccountId, warn)
       if (accounts.length === 0) {
@@ -1408,6 +1416,11 @@ export function apply(ctx, config) {
      * with the list it read when it came up.
      */
     const bringUpAccount = async (account, { force = false } = {}) => {
+      const canStart = gateway.checkpoint(account.accountId)
+      // The old transport sends notifyStop after its admitted turns finish.
+      // A new notifyStart must not overtake that final stop handshake.
+      await gateway.whenStopped(account.accountId)
+      if (!canStart()) return
       const running = transports.get(account.accountId)
       // Nothing to do when the running loop already holds this credential: a
       // repeat call must not blink the connection, and the first call after a
@@ -1490,7 +1503,7 @@ export function apply(ctx, config) {
       // The typing ticket doubles as the fallback context token for replies
       // that arrive without one; refreshing it once per loop start is enough.
       await next.refreshConfig()
-      if (cancelled) return
+      if (!canStart()) return
 
       // iLink can redeliver a message after a reconnect; the cache is bounded
       // so a long-running bot does not grow without limit.
@@ -1539,7 +1552,15 @@ export function apply(ctx, config) {
       }
       // The transport already isolates per-message failures, so no extra catch
       // here: an error must not be reported twice or swallowed twice.
-      await next.start(handler)
+      if (!canStart()) {
+        if (transports.get(account.accountId) === next) gateway.stopAccount(account.accountId)
+        return
+      }
+      await next.start(gateway.wrapInbound(account.accountId, handler))
+      if (!canStart()) {
+        if (transports.get(account.accountId) === next) gateway.stopAccount(account.accountId)
+        return
+      }
       log(`listening as account ${account.accountId} (state: ${stateRoot})`)
     }
 
@@ -1558,6 +1579,17 @@ export function apply(ctx, config) {
       return run
     }
 
+    const gateway = createGatewayControl({
+      isEnabled: gatewayEnabled,
+      isPaused: isAccountPaused,
+      isDisposed: () => cancelled,
+      transports,
+      startLoop,
+      warn,
+    })
+    const onConfigChanged = () => gateway.sync()
+    if (configController !== undefined) configController.onConfigChanged = onConfigChanged
+
     // A completed login writes a credential this loop has not read yet. Coming
     // up now is the whole difference between "scan, then reload DSH" and
     // "scan" — the operator has already been told the phone shows bound, and
@@ -1569,7 +1601,7 @@ export function apply(ctx, config) {
       // `enabled` is the operator's switch, and a login is not a re-enabling
       // action. The credential is still saved, so turning the plugin back on
       // picks it up without a second scan.
-      if (disabled) {
+      if (!gateway.enabled()) {
         log('a login completed while the plugin is disabled; not starting the loop')
         return
       }
@@ -1586,12 +1618,9 @@ export function apply(ctx, config) {
       const id = typeof accountId === 'string' ? accountId.trim() : ''
       if (id === '') return
       if (isAccountPaused(id)) {
-        const running = transports.get(id)
-        if (running === undefined) return
-        transports.delete(id)
-        running.stop().catch((error) => warn(`pause stop failed for ${id}: ${String(error)}`))
+        gateway.stopAccount(id)
         log(`account ${id} paused; its inbound loop is stopped`)
-      } else if (!disabled) {
+      } else if (gateway.enabled()) {
         // Forced: the resume may also follow an allowlist change (the card's
         // allowlist method lands here), and the handler resolves that list once
         // per bring-up — a same-credential resume must still rebuild it.
@@ -1600,10 +1629,12 @@ export function apply(ctx, config) {
     }
     if (loginController !== undefined) loginController.onAccountControlChange = onAccountControlChange
 
-    const started = disabled ? Promise.resolve() : startLoop()
+    const started = gateway.sync().catch((error) => warn(`startup failed: ${String(error)}`))
 
     return async () => {
       cancelled = true
+      await gateway.sync()
+      await setup.catch(() => {})
       reportScheduler?.stop()
       reminderScheduler?.stop()
       subscriptionScheduler?.stop()
@@ -1628,6 +1659,9 @@ export function apply(ctx, config) {
       if (loginController !== undefined && loginController.onAccountControlChange === onAccountControlChange) {
         loginController.onAccountControlChange = undefined
       }
+      if (configController !== undefined && configController.onConfigChanged === onConfigChanged) {
+        configController.onConfigChanged = undefined
+      }
       await started.catch((error) => warn(`startup failed: ${String(error)}`))
       await handoff.catch(() => {})
       // Every account gets its own stop, and one failure must not skip the
@@ -1637,6 +1671,7 @@ export function apply(ctx, config) {
         transports.delete(id)
         await t.stop().catch((error) => warn(`transport stop failed for ${id}: ${String(error)}`))
       }
+      await gateway.drain()
       // Before the agent bridge: a transcription in flight is failed through the
       // ASR disposer, so the inbound handler stops waiting on it promptly.
       await asrBridge?.dispose().catch((error) => warn(`asr teardown failed: ${String(error)}`))
@@ -3194,6 +3229,7 @@ ${neutralizeTags(ocr.text)}
           await sendProducedFiles({
             config,
             transport,
+            mediaDirs,
             agentCwd,
             sinceMs: startedAt,
             alreadySent: outbound.sent,
@@ -3248,6 +3284,7 @@ ${neutralizeTags(ocr.text)}
       await sendProducedFiles({
         config,
         transport,
+        mediaDirs,
         agentCwd,
         sinceMs: startedAt,
         alreadySent: outbound.sent,
@@ -3347,4 +3384,5 @@ export async function resolveOutboundReply(params) {
     return { text, sent: [] }
   }
 }
+
 

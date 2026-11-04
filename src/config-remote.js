@@ -51,8 +51,8 @@ export const FIELDS = [
         default: true,
         label: "启用微信网关",
         labelEn: "Enabled",
-        hint: "关闭后不再启动微信长轮询。",
-        hintEn: "When off, the WeChat long-poll does not start.",
+        hint: "保存后立即停止或启动长轮询；关闭后拒绝新消息，已开始的回合仍可完成并回复。",
+        hintEn: "Saving starts or stops polling immediately. New messages are refused while off; admitted turns may finish and reply.",
       },
       {
         path: "cwd",
@@ -441,6 +441,7 @@ export class ConfigController extends TypertRemoteService {
       deletePath(next, cleared)
     }
     writeSavedConfig(next)
+    await this.onConfigChanged?.()
     return this.list()
   }
 
@@ -466,6 +467,7 @@ export class ConfigController extends TypertRemoteService {
       deletePath(next, field.path)
     }
     writeSavedConfig(next)
+    await this.onConfigChanged?.()
     return this.list()
   }
 
@@ -561,3 +563,4 @@ function writeSavedConfig(config) {
 }
 
 remoteMethods(ConfigController, ['list', 'save', 'reset'])
+

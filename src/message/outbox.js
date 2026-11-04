@@ -155,13 +155,23 @@ export function createOutbox({ stateRoot, transportFor, warn = () => {}, log = (
     return before - store.items.length
   }
 
+  // Merge only the attempted entry into the latest durable queue. Never put
+  // back an entry dropped (or evicted by MAX_ITEMS) while its send was pending.
+  const updateItem = (item) => {
+    const store = readOutbox(stateRoot, { warn })
+    const index = store.items.findIndex((entry) => entry.id === item.id)
+    if (index === -1) return
+    store.items[index] = item
+    save(store)
+  }
+
   /**
    * Try to deliver everything that is due. Items stay in order per conversation.
    *
    * @param {{ force?: boolean }} [options] force ignores notBefore (manual retry)
    * @returns {Promise<{ sent: number, failed: number, remaining: number }>}
    */
-  const flush = async (options = {}) => {
+  const runFlush = async (options = {}) => {
     // Clear the parked dead letters first: they are the residue of the old
     // "retry an expired token until it parks" behaviour, and nothing below can
     // ever send them.
@@ -169,7 +179,6 @@ export function createOutbox({ stateRoot, transportFor, warn = () => {}, log = (
     const store = readOutbox(stateRoot, { warn })
     if (store.items.length === 0) return { sent: 0, failed: 0, remaining: 0 }
     const at = now()
-    const remaining = []
     let sent = 0
     let failed = 0
     // Grouped by conversation so one conversation's stuck item does not let the
@@ -182,11 +191,12 @@ export function createOutbox({ stateRoot, transportFor, warn = () => {}, log = (
     }
     for (const queue of byConversation.values()) {
       let blocked = false
-      for (const item of queue) {
-        if (blocked) {
-          remaining.push(item)
-          continue
-        }
+      for (const candidate of queue) {
+        if (blocked) continue
+        // A previous send yielded to enqueue/drop/prune. Only send entries that
+        // still exist; the snapshot determines this pass's order, not its state.
+        const item = readOutbox(stateRoot, { warn }).items.find((entry) => entry.id === candidate.id)
+        if (item === undefined) continue
         // A reply riding an expired context token can no longer be routed by it
         // — iLink answers `prepare failed` (issue #9/#21). The text is still
         // worth delivering, so drop the token and fall through to the tokenless
@@ -198,39 +208,52 @@ export function createOutbox({ stateRoot, transportFor, warn = () => {}, log = (
           item.lastError = 'context token expired; retrying without it'
         }
         if (item.attempts >= MAX_ATTEMPTS) {
-          remaining.push(item)
+          updateItem(item)
           blocked = false
           continue
         }
         if (options.force !== true && Number(item.notBefore ?? 0) > at) {
-          remaining.push(item)
+          updateItem(item)
           blocked = true
           continue
         }
         const transport = transportFor(item.accountId)
         if (transport === undefined) {
           item.lastError = 'no live transport'
-          remaining.push(item)
+          updateItem(item)
           blocked = true
           continue
         }
         try {
           await transport.send({ conversationId: item.conversationId, type: 'text', text: item.text, contextToken: item.contextToken })
+          drop(item.id)
           sent += 1
         } catch (error) {
           item.attempts = Number(item.attempts ?? 0) + 1
           item.lastError = String(error?.message ?? error)
           item.notBefore = at + retryDelayMs(item.attempts)
-          remaining.push(item)
+          updateItem(item)
           failed += 1
           blocked = true
         }
       }
     }
-    store.items = remaining
-    save(store)
-    if (sent > 0) log(`outbox: delivered ${sent} queued message(s), ${remaining.length} still waiting`)
-    return { sent, failed, remaining: remaining.length }
+    const remaining = readOutbox(stateRoot, { warn }).items.length
+    if (sent > 0) log(`outbox: delivered ${sent} queued message(s), ${remaining} still waiting`)
+    return { sent, failed, remaining }
+  }
+
+  // Timer and manual retries join the same pass, rather than sending its
+  // snapshot twice. The first caller's force option applies; new entries are
+  // left for the next pass. Defer execution until the guard is installed, even
+  // when transportFor/send synchronously re-enters flush.
+  let inFlight
+  const flush = (options = {}) => {
+    if (inFlight !== undefined) return inFlight
+    inFlight = Promise.resolve().then(() => runFlush(options)).finally(() => {
+      inFlight = undefined
+    })
+    return inFlight
   }
 
   /** @returns {any[]} the parked items, oldest first */
@@ -292,3 +315,4 @@ export function stillOnDisk(file) {
     return false
   }
 }
+
