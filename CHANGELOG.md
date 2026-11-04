@@ -1,5 +1,10 @@
 ## 版本
 
+- **1.5.3** —— **修复多回合自发回复覆盖与静默吞没**：
+  - `src/session-reader.js` 增加 `readSettledTurns({ events, afterSeq })`：以回合（turn）为粒度切分和收集已完成的回合，彻底解决单个 poll 周期内多个回合到来时后一回合覆盖前一回合的缺陷。
+  - `src/agent-bridge.js` 的 `#pollSpontaneous()` 遍历每个已 settled 回合按序交付：非静默回复按序触发 `onSpontaneousReply` 并推进游标，`[SILENT]` 心跳静默推进游标，确保 Subagent 汇报结果后紧随其后的静默回合绝不会吞掉先前的真实交付物。
+  - 修复 `readAssistantReply` 在遇见新回合 `turn/start` 时未重置 `text` 与 `settledSeq` 的隐患。
+
 - **1.5.2（待本机微信验证）** —— **队列并发、自动附件校验和实时启停**：
   - outbox 重试按 ID 合并当前持久队列，保留发送等待期间的新消息与丢弃操作；并发 flush 共用一轮发送（#23）。
   - 自动发文件走与显式附件相同的目录、规范路径、空文件和大小校验；不会直接上传越界符号链接目标，并对规范路径去重（#24）。

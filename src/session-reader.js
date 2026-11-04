@@ -18,6 +18,7 @@
 
 /** Durable event types that carry settled assistant output. */
 const SETTLED_TYPES = new Set(['assistant/message', 'assistant/attempt'])
+const TURN_EVENT_TYPES = new Set(['tool/call', 'tool/result', 'turn/end', ...SETTLED_TYPES])
 
 /**
  * Sum the text of every text content block in a settled assistant message.
@@ -87,6 +88,8 @@ export function readAssistantReply({ events, afterSeq = -1 }) {
       case 'turn/start':
         // A new turn invalidates anything collected from the previous one.
         sawTurnBoundary = true
+        text = ''
+        settledSeq = typeof event.seq === 'number' ? event.seq : -1
         pending.clear()
         turnError = undefined
         inTurn = true
@@ -99,10 +102,12 @@ export function readAssistantReply({ events, afterSeq = -1 }) {
         // answer the user immediately instead of waiting out the deadline.
         inTurn = false
         const reason = event.data?.reason
+        if (typeof event.seq === 'number' && event.seq > settledSeq) {
+          settledSeq = event.seq
+        }
         if (reason?.kind === 'error') {
           const message = reason.error?.message
           turnError = typeof message === 'string' && message !== '' ? message : 'unknown error'
-          settledSeq = typeof event.seq === 'number' ? event.seq : settledSeq
           turnSettled = false
         } else {
           turnSettled = true
@@ -140,6 +145,126 @@ export function readAssistantReply({ events, afterSeq = -1 }) {
   }
 
   return { text, settledSeq, pendingTools: [...pending.values()], sawTurnBoundary, turnError, turnSettled }
+}
+
+/**
+ * Read all settled turns after `afterSeq`.
+ *
+ * Splitting by turn boundaries ensures multi-turn streams (e.g. Subagent
+ * completion reporting followed by a silent exit turn) do not overwrite earlier
+ * un-delivered replies before they reach the user.
+ *
+ * @param {object} params
+ * @param {readonly any[]} params.events  `agent.session.snapshotEvents()`.
+ * @param {number} [params.afterSeq]      Ignore events at or below this seq.
+ * @returns {Array<{ text: string, settledSeq: number, pendingTools: string[],
+ *   turnError: (string | undefined), turnSettled: boolean }>}
+ */
+export function readSettledTurns({ events, afterSeq = -1 }) {
+  /** @type {Array<{ text: string, settledSeq: number, pendingTools: string[], turnError: (string | undefined), turnSettled: boolean }>} */
+  const turns = []
+  let current = null
+  let sawTurnBoundary = false
+
+  function initTurn(seq, inTurn = false) {
+    return {
+      text: '',
+      settledSeq: typeof seq === 'number' ? seq : -1,
+      /** @type {Map<string, string>} */
+      pending: new Map(),
+      turnError: undefined,
+      inTurn,
+      turnSettled: false,
+    }
+  }
+
+  for (const event of events ?? []) {
+    if (typeof event?.seq === 'number' && event.seq <= afterSeq) continue
+
+    if (event?.type === 'turn/start') {
+      sawTurnBoundary = true
+      current = initTurn(event.seq, true)
+      continue
+    }
+
+    if (current === null) {
+      if (!TURN_EVENT_TYPES.has(event?.type)) continue
+      current = initTurn(event?.seq, false)
+    }
+
+    if (typeof event?.seq === 'number' && event.seq > current.settledSeq) {
+      current.settledSeq = event.seq
+    }
+
+    switch (event?.type) {
+      case 'turn/end': {
+        current.inTurn = false
+        const reason = event.data?.reason
+        if (reason?.kind === 'error') {
+          const message = reason.error?.message
+          current.turnError = typeof message === 'string' && message !== '' ? message : 'unknown error'
+          current.turnSettled = false
+        } else {
+          current.turnSettled = true
+        }
+        if (typeof event.seq === 'number' && event.seq > current.settledSeq) {
+          current.settledSeq = event.seq
+        }
+        turns.push({
+          text: current.text,
+          settledSeq: current.settledSeq,
+          pendingTools: [...current.pending.values()],
+          turnError: current.turnError,
+          turnSettled: current.turnSettled,
+        })
+        current = null
+        break
+      }
+      case 'tool/call': {
+        const callId = event.data?.callId
+        if (typeof callId === 'string') {
+          current.pending.set(callId, typeof event.data.name === 'string' ? event.data.name : 'tool')
+        }
+        break
+      }
+      case 'tool/result': {
+        const callId = event.data?.message?.source?.callId
+        if (typeof callId === 'string') current.pending.delete(callId)
+        break
+      }
+      default:
+        if (!SETTLED_TYPES.has(event.type)) break
+        const fromStream = streamText(event.data?.stream)
+        const fromMessage = messageText(event.data?.message)
+        const body = fromStream !== '' ? fromStream : fromMessage
+        if (body !== '') {
+          current.text = body
+          if (typeof event.seq === 'number' && event.seq > current.settledSeq) {
+            current.settledSeq = event.seq
+          }
+        }
+        break
+    }
+  }
+
+  if (
+    !sawTurnBoundary &&
+    current !== null &&
+    current.text !== '' &&
+    current.pending.size === 0 &&
+    current.turnError === undefined &&
+    !current.inTurn
+  ) {
+    turns.push({
+      text: current.text,
+      settledSeq: current.settledSeq,
+      pendingTools: [],
+      turnError: undefined,
+      turnSettled: true,
+    })
+  }
+
+  return turns
 }
 
 /**

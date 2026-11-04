@@ -20,7 +20,7 @@
  * @module dsh-weixin/agent-bridge
  */
 import { createHash } from 'node:crypto'
-import { readAssistantReply, describePending } from './session-reader.js'
+import { readAssistantReply, readSettledTurns, describePending } from './session-reader.js'
 import { baseSessionIdFor, scopedLineKey, SessionLines, runSessionCommand } from './sessions.js'
 
 /**
@@ -1244,16 +1244,23 @@ export class AgentBridge {
 
       const afterSeq = record.lastDeliveredSeq ?? -1
       this.#auditEvents(record, events, afterSeq)
-      const reply = readAssistantReply({ events, afterSeq })
-      if (reply.turnError !== undefined) {
-        record.lastDeliveredSeq = Math.max(afterSeq, this.#lastSeq(record.agent))
-        continue
-      }
-      if (reply.text !== '' && reply.turnSettled && reply.pendingTools.length === 0) {
-        record.lastDeliveredSeq = Math.max(afterSeq, this.#lastSeq(record.agent))
-        const trimmedReply = reply.text.trim()
+      const turns = readSettledTurns({ events, afterSeq })
+      for (const turn of turns) {
+        if (turn.turnError !== undefined) {
+          record.lastDeliveredSeq = Math.max(record.lastDeliveredSeq ?? -1, turn.settledSeq)
+          continue
+        }
+        if (!turn.turnSettled || turn.pendingTools?.length > 0) {
+          continue
+        }
+        const trimmedReply = turn.text.trim()
+        if (trimmedReply === '') {
+          record.lastDeliveredSeq = Math.max(record.lastDeliveredSeq ?? -1, turn.settledSeq)
+          continue
+        }
         if (/^(?:\[SILENT\]|HEARTBEAT_OK|（已取消）|（静默）)/i.test(trimmedReply)) {
           this.log?.(`spontaneous reply suppressed as silent heartbeat for ${sessionId}`)
+          record.lastDeliveredSeq = Math.max(record.lastDeliveredSeq ?? -1, turn.settledSeq)
           continue
         }
         const handler = record.onSpontaneousReply ?? this.onSpontaneousReply
@@ -1264,16 +1271,25 @@ export class AgentBridge {
               accountId: record.accountId,
               conversationId: record.conversationId,
               sessionId,
-              text: reply.text,
+              text: turn.text,
             })
+            record.lastDeliveredSeq = Math.max(record.lastDeliveredSeq ?? -1, turn.settledSeq)
           } catch (error) {
             this.errLog(`spontaneous reply delivery failed for ${sessionId}: ${String(error)}`)
+            break
           } finally {
             record.spontaneousSending = false
           }
+        } else {
+          record.lastDeliveredSeq = Math.max(record.lastDeliveredSeq ?? -1, turn.settledSeq)
         }
       }
     }
+  }
+
+  /** Test hook to invoke a spontaneous poll pass directly. */
+  async testPollSpontaneous() {
+    await this.#pollSpontaneous()
   }
 
   /** Tear down every session this bridge created. */
