@@ -55,10 +55,14 @@
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-agent": ">=0.1.0-rc.6",
+    "@deepseek-ai/dsh-llm": ">=0.1.0-rc.6",
     "pdfjs-dist": ">=4 <6"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/dsh-agent": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-llm": {
       "optional": true
     },
     "pdfjs-dist": {
