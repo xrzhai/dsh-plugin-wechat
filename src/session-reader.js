@@ -1,0 +1,162 @@
+/**
+ * Read assistant output back out of a DSH agent session.
+ *
+ * Why this exists: DSH 0.1.5 removed the durable `assistant/chunk` event, so a
+ * plugin cannot read a reply by watching chunk events. Text settles in
+ * `assistant/message` (or `assistant/attempt` for a failed attempt), each with
+ * an embedded `stream`; live deltas arrive only as process-local
+ * `agent/assistant-stream` frames and are never durable.
+ *
+ * This reader therefore: (1) waits for the settled event, (2) reassembles text
+ * from the embedded stream, and (3) optionally reports still-pending tool calls
+ * so a WeChat user is not left staring at silence during a long task.
+ *
+ * The stream walk mirrors dsh-better-sidebar's own snapshot reader
+ * (`src/sidechat-core.ts`, `streamTexts` / `messageTexts` / `liveTexts`).
+ * @module dsh-weixin/session-reader
+ */
+
+/** Durable event types that carry settled assistant output. */
+const SETTLED_TYPES = new Set(['assistant/message', 'assistant/attempt'])
+
+/**
+ * Sum the text of every text content block in a settled assistant message.
+ * @param {any} message
+ */
+function messageText(message) {
+  const blocks = message?.content
+  if (!Array.isArray(blocks)) return ''
+  let out = ''
+  for (const block of blocks) {
+    if (block?.type === 'text' && typeof block.text === 'string') out += block.text
+  }
+  return out
+}
+
+/**
+ * Reassemble text from an embedded stream record.
+ *
+ * Two shapes occur in practice:
+ *  - `{ type: 'text-chunks' | 'reasoning-chunks', texts: string[] }`
+ *  - `{ type: 'chunk', chunk: { type: 'text-delta', text } }`
+ * Only `text-*` kinds contribute: reasoning is deliberately not sent to WeChat.
+ * @param {any} stream
+ */
+export function streamText(stream) {
+  if (!Array.isArray(stream)) return ''
+  let out = ''
+  for (const entry of stream) {
+    if (entry?.type === 'text-chunks' && Array.isArray(entry.texts)) {
+      out += entry.texts.join('')
+    } else if (entry?.type === 'chunk') {
+      const chunk = entry.chunk
+      if (chunk?.type === 'text-delta' && typeof chunk.text === 'string') out += chunk.text
+    }
+  }
+  return out
+}
+
+/**
+ * Read the latest settled assistant reply plus in-flight tool activity.
+ *
+ * @param {object} params
+ * @param {readonly any[]} params.events  `agent.session.snapshotEvents()`.
+ * @param {number} [params.afterSeq]      Ignore events at or below this seq, so a
+ *   reply is never re-sent when the same conversation continues.
+ * @returns {{ text: string, settledSeq: number, pendingTools: string[], sawTurnBoundary: boolean,
+ *   turnError: (string | undefined), turnSettled: boolean }} `turnError` is set when the turn ended
+ *   in an error (`turn/end` with `reason.kind === 'error'`, e.g. a model
+ *   provider failure). A failed turn carries NO assistant text — the attempts
+ *   hold only usage/finish chunks — so without surfacing this the caller spins
+ *   for the whole wait budget while holding the conversation's busy lock, and
+ *   the user's next message queues behind a turn that can never answer.
+ */
+export function readAssistantReply({ events, afterSeq = -1 }) {
+  let text = ''
+  let settledSeq = -1
+  let sawTurnBoundary = false
+  let turnError
+  let inTurn = false
+  let turnSettled = false
+  /** @type {Map<string, string>} */
+  const pending = new Map()
+
+  for (const event of events ?? []) {
+    if (typeof event?.seq === 'number' && event.seq <= afterSeq) continue
+    switch (event?.type) {
+      case 'turn/start':
+        // A new turn invalidates anything collected from the previous one.
+        sawTurnBoundary = true
+        pending.clear()
+        turnError = undefined
+        inTurn = true
+        turnSettled = false
+        break
+      case 'turn/end': {
+        // The terminal event of every turn. `reason.kind === 'completed'`
+        // means the answer arrived as assistant/message; `error` means the
+        // turn is over and NO reply is coming — surface it so the caller can
+        // answer the user immediately instead of waiting out the deadline.
+        inTurn = false
+        const reason = event.data?.reason
+        if (reason?.kind === 'error') {
+          const message = reason.error?.message
+          turnError = typeof message === 'string' && message !== '' ? message : 'unknown error'
+          settledSeq = typeof event.seq === 'number' ? event.seq : settledSeq
+          turnSettled = false
+        } else {
+          turnSettled = true
+        }
+        break
+      }
+      case 'tool/call': {
+        const callId = event.data?.callId
+        if (typeof callId === 'string') {
+          pending.set(callId, typeof event.data.name === 'string' ? event.data.name : 'tool')
+        }
+        break
+      }
+      case 'tool/result': {
+        const callId = event.data?.message?.source?.callId
+        if (typeof callId === 'string') pending.delete(callId)
+        break
+      }
+      default:
+        if (!SETTLED_TYPES.has(event.type)) break
+        // Prefer the embedded stream when present; fall back to the message body.
+        const fromStream = streamText(event.data?.stream)
+        const fromMessage = messageText(event.data?.message)
+        const body = fromStream !== '' ? fromStream : fromMessage
+        if (body !== '') {
+          text = body
+          settledSeq = typeof event.seq === 'number' ? event.seq : settledSeq
+        }
+        break
+    }
+  }
+
+  if (!sawTurnBoundary && text !== '' && pending.size === 0 && turnError === undefined && !inTurn) {
+    turnSettled = true
+  }
+
+  return { text, settledSeq, pendingTools: [...pending.values()], sawTurnBoundary, turnError, turnSettled }
+}
+
+/**
+ * Build a short progress line for a turn that has not settled yet.
+ *
+ * The elapsed time is part of the line because "still thinking" says nothing
+ * about whether the turn is stuck; "已 42 秒" does. It is also what makes a
+ * changed-tool re-announcement distinguishable from a repeat (C16).
+ *
+ * @param {readonly string[]} pendingTools
+ * @param {number} [elapsedMs] how long the turn has been running
+ */
+export function describePending(pendingTools, elapsedMs = 0) {
+  const seconds = Math.max(0, Math.round(Number(elapsedMs) / 1000))
+  const clock = seconds >= 60 ? `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, '0')}s` : `${seconds}s`
+  if (pendingTools.length === 0) return `thinking… (${clock})`
+  const shown = pendingTools.slice(0, 3).join(', ')
+  const more = pendingTools.length > 3 ? ` +${pendingTools.length - 3}` : ''
+  return `running: ${shown}${more} (${clock})`
+}

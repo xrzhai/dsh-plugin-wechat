@@ -1,0 +1,1297 @@
+/**
+ * Bind one Weixin conversation to one DSH agent session.
+ *
+ * The pattern is the one dsh-better-sidebar's sidechat proves works
+ * (`src/sidechat-routes.ts`): create an agent through the `agents` service with
+ * a chosen session id, admit each user message with `agent.followup(...)`, and
+ * read the reply out of `agent.session.snapshotEvents()`.
+ *
+ * Differences from sidechat, and why:
+ *  - No seed and no parent session. A WeChat conversation is a top-level
+ *    conversation, not a fork of a GUI thread, so it needs neither
+ *    `isSeeded`/`inheritedEventCount` fork markers nor the inbox `clear()` that
+ *    fences the inherited-inbox replay leak sidechat works around.
+ *  - Preset composition is applied through `agentPresets.resolve/mount` when the
+ *    service is present, so the conversation inherits the deployment's tools and
+ *    system prompt the same way a GUI thread does.
+ *  - Sessions are durable across plugin restarts: the id is derived from the
+ *    Weixin conversation id, so a cold start resumes the recorded session
+ *    instead of opening a fresh one.
+ * @module dsh-weixin/agent-bridge
+ */
+import { createHash } from 'node:crypto'
+import { readAssistantReply, describePending } from './session-reader.js'
+import { baseSessionIdFor, scopedLineKey, SessionLines, runSessionCommand } from './sessions.js'
+
+/**
+ * `@deepseek-ai/dsh-llm` resolves only from inside a DSH profile, so it is
+ * imported lazily: the module itself stays loadable (and testable) outside the
+ * host, and a missing service surfaces as a delivery error rather than a
+ * plugin-load failure.
+ */
+let createUserMessageRef = null
+async function loadCreateUserMessage() {
+  if (createUserMessageRef === null) {
+    const mod = await import('@deepseek-ai/dsh-llm')
+    if (typeof mod.createUserMessage !== 'function') {
+      throw new Error('@deepseek-ai/dsh-llm does not export createUserMessage')
+    }
+    createUserMessageRef = mod.createUserMessage
+  }
+  return createUserMessageRef
+}
+
+/**
+ * Load `installModelSelection`, which couples a mutable provider/model choice to
+ * prompt assembly and request routing.
+ *
+ * Without it an agent created through `agents.create` has no selected route, so
+ * the persona section's `{{model}}` reference never resolves. Returns undefined
+ * (instead of throwing) when the host exposes a different surface, so a version
+ * skew degrades the persona rather than killing the plugin.
+ */
+let installModelSelectionRef
+async function loadInstallModelSelection() {
+  if (installModelSelectionRef === undefined) {
+    try {
+      const mod = await import('@deepseek-ai/dsh-agent')
+      installModelSelectionRef =
+        typeof mod.installModelSelection === 'function' ? mod.installModelSelection : null
+    } catch {
+      installModelSelectionRef = null
+    }
+  }
+  return installModelSelectionRef ?? undefined
+}
+
+/**
+ * Deterministic session id for a Weixin conversation.
+ *
+ * Stable across restarts so the conversation survives a plugin reload, and
+ * prefixed so a session can be recognized as Weixin-owned in the GUI.
+ * Non-alphanumerics are folded to `-` to keep the id filesystem- and
+ * URL-safe.
+ *
+ * This is now the id of a conversation's FIRST session line; see
+ * `src/sessions.js` for why a conversation can have several and why this id
+ * must never change.
+ * @param {string} conversationId
+ */
+export function sessionIdFor(conversationId) {
+  return baseSessionIdFor(conversationId)
+}
+
+/**
+ * Recognize `/steer <instruction>` and return the instruction, or undefined
+ * when the text is not a steer command.
+ *
+ * @param {string} text
+ * @returns {string | undefined}
+ */
+export function parseSteerCommand(text) {
+  const match = /^\s*\/steer(?:\s+([\s\S]+))?\s*$/.exec(String(text ?? ''))
+  if (match === null) return undefined
+  const instruction = (match[1] ?? '').trim()
+  return instruction === '' ? undefined : instruction
+}
+
+/**
+ * @typedef {Object} AgentBridgeOptions
+ * @property {any} ctx            Cordis context of the plugin.
+ * @property {string} [cwd]       Working directory the agent operates in.
+ * @property {(line: string) => void} [log]
+ * @property {(line: string) => void} [errLog]
+ * @property {number} [createTimeoutMs]
+ * @property {number} [progressAfterMs]  Send the first progress line after this long.
+ * @property {number} [progressEveryMs]  Re-send a CHANGED progress line at most
+ *   this often, so a turn that moves from one tool to the next stays visible
+ *   without spamming an unchanged state.
+ * @property {number} [maxWaitMs]        Give up on a turn after this long.
+ * @property {number} [pollMs]           Session-log polling interval.
+ * @property {SessionLines} [lines]      Session-line index. Defaults to the
+ *   on-disk store, so a bridge built without one still supports `/new`.
+ * @property {(entry: { kind: 'tool/call' | 'tool/result', accountId: string,
+ *   conversationId: string, sessionId: string, senderId?: string, tool?: string,
+ *   callId?: string, args?: unknown, ok?: boolean, aborted?: boolean,
+ *   durationMs?: number, at: number }) => void} [onToolAudit] Called once per
+ *   tool event observed during a turn. The plugin wires this to the on-disk
+ *   audit log; tests use it to assert what a turn would have recorded. Absent
+ *   means "no audit", which is the default so a bare bridge writes nothing.
+ *   An `ok:false, aborted:true` result is emitted by the bridge itself for a
+ *   call the host never finished because `/cancel` interrupted the turn.
+ */
+
+export class AgentBridge {
+  #spontaneousTimer
+
+  /** @param {AgentBridgeOptions} options */
+  constructor(options) {
+    this.ctx = options.ctx
+    this.cwd = options.cwd
+    this.log = options.log ?? (() => {})
+    this.errLog = options.errLog ?? options.log ?? (() => {})
+    this.createTimeoutMs = options.createTimeoutMs ?? 30_000
+    this.progressAfterMs = options.progressAfterMs ?? 45_000
+    this.progressEveryMs = options.progressEveryMs ?? 60_000
+    // C16: a turn that is visibly running a tool is worth reporting sooner than
+    // one that is only thinking - the user can see the difference in what they
+    // asked for, and 45s of silence during `npm test` reads as a dead bot.
+    this.progressToolAfterMs = options.progressToolAfterMs ?? 8_000
+    this.maxWaitMs = options.maxWaitMs ?? 20 * 60_000
+    this.pollMs = options.pollMs ?? 1_000
+    // The session event log is an in-memory snapshot; polling it is how a turn
+    // becomes visible. 1000ms is the observable-for-humans cadence, but a
+    // caller that only wants the answer (the tests, and any host callback that
+    // re-reads events) can ask for a tighter loop.
+    this.eventPollMs = Number.isFinite(options.eventPollMs) && options.eventPollMs > 0 ? options.eventPollMs : this.pollMs
+    // The host never pushes: the only way to learn a turn produced an answer is
+    // to look at its event snapshot. At the steady 1000ms cadence that means a
+    // reply that landed 5ms after a poll waits almost a second — on every single
+    // message. So the first moments of a turn are polled tightly and the loop
+    // relaxes to `eventPollMs` after that: an answer typically arrives in a few
+    // hundred ms, while a long tool run costs the same few snapshots as before.
+    this.eventPollFastMs = Number.isFinite(options.eventPollFastMs) && options.eventPollFastMs > 0
+      ? Math.min(options.eventPollFastMs, this.eventPollMs)
+      : Math.min(50, this.eventPollMs)
+    this.eventPollFastWindowMs = Number.isFinite(options.eventPollFastWindowMs) && options.eventPollFastWindowMs >= 0
+      ? options.eventPollFastWindowMs
+      : 400
+    // Session lines: which of a conversation's sessions the next message goes
+    // to. Injectable so tests do not touch the operator's real state root.
+    this.lines = options.lines ?? new SessionLines({ warn: (message) => this.errLog(message) })
+    // Tool audit sink. The bridge owns the event stream (it is the only place
+    // that polls the session log), so it is the only place that can say which
+    // tool ran; where the lines go is the caller's decision.
+    this.onToolAudit = options.onToolAudit
+    // ⑥ Background budget: the caller decides whether a background model call
+    // may run right now, and learns when one actually started. `summarize` is
+    // the single door every background job goes through, so the gate lives
+    // here instead of in six call sites.
+    this.allowBackground = options.allowBackground
+    this.onBackgroundCall = options.onBackgroundCall
+    // 用量账本：每一次真正跑完的模型回合都从这两个入口（deliver / summarize）
+    // 报一次字符数。token 由调用方折算 —— 桥知道「说了什么、回了什么」，不知道
+    // 真实 usage（宿主不给），所以这里只提供素材，不下结论。
+    this.onUsage = options.onUsage
+    // C15: fired for every tool/call the audit scan sees, with the conversation
+    // attached, so the caller can warn the owner in WeChat without parsing the
+    // audit log. Separate from onToolAudit because it must run even when the
+    // audit log is turned off.
+    this.onToolCall = options.onToolCall
+    // C20: the conversation's own route, when the operator pinned one.
+    this.chatRoute = options.chatRoute
+    this.onSpontaneousReply = options.onSpontaneousReply
+    this.getSystemAppend = options.getSystemAppend
+    this.spontaneousPollMs =
+      Number.isFinite(options.spontaneousPollMs) && options.spontaneousPollMs > 0
+        ? options.spontaneousPollMs
+        : 1_500
+    // Conversation id -> the session id its next message must reach. Needed
+    // because `deliver` is handed a session id but must still be able to route
+    // a late reply and, for a brand-new line, share one in-flight creation.
+    /** @type {Map<string, string>} */
+    this.conversationTargets = new Map()
+    // How long the post-timeout listener keeps waiting for an answer to hand
+    // to onLateReply. Configurable so tests do not have to wait an hour.
+    this.lateReplyMaxWaitMs = options.lateReplyMaxWaitMs ?? 60 * 60_000
+    /** @type {Map<string, { agent: any, dispose: () => Promise<void>, busy: boolean, queue: any[], cancelled: boolean }>} */
+    this.sessions = new Map()
+    /**
+     * In-flight attach() creations, so two messages for the same conversation
+     * never build two sessions.
+     * @type {Map<string, Promise<{ agent: any, dispose: () => Promise<void>, busy: boolean, queue: any[], cancelled: boolean }>>}
+     */
+    this.attachPromises = new Map()
+    /**
+     * Memoized Workspace lookup, so the registry is consulted once per plugin
+     * generation rather than on every message.
+     * @type {Promise<any> | undefined}
+     */
+    this.workspacePromise = undefined
+    this.#spontaneousTimer = setInterval(() => {
+      void this.#pollSpontaneous()
+    }, this.spontaneousPollMs)
+    this.#spontaneousTimer.unref?.()
+  }
+
+  #agents() {
+    return this.ctx.get('agents')
+  }
+
+  /**
+   * The session id a conversation's next message must reach.
+   *
+   * Remembers the target so {@link deliver} — which receives a session id, not
+   * a conversation id — can still map back to the conversation for a late reply
+   * and for the first-message title.
+   *
+   * @param {string} conversationId
+   * @param {string} [accountId] owning bot account; bare key when absent
+   * @returns {string}
+   */
+  #activeSessionId(conversationId, accountId) {
+    const key = scopedLineKey(accountId, conversationId)
+    const sessionId = this.lines.active(conversationId, accountId)
+    this.conversationTargets.set(key, sessionId)
+    return sessionId
+  }
+
+  /**
+   * Handle a session-control command (`/new`, `/list`, `/use`).
+   *
+   * Returns the reply text when the message was a command, or undefined when it
+   * was an ordinary message that must go to the agent. The caller sends the
+   * returned text directly, so a control command costs no model turn and no
+   * context: it is answered by the plugin itself.
+   *
+   * @param {string} conversationId
+   * @param {string} [accountId] owning bot account; bare key when absent
+   * @param {string} text
+   * @param {{ accountId?: string, accountLabel?: string | null, paused?: boolean,
+   *   lastSeenAt?: string, allowlist?: { source: 'account' | 'global', senders: string[] } }} [statusContext]
+   *   account-level facts for `/status`, threaded from the inbound handler
+   * @returns {string | undefined}
+   */
+  handleCommand(conversationId, text, accountId, statusContext) {
+    // 命令回复以前是一条字符串，调用方 await 之后就能发出去。现在有了一条会
+    // 回 undefined 的命令（待答问题不在了，`/是` 应当当作普通聊天），此时
+    // bridge 仍然会执行完清理，只是必须让调用方知道「没有回复」而不是把
+    // undefined 当作命令结果吞掉（那会让这句本该进会话的话彻底消失）。
+    // Capture the target BEFORE the command runs: `/clear` replaces the line,
+    // and the id to orphan is the one that was active up to now.
+    const key = scopedLineKey(accountId, conversationId)
+    const previouslyActive = this.conversationTargets.get(key)
+    // `/cancel` needs the live agent handle, which only this class holds; the
+    // command module stays transport-free and just relays the sentence.
+    const reply = runSessionCommand(this.lines, conversationId, text, accountId, {
+      ...statusContext,
+      cancelRunningTurn: () => this.#cancelRunningTurn(key, conversationId, accountId),
+      compactSession: (arg) => this.#compactSession(conversationId, accountId, arg),
+      executeHostCommand: (raw, name) => this.#executeHostCommand(conversationId, accountId, raw, name),
+    })
+    // `undefined` means the command existed but had nothing to say (`/是` with no
+    // pending question): the caller must treat the message as ordinary chat.
+    if (reply === undefined) return undefined
+    // /summary resolves through a side session and answers asynchronously; the
+    // caller that awaits command replies handles the promise, and no async
+    // command can be /clear, so the sync bookkeeping below stays untouched.
+    if (reply instanceof Promise) return reply
+    // `/clear` orphans the line that was active: its session id is no longer
+    // in the list and the fresh line has a different id, so the old in-memory
+    // record must not keep answering (a queued message would otherwise reach a
+    // session the user believes is gone). Disposal is best-effort; the host
+    // transcript stays on disk as an orphan, untouched.
+    if (reply.includes('已清空') && typeof previouslyActive === 'string') {
+      const record = this.sessions.get(previouslyActive)
+      if (record !== undefined) {
+        this.sessions.delete(previouslyActive)
+        void Promise.resolve()
+          .then(() => record.dispose())
+          .catch((error) => this.errLog(`cleared session dispose failed: ${String(error)}`))
+      }
+    }
+    // A command can change which line is active, so the next message must not
+    // reuse a mapping taken before it ran.
+    this.conversationTargets.delete(key)
+    this.log?.(`session command handled for ${conversationId}: ${String(text).trim()}`)
+    return reply
+  }
+
+  /**
+   * Interrupt the turn running on a conversation's active line.
+   *
+   * `/cancel` is answered as a command precisely because it has to work WHILE
+   * the conversation is busy — an ordinary message would be queued behind the
+   * turn the user wants to stop. The host owns the actual abort
+   * (`agent.cancel({ kind: 'user' })`), so this method only decides whether
+   * there is something to interrupt and translates the outcome into one
+   * sentence the user can act on.
+   *
+   * @param {string} key scoped conversation key (account + conversation)
+   * @param {string} conversationId
+   * @param {string} [accountId]
+   * @returns {string} the reply text sent back to WeChat
+   */
+  #cancelRunningTurn(key, conversationId, accountId) {
+    const sessionId = this.conversationTargets.get(key) ?? this.lines.active(conversationId, accountId)
+    const record = sessionId === undefined ? undefined : this.sessions.get(sessionId)
+    if (record === undefined) return '当前没有正在跑的回合，不需要取消。'
+    if (record.busy !== true) return '当前没有正在跑的回合，不需要取消。'
+    const agent = record.agent
+    if (typeof agent?.cancel !== 'function') {
+      // An older host without cancel() would otherwise look like success while
+      // the turn keeps running — say so instead of lying.
+      return '这个宿主版本不支持中断回合，只能等它自己跑完。'
+    }
+    try {
+      // Marked BEFORE the call: the turn's own wait loop polls this flag and
+      // must not race the abort into reporting a model failure.
+      record.cancelled = true
+      agent.cancel({ kind: 'user' })
+    } catch (error) {
+      record.cancelled = false
+      this.errLog(`cancel failed for ${sessionId}: ${String(error)}`)
+      return `取消失败：${String(error)}`
+    }
+    this.log?.(`cancelled the running turn on ${sessionId} for ${conversationId}`)
+    return '已请求取消当前回合。'
+  }
+
+  async #compactSession(conversationId, accountId, arg) {
+    if (String(arg ?? '').trim() !== '') return '用法：/compact（不带参数）'
+    const record = await this.attach(conversationId, accountId)
+    if (record.busy) {
+      return '当前会话正在执行任务，请等本轮回复完成后再执行 /compact。'
+    }
+    try {
+      const commands = this.ctx.get('commands')
+      if (commands && typeof commands.execute === 'function') {
+        const out = await commands.execute(record.agent, '/compact', [], AbortSignal.timeout(120_000))
+        if (out?.result) {
+          record.lastDeliveredSeq = this.#lastSeq(record.agent)
+          return out.result.text ?? (out.result.kind === 'success' ? '上下文已压缩。' : '上下文压缩失败。')
+        }
+      }
+    } catch (error) {
+      this.errLog(`compact command failed for ${conversationId}: ${String(error)}`)
+      return `上下文压缩失败：${String(error?.message ?? error)}`
+    }
+    return '当前宿主环境未挂载 commands/compact 服务（已启用 400k 自动压缩）。'
+  }
+
+  async #executeHostCommand(conversationId, accountId, raw, name) {
+    try {
+      const commands = this.ctx.get('commands')
+      if (commands && typeof commands.execute === 'function') {
+        const record = await this.attach(conversationId, accountId)
+        if (!record.busy) {
+          const out = await commands.execute(record.agent, raw, [], AbortSignal.timeout(60_000))
+          if (out?.result?.text) {
+            record.lastDeliveredSeq = this.#lastSeq(record.agent)
+            return out.result.text
+          }
+        }
+      }
+    } catch (error) {
+      this.errLog(`host command /${name} failed: ${String(error)}`)
+    }
+    return `未知指令：/${name}（发送 /help 查看可用指令）`
+  }
+
+  /**
+   * Session lines recorded for a conversation, for the settings card.
+   * @param {string} conversationId
+   * @param {string} [accountId] owning bot account; bare key when absent
+   */
+  sessionLines(conversationId, accountId) {
+    return this.lines.list(conversationId, accountId)
+  }
+
+  /**
+   * Resolve (creating if needed) the Workspace that owns our conversations.
+   *
+   * A session only appears under a named group in the GUI when some Workspace
+   * lists it in `sessionIds`; otherwise the client files it under "Ungrouped".
+   * Registering the directory is therefore not cosmetic — it is what makes these
+   * conversations findable again.
+   *
+   * Returns undefined when the registry is unavailable, in which case the agent
+   * still runs and the conversation simply shows as ungrouped. Losing the GUI
+   * grouping is a far smaller failure than losing the ability to reply.
+   */
+  async #workspace() {
+    if (this.workspacePromise === undefined) {
+      this.workspacePromise = this.#resolveWorkspace()
+    }
+    return await this.workspacePromise
+  }
+
+  async #resolveWorkspace() {
+    if (this.cwd === undefined) return undefined
+    const registry = this.ctx.get('workspaceRegistry')
+    if (registry?.resolveByPath === undefined) return undefined
+    try {
+      const existing = await registry.resolveByPath(this.cwd)
+      if (existing !== undefined) return existing
+      if (typeof registry.create !== 'function') return undefined
+      return await registry.create(this.cwd)
+    } catch (error) {
+      this.errLog(`could not register the workspace at ${this.cwd}: ${String(error)}`)
+      return undefined
+    }
+  }
+
+  /**
+   * Resolve the route this conversation runs on and the setup that binds it.
+   *
+   * A prompt assembly needs a provider/model pair, and the agent only learns it
+   * from either `agentOptions` or a model-selection listener on the agent context.
+   * Supplying neither leaves `{{model}}` empty and the deployment persona section
+   * throws at the first step — so both are always supplied here.
+   *
+   * `installModelSelection` comes from `@deepseek-ai/dsh-agent`, which resolves
+   * only inside a DSH profile; a profile showing a different shape degrades to
+   * running without the listener rather than failing to load.
+   *
+   * @param {{ provider: string, model: string }} [routeOverride] run this
+   *   session on a different provider/model — what the memory model setting
+   *   uses, so background summarising cannot spend the conversation's model.
+   */
+  async #setup(routeOverride) {
+    // C20: the caller's route (a side session's own model) wins; otherwise the
+    // conversation route this plugin was configured with; otherwise the host's
+    // default. `chatRoute()` returns undefined when nothing is configured, so a
+    // deployment that never touched the setting behaves exactly as before.
+    const route = routeOverride ?? this.chatRoute?.() ?? (await this.#route())
+    const agentOptions =
+      route === undefined
+        ? undefined
+        : {
+            provider: route.provider,
+            model: route.model,
+          }
+    const presets = this.ctx.get('agentPresets')
+    const presetId = await this.#presetId(presets)
+
+    const setup = async (agentCtx) => {
+      if (presetId !== undefined) await presets.mount(agentCtx, presetId)
+      if (route !== undefined) {
+        const install = await loadInstallModelSelection()
+        if (install !== undefined) {
+          install(agentCtx, { current: route, assembled: undefined })
+        }
+      }
+      if (typeof this.getSystemAppend === 'function') {
+        try {
+          const text = this.getSystemAppend()
+          if (typeof text === 'string' && text.trim() !== '' && typeof agentCtx?.systemPrompt?.section === 'function') {
+            if (typeof agentCtx.effect === 'function') {
+              agentCtx.effect(() => agentCtx.systemPrompt.section({ name: 'WEIXIN_PERSONA', order: 85, text }))
+            } else {
+              agentCtx.systemPrompt.section({ name: 'WEIXIN_PERSONA', order: 85, text })
+            }
+          }
+        } catch {
+          // Ignore when systemPrompt is absent on the agent context
+        }
+      }
+    }
+    const hasSetup = presetId !== undefined || route !== undefined || typeof this.getSystemAppend === 'function'
+    return { agentOptions, setup: hasSetup ? setup : undefined }
+  }
+
+  /**
+   * The deployment's default provider/model route, or undefined when the
+   * service is absent (a host that routes some other way).
+   */
+  async #route() {
+    const defaults = this.ctx.get('agentDefaultModel')
+    try {
+      const selection = defaults?.currentSelection?.()
+      if (selection?.provider && selection?.model) return selection
+    } catch (error) {
+      this.errLog(`agentDefaultModel.currentSelection failed: ${String(error)}`)
+    }
+    return undefined
+  }
+
+  /** The preset id this conversation should compose, when presets exist. */
+  async #presetId(presets) {
+    if (!presets?.resolve) return undefined
+    try {
+      const resolved = await presets.resolve(undefined)
+      return resolved?.id
+    } catch (error) {
+      this.errLog(`agentPresets.resolve failed (continuing without a preset): ${String(error)}`)
+      return undefined
+    }
+  }
+
+  /**
+   * Attach (or resume) the agent session backing a Weixin conversation.
+   *
+   * Resolves the conversation's ACTIVE session line, not a fixed id: after
+   * `/new` or `/use`, the next message must reach a different session than the
+   * previous one. The session id is read synchronously before any await, so two
+   * concurrent messages for the same conversation cannot disagree about which
+   * line is active.
+   *
+   * @param {string} conversationId
+   * @param {string} [accountId] owning bot account; bare key when absent
+   * @param {{ sessionId?: string, sideMeta?: { parentSession?: string, origin?: string } }} [options]
+   *   `sessionId` attaches an EXPLICIT session instead of the conversation's
+   *   active line (the memory summarizer's side session); `sideMeta` adds
+   *   header-admitted meta (parentSession/origin) so the side session files
+   *   under its conversation instead of the top level.
+   */
+  async attach(conversationId, accountId, options = {}) {
+    const isSide = Boolean(options.sessionId || options.sideMeta)
+    const sessionId = options.sessionId ?? this.#activeSessionId(conversationId, accountId)
+    const existing = this.sessions.get(sessionId)
+    if (existing !== undefined) {
+      if (!isSide && conversationId) {
+        existing.conversationId = conversationId
+        if (accountId !== undefined) existing.accountId = accountId
+      }
+      return existing
+    }
+
+    // Two messages for the same conversation can race here: the first
+    // deliver() is still inside the awaits below (its record is not in the
+    // map yet), so a second attach() would create a second session for the
+    // same id and both would run unserialized. Memoize the in-flight
+    // creation so concurrent attaches share one record.
+    const inflight = this.attachPromises.get(sessionId)
+    if (inflight !== undefined) return inflight
+
+    const creation = this.#attachNew(sessionId, options.sideMeta, options.route)
+    this.attachPromises.set(sessionId, creation)
+    try {
+      const record = await creation
+      if (!isSide && conversationId) {
+        record.conversationId = conversationId
+        if (accountId !== undefined) record.accountId = accountId
+      }
+      return record
+    } finally {
+      this.attachPromises.delete(sessionId)
+    }
+  }
+
+  async #attachNew(sessionId, sideMeta, route) {
+    const agents = this.#agents()
+    if (agents === undefined) throw new Error('the agents service is unavailable')
+
+    const { agentOptions, setup } = await this.#setup(route)
+    /** @type {{ agent: any, dispose: () => Promise<void> }} */
+    let handle
+    /** Created here rather than adopted, so {@link #create} already filed it. */
+    let created = false
+    const live = agents.get?.(sessionId)
+    if (live !== undefined) {
+      handle = { agent: live, dispose: async () => {} }
+    } else if (typeof agents.resume === 'function') {
+      // Cold start: the session was persisted by a previous run.
+      try {
+        handle = await agents.resume({
+          resumeSessionId: sessionId,
+          setup,
+          ...(agentOptions === undefined ? {} : { agentOptions }),
+        })
+      } catch {
+        handle = await this.#create(sessionId, setup, agentOptions, sideMeta)
+        created = true
+      }
+    } else {
+      handle = await this.#create(sessionId, setup, agentOptions, sideMeta)
+      created = true
+    }
+
+    // A stale record from a previous plugin generation can leave its inbox
+    // holding unclaimed input; clearing it fences the same replay leak
+    // sidechat documents (queued input claimed before our first prompt).
+    try {
+      handle.agent.inbox?.clear?.()
+    } catch {
+      // Not fatal: the worst case is one stale message in the first turn.
+    }
+
+    // An archived session cannot run a single step: the host's
+    // ArchivedSessionGate rejects every pre-step, so a turn ends `blocked`
+    // 25ms after it starts — the message was received, typing was shown, and
+    // no reply ever came (observed 2026-10-15). The archive set is GUI state
+    // (workspace.json), not anything this plugin writes, so an archive made
+    // from the GUI would otherwise silently kill the WeChat bot forever.
+    // Lifting it here keeps the conversation reachable; a user who truly wants
+    // it gone can log the bot out instead.
+    try {
+      const registry = this.ctx.get('workspaceRegistry')
+      const archived = registry?.archivedSessionIds
+      if (Array.isArray(archived) && archived.includes(sessionId) && typeof registry.unarchiveSession === 'function') {
+        await registry.unarchiveSession(sessionId)
+        this.log?.(`session ${sessionId} was archived; unarchived it so the conversation can reply again`)
+      }
+    } catch {
+      // Best effort only: if unarchiving is refused the turn will end blocked
+      // and the refusal is visible in the host log, not lost silently here.
+    }
+
+    // `cancelled` is set by `/cancel` for the duration of one turn: it tells
+    // the reply wait that the abort it will observe is wanted, so it must not
+    // be reported as a model failure. Cleared when the turn settles.
+    // `auditSeq` is the last event seq already audited, so a poll that sees the
+    // same tool call twice does not write it twice. `auditCalls` pairs a
+    // tool/result back to the tool/call that started it, for the duration.
+    const record = {
+      agent: handle.agent,
+      dispose: handle.dispose,
+      busy: false,
+      queue: [],
+      cancelled: false,
+      auditSeq: -1,
+      auditCalls: new Map(),
+      lastDeliveredSeq: this.#lastSeq(handle.agent),
+      spontaneousSending: false,
+      isSideSession: Boolean(sideMeta),
+    }
+    this.sessions.set(sessionId, record)
+    // Resume can resurrect a session this plugin never filed (created by an
+    // earlier generation, before grouping existed), so those paths register
+    // here. A session created above is already filed; attaching twice would be
+    // harmless but would mean two registry writes per first message.
+    if (!created) await this.#register(sessionId, await this.#workspace())
+    return record
+  }
+
+  async #create(sessionId, setup, agentOptions, sideMeta) {
+    const agents = this.#agents()
+    if (typeof agents.create !== 'function') throw new Error('the agents service cannot create sessions')
+    // The session's cwd must equal the Workspace path byte for byte, because
+    // `attachSession` re-resolves the stored header's cwd and refuses anything
+    // that differs. Adopting the registry's own path removes the chance of a
+    // mismatch (a trailing slash, a symlinked /tmp, a relative config value)
+    // that would file the conversation under "Ungrouped" forever.
+    const workspace = await this.#workspace()
+    const cwd = workspace?.path ?? this.cwd
+    const handle = await agents.create({
+      sessionId,
+      ...(agentOptions === undefined ? {} : { agentOptions }),
+      // Meta is validated against the session header schema: only cwd,
+      // parentSession, isSeeded, origin ('subagent'), delegationDepth and
+      // agentPreset are admitted. A Weixin conversation is a top-level
+      // conversation, so it needs no origin marker at all — writing a custom
+      // one would fail validation ("header origin must be \"subagent\"").
+      meta: {
+        ...(cwd === undefined ? {} : { cwd }),
+        // Side sessions (memory summarizer) file under their conversation:
+        // origin 'subagent' + a parent is the only admitted child shape.
+        ...(sideMeta === undefined ? {} : sideMeta),
+      },
+      setup,
+      signal: AbortSignal.timeout(this.createTimeoutMs),
+    })
+    await this.#register(sessionId, workspace)
+    return handle
+  }
+
+  /**
+   * File a freshly created session under its Workspace for GUI grouping.
+   *
+   * `attachSession` re-validates the stored header's cwd against the workspace
+   * path and throws on a mismatch, so this must run after the session exists and
+   * only ever against the workspace whose path the session was created with. A
+   * failure is logged and swallowed: the conversation works, it just shows as
+   * ungrouped.
+   */
+  async #register(sessionId, workspace) {
+    if (workspace === undefined || typeof workspace.attachSession !== 'function') return
+    try {
+      await workspace.attachSession(sessionId)
+    } catch (error) {
+      this.errLog(`could not file session ${sessionId} under ${workspace.path}: ${String(error)}`)
+    }
+  }
+
+  /**
+   * Deliver one Weixin message and wait for the agent's settled reply.
+   *
+   * @param {object} params
+   * @param {string} params.conversationId
+   * @param {string} [params.accountId] owning bot account; bare key when absent
+   * @param {string} params.text
+   * @param {(note: string) => Promise<void>|void} [params.onProgress]
+   * @param {AbortSignal} [params.signal]
+   * @param {string} [params.senderId] the Weixin user whose message started the
+   *   turn; carried into the tool audit so a line answers "who caused this".
+   * @returns {Promise<{ text: string, sessionId: string }>}
+   */
+  async deliver({ conversationId, accountId, text, onProgress, signal, busyMessageMode, onLateReply, onSpontaneousReply, senderId }) {
+    const record = await this.attach(conversationId, accountId)
+    record.conversationId = conversationId
+    if (accountId !== undefined) record.accountId = accountId
+    if (onSpontaneousReply !== undefined) record.onSpontaneousReply = onSpontaneousReply
+    const sessionId = this.conversationTargets.get(scopedLineKey(accountId, conversationId))
+    // Name the line after the first message that runs in it. Done before the
+    // turn so `/list` shows what the topic is even while the first reply is
+    // still being written; a later message never renames it.
+    // A freshly set title is ALSO mirrored into the host session
+    // (sessionTitle.rename): the GUI sidebar renders the HOST's title, not
+    // this store's, so without the mirror the sidebar shows its own
+    // AI-generated name while /list and the card show `label: message`.
+    // Best-effort: the store title is the source of truth; a failed host
+    // rename (service absent, session not live, title rejected) only costs
+    // the sidebar echo, never the message.
+    if (sessionId !== undefined) {
+      const storeTitle = this.lines.title(conversationId, sessionId, text, accountId)
+      if (storeTitle !== undefined) void this.#mirrorTitle(record.agent, storeTitle)
+    }
+    const mode = busyMessageMode === 'steer' ? 'steer' : 'queue'
+
+    if (record.busy) {
+      // `/steer <instruction>` is always an injection, whatever the mode: the
+      // command exists precisely to reach a turn that is already running.
+      const steerCommand = parseSteerCommand(text)
+      if (mode === 'steer' || steerCommand !== undefined) {
+        const payload = steerCommand !== undefined ? steerCommand : text
+        const createUserMessage = await loadCreateUserMessage()
+        record.agent.steer?.(
+          createUserMessage({ content: [{ type: 'text', text: payload }], source: { kind: 'user' } }),
+        )
+        // The steered turn keeps running; the caller's awaitReply is for a
+        // turn this delivery did not start, so return immediately with a
+        // receipt. The steered turn's eventual reply belongs to the turn's
+        // own delivery wait.
+        return { text: '（已把补充指令插入正在进行的回复中）', sessionId: record.agent.session?.id ?? sessionId ?? baseSessionIdFor(conversationId) }
+      }
+      // queue (default): FIFO tail drained when the running turn settles.
+      return await this.#enqueue({ record, conversationId, accountId, text, onProgress, signal, onLateReply, onSpontaneousReply, senderId })
+    }
+    record.busy = true
+    try {
+      const createUserMessage = await loadCreateUserMessage()
+      const before = this.#lastSeq(record.agent)
+      this.#beginAuditTurn(record, { accountId, conversationId, senderId })
+      // followup() wakes the driver for a turn; inject() would only queue
+      // context, and steer() would wait for the next step boundary.
+      record.agent.followup(
+        createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }),
+      )
+      const settled = await this.#awaitReply({ record, before, onProgress, signal, onLateReply })
+      record.lastDeliveredSeq = Math.max(record.lastDeliveredSeq ?? -1, this.#lastSeq(record.agent))
+      this.onUsage?.({
+        kind: 'chat',
+        accountId,
+        conversationId,
+        prompt: text,
+        reply: typeof settled?.text === 'string' ? settled.text : '',
+      })
+      return settled
+    } finally {
+      record.lastDeliveredSeq = Math.max(record.lastDeliveredSeq ?? -1, this.#lastSeq(record.agent))
+      record.busy = false
+      // The turn is over, so a stale cancel flag would suppress the NEXT
+      // turn's reply entirely.
+      record.cancelled = false
+      await this.#drainQueue({ record, conversationId, onProgress, signal })
+    }
+  }
+
+  /**
+   * Run one prompt through a SIDE session and return its reply — the memory
+   * summarizer's engine. The side session is keyed deterministically off the
+   * conversation, so successive summaries reuse and resume it instead of
+   * creating a session per call, and its context stays separate from the
+   * conversation the user talks in. NOTHING here sends outbound: the reply is
+   * returned to the caller, who decides what to do with it (write conv
+   * memory), so a summary can never surface as a WeChat message.
+   *
+   * Returns undefined when the side session is still busy — the next turn
+   * threshold simply tries again, and the journal window it summarizes
+   * includes the latest turns either way.
+   *
+   * @param {object} params
+   * @param {string} params.conversationId
+   * @param {string} [params.accountId]
+   * @param {string} params.prompt
+   * @returns {Promise<{ text: string, sessionId: string } | undefined>}
+   */
+  async summarize({ conversationId, accountId, prompt, sessionPrefix = 'wx-mem-', route }) {
+    // ⑥ 预算闸门先于一切：被挡下的调用不 attach、不排队、不计费。
+    const verdict = this.allowBackground?.()
+    if (verdict?.allowed === false) {
+      this.log?.(`background model call skipped: ${verdict.reason ?? 'background budget exhausted'}`)
+      return undefined
+    }
+    this.onBackgroundCall?.()
+    const key = scopedLineKey(accountId, conversationId)
+    // The route is part of the identity: a session created under one model
+    // cannot be re-pointed at another, so changing the memory model has to
+    // start a fresh side session instead of quietly reusing the old one.
+    const identity = route === undefined ? key : `${key}|${route.provider}/${route.model}`
+    const digest = createHash('sha1').update(identity).digest('hex').slice(0, 16)
+    const sessionId = `${sessionPrefix}${digest}`
+    const record = await this.attach(conversationId, accountId, {
+      sessionId,
+      ...(route === undefined ? {} : { route }),
+      sideMeta: {
+        origin: 'subagent',
+        parentSession: this.#activeSessionId(conversationId, accountId),
+      },
+    })
+    if (record.busy) {
+      this.log?.(`memory summary skipped: side session ${sessionId} is busy`)
+      return undefined
+    }
+    record.busy = true
+    try {
+      const createUserMessage = await loadCreateUserMessage()
+      const before = this.#lastSeq(record.agent)
+      this.#beginAuditTurn(record, { accountId, conversationId })
+      record.agent.followup(
+        createUserMessage({ content: [{ type: 'text', text: prompt }], source: { kind: 'user' } }),
+      )
+      // No onProgress / onLateReply: a summary must stay silent toward WeChat.
+      const settled = await this.#awaitReply({ record, before })
+      this.onUsage?.({
+        kind: 'summarize',
+        accountId,
+        conversationId,
+        prompt,
+        reply: typeof settled?.text === 'string' ? settled.text : '',
+        route,
+      })
+      return settled
+    } finally {
+      record.busy = false
+      record.cancelled = false
+    }
+  }
+
+  /**
+   * Park one message on the conversation's FIFO tail and wait until it has
+   * been delivered as its own turn (possibly by an earlier drain).
+   *
+   * The receipt goes out through `onProgress` immediately — that is the only
+   * send channel this layer has — and the resolved value is the queued turn's
+   * own reply, so the caller delivers the real answer through its normal
+   * reply path once the turn runs.
+   */
+  async #enqueue({ record, conversationId, accountId, text, onProgress, signal, onLateReply, onSpontaneousReply, senderId }) {
+    const sessionId = record.agent.session?.id ?? this.conversationTargets.get(scopedLineKey(accountId, conversationId)) ?? baseSessionIdFor(conversationId)
+    const entry = { text, onProgress, signal, onLateReply, onSpontaneousReply, senderId, accountId, conversationId }
+    entry.done = new Promise((resolve) => { entry.resolveDone = resolve })
+    record.queue.push(entry)
+    // The receipt must reach WeChat even when the caller ignores onProgress:
+    // a plain-notification wrapper is safe either way.
+    const notify = onProgress ?? (() => {})
+    void Promise.resolve(notify('已排队，等当前回复完成后自动发送')).catch(() => {})
+    // If the turn already settled between the busy check and this push, the
+    // drain ran without our entry; run it now.
+    if (!record.busy && record.queue[record.queue.length - 1] === entry) {
+      record.queue.pop()
+      record.busy = true
+      try {
+        const result = await this.#runQueuedTurn({ record, conversationId, entry })
+        entry.resolveDone(result)
+        return result
+      } finally {
+        record.lastDeliveredSeq = Math.max(record.lastDeliveredSeq ?? -1, this.#lastSeq(record.agent))
+        record.busy = false
+      }
+    }
+    return entry.done
+  }
+  /**
+   * Run one queued text as a full turn, serially after whatever is running.
+   * Resolves with that turn's reply; the queue notification happens in
+   * {@link #drainQueue}.
+   */
+  async #runQueuedTurn({ record, conversationId, entry }) {
+    const createUserMessage = await loadCreateUserMessage()
+    record.conversationId = entry.conversationId ?? conversationId
+    if (entry.accountId !== undefined) record.accountId = entry.accountId
+    if (entry.onSpontaneousReply !== undefined) record.onSpontaneousReply = entry.onSpontaneousReply
+    const before = this.#lastSeq(record.agent)
+    this.#beginAuditTurn(record, {
+      accountId: entry.accountId,
+      conversationId: entry.conversationId ?? conversationId,
+      senderId: entry.senderId,
+    })
+    record.agent.followup(
+      createUserMessage({ content: [{ type: 'text', text: entry.text }], source: { kind: 'user' } }),
+    )
+    try {
+      return await this.#awaitReply({ record, before, onProgress: entry.onProgress, signal: entry.signal, onLateReply: entry.onLateReply })
+    } finally {
+      record.lastDeliveredSeq = Math.max(record.lastDeliveredSeq ?? -1, this.#lastSeq(record.agent))
+    }
+  }
+
+  /**
+   * Drain the FIFO tail after a turn settles, one entry at a time.
+   * Called from the deliver() finally block; owns record.busy while draining.
+   */
+  async #drainQueue({ record, conversationId, onProgress, signal }) {
+    while (record.queue.length > 0) {
+      const entry = record.queue.shift()
+      if (entry === undefined) return
+      record.busy = true
+      try {
+        const result = await this.#runQueuedTurn({ record, conversationId, entry })
+        entry.resolveDone(result)
+      } catch (error) {
+        this.errLog(`queued turn failed: ${String(error)}`)
+        entry.resolveDone({ text: '（排队消息处理失败，请重发）', sessionId: record.agent.session?.id ?? '' })
+      } finally {
+        record.busy = false
+      }
+    }
+  }
+
+  /**
+   * Start a fresh audit cursor for a turn that is about to run.
+   *
+   * The cursor is the last event seq already audited, so a poll that sees the
+   * same tool call twice writes one line, and a turn never re-audits the
+   * conversation's earlier history. The meta rides on the record because the
+   * turn is serialized (one busy lock per line) — a queued turn overwrites it
+   * when it starts, which is exactly when the previous turn has finished.
+   *
+   * @param {any} record
+   * @param {{ accountId?: string, conversationId?: string, senderId?: string }} meta
+   */
+  #beginAuditTurn(record, meta) {
+    record.auditSeq = -1
+    record.auditCalls = new Map()
+    record.auditMeta = meta
+  }
+
+  /**
+   * Close the calls a cancelled turn never finished.
+   *
+   * Measured on a real account (2026-10-23 23:29): `/cancel` during a
+   * `sleep 120` left `tool/call bash` in the audit with no `tool/result` ever
+   * following it — the turn was aborted, so the host had nothing to report, and
+   * the bridge returned before its next poll could have seen one. An
+   * unterminated call is the worst line for the file to end on, because "did
+   * that destructive command actually run?" is exactly what the audit exists to
+   * answer. So the interruption is recorded, as `ok:false, aborted:true` with
+   * the time the call had been running.
+   *
+   * @param {any} record
+   */
+  #auditAbandoned(record) {
+    const sink = this.onToolAudit
+    if (sink === undefined || record.auditCalls.size === 0) return
+    const meta = { ...(record.auditMeta ?? {}), sessionId: record.agent?.session?.id ?? '' }
+    const now = Date.now()
+    for (const [callId, call] of record.auditCalls) {
+      try {
+        sink({
+          kind: 'tool/result',
+          at: now,
+          ...meta,
+          tool: call.tool,
+          callId,
+          ok: false,
+          aborted: true,
+          durationMs: Math.max(0, now - call.at),
+        })
+      } catch (failure) {
+        this.errLog(`tool audit sink failed: ${String(failure)}`)
+      }
+    }
+    // Cleared so a stale entry cannot fabricate a result for an unrelated later
+    // call that happens to reuse the id.
+    record.auditCalls.clear()
+  }
+
+  /**
+   * Turn this poll's new events into audit lines.
+   *
+   * Called before the reply is read, so a fast turn that settles in the same
+   * poll still gets its tools audited. One line per `tool/call` (tool, args,
+   * who, when) and one per `tool/result` (ok, duration) joined by `callId`:
+   * two lines rather than one mutable record keeps the file append-only.
+   *
+   * A throwing sink must never fail the turn — the audit is observation.
+   *
+   * @param {any} record
+   * @param {readonly any[]} events snapshotEvents() of the current poll
+   * @param {number} before last seq before the turn started
+   */
+  #auditEvents(record, events, before) {
+    const sink = this.onToolAudit
+    if (sink === undefined) return
+    // The session id is read at emit time, not at turn start: `/new` can switch
+    // the line's active session while a message waits in the queue, and the
+    // audit must name the session the tool actually ran in.
+    const meta = { ...(record.auditMeta ?? {}), sessionId: record.agent?.session?.id ?? '' }
+    for (const event of events ?? []) {
+      if (typeof event?.seq !== 'number') continue
+      if (event.seq <= before || event.seq <= record.auditSeq) continue
+      try {
+        if (event.type === 'tool/call') {
+          const callId = event.data?.callId
+          const tool = typeof event.data?.name === 'string' ? event.data.name : 'tool'
+          if (typeof callId === 'string') {
+            record.auditCalls.set(callId, { tool, at: typeof event.time === 'number' ? event.time : Date.now() })
+          }
+          sink({
+            kind: 'tool/call',
+            at: Date.now(),
+            ...meta,
+            tool,
+            ...(typeof callId === 'string' ? { callId } : {}),
+            args: event.data?.arguments,
+          })
+          // C15: the same event feeds the "dangerous tool" notice. It rides the
+          // audit scan because that is the only place the plugin ever sees a
+          // tool call at all; a throwing listener must not break the turn.
+          if (this.onToolCall !== undefined) {
+            try {
+              this.onToolCall({
+                ...meta,
+                conversationId: meta.conversationId ?? record.conversationId ?? '',
+                accountId: meta.accountId ?? record.accountId,
+                tool,
+                ...(typeof callId === 'string' ? { callId } : {}),
+                args: event.data?.arguments,
+              })
+            } catch (failure) {
+              this.errLog(`tool call listener failed: ${String(failure)}`)
+            }
+          }
+        } else if (event.type === 'tool/result') {
+          const callId = event.data?.message?.source?.callId
+          const known = typeof callId === 'string' ? record.auditCalls.get(callId) : undefined
+          const error = event.data?.message?.source?.error ?? event.data?.error
+          const durationMs = known !== undefined && typeof event.time === 'number' ? event.time - known.at : undefined
+          sink({
+            kind: 'tool/result',
+            at: Date.now(),
+            ...meta,
+            ...(known === undefined ? {} : { tool: known.tool }),
+            ...(typeof callId === 'string' ? { callId } : {}),
+            ok: error === undefined,
+            ...(durationMs === undefined ? {} : { durationMs }),
+          })
+          if (typeof callId === 'string') record.auditCalls.delete(callId)
+        }
+      } catch (failure) {
+        this.errLog(`tool audit sink failed: ${String(failure)}`)
+      }
+      record.auditSeq = event.seq
+    }
+  }
+
+  #lastSeq(agent) {
+    const events = agent.session?.snapshotEvents?.() ?? []
+    let seq = -1
+    for (const event of events) {
+      if (typeof event?.seq === 'number' && event.seq > seq) seq = event.seq
+    }
+    return seq
+  }
+
+  /**
+   * Mirror a freshly set line title into the host session, so the GUI
+   * sidebar (which renders the HOST's title, not this store's) shows the
+   * same `label: message` text /list does.
+   *
+   * The host renames through its `sessionTitle` service: rename(session,
+   * title) appends a `session/title` event with source `user`, which pins the
+   * title — the host's own automatic title generation is superseded and later
+   * messages schedule none. That pinning is exactly what we want: the first
+   * WeChat message names the sidebar row and nothing overwrites it.
+   *
+   * Never throws: the store title already stands; this only echoes it to the
+   * sidebar. A missing service (bare CLI), a session not live in the host
+   * store, or a title the host rejects are all logged and dropped.
+   *
+   * @param {any} agent live agent handle from attach()
+   * @param {string} title the title the store just set
+   */
+  #mirrorTitle(agent, title) {
+    try {
+      const session = agent?.session
+      if (session === undefined || typeof session.id !== 'string' || session.id === '') return
+      const titles = this.ctx.get('sessionTitle')
+      if (titles === undefined || typeof titles.rename !== 'function') return
+      titles.rename(session, title)
+      this.log?.(`session title mirrored: ${title}`)
+    } catch (error) {
+      // The host rejects a rename when the session is not live in its store
+      // (cold-start races) or the title normalizes to empty — both leave the
+      // sidebar with its own title, which is cosmetic, so warn and move on.
+      this.errLog?.(`sessionTitle.rename failed (sidebar keeps its own title): ${String(error)}`)
+    }
+  }
+
+  async #awaitReply({ record, before, onProgress, signal, onLateReply }) {
+    const sessionId = record.agent.session?.id ?? ''
+    const startedAt = Date.now()
+    const deadline = startedAt + this.maxWaitMs
+    let lastProgressAt = 0
+    // Compared as a SET, not as the rendered line: the line now carries the
+    // elapsed clock, so every render differs and "unchanged state is never
+    // repeated" would stop holding if the text were the key.
+    let lastProgressTools = null
+    let lateAnnounced = false
+
+    while (Date.now() < deadline) {
+      if (signal?.aborted === true) return { text: '（已取消）', sessionId }
+      // `/cancel` set this flag before asking the host to abort. The abort ends
+      // the turn with an error event, and reporting that as "模型调用失败"
+      // would blame the model for something the user asked for — so the flag
+      // wins, and the empty text means the command's own receipt is the only
+      // message the user gets.
+      if (record.cancelled === true) {
+        // A cancelled turn ends with whatever the host already wrote (the
+        // aborted tool's own result may be there) and never with an assistant
+        // message, so this is the last poll that will ever look at its events.
+        this.#auditEvents(record, record.agent.session?.snapshotEvents?.() ?? [], before)
+        this.#auditAbandoned(record)
+        return { text: '', sessionId, cancelled: true }
+      }
+      const events = record.agent.session?.snapshotEvents?.() ?? []
+      this.#auditEvents(record, events, before)
+      const reply = readAssistantReply({ events, afterSeq: before })
+      if (reply.text !== '') return { text: reply.text, sessionId }
+      // A failed turn is OVER: no assistant message will ever arrive, and the
+      // turn/end(error) event is already durable. Waiting out the deadline
+      // here holds record.busy for the whole budget, so the user's NEXT
+      // message queues behind a turn that can never answer — the "one model
+      // failure and everything after is stuck" report. Answer immediately.
+      if (reply.turnError !== undefined) {
+        return { text: `（模型调用失败：${reply.turnError}）`, sessionId }
+      }
+
+      // A long tool run is invisible in WeChat. The first note goes out after
+      // progressAfterMs; after that a CHANGED tool set is re-announced at most
+      // every progressEveryMs, so "running: bash" becoming "running: read"
+      // reaches the user while one long unchanged tool never spams.
+      if (onProgress) {
+        const elapsed = Date.now() - startedAt
+        const note = describePending(reply.pendingTools, elapsed)
+        // Two thresholds, whichever comes first: a turn that is only thinking
+        // waits for progressAfterMs, one that is visibly running a tool is
+        // reported at progressToolAfterMs so `npm test` does not look like a
+        // dead bot for 20 seconds.
+        const toolRunning = reply.pendingTools.length > 0
+        const firstAfterMs = toolRunning && this.progressToolAfterMs > 0
+          ? Math.min(this.progressAfterMs, this.progressToolAfterMs)
+          : this.progressAfterMs
+        const toolKey = reply.pendingTools.join(',')
+        const due = lastProgressAt === 0
+          ? elapsed >= firstAfterMs
+          : toolKey !== lastProgressTools && Date.now() - lastProgressAt >= this.progressEveryMs
+        if (due) {
+          lastProgressAt = Date.now()
+          lastProgressTools = toolKey
+          await onProgress(note)
+        }
+      }
+      const sinceStart = Date.now() - startedAt
+      const interval = sinceStart < this.eventPollFastWindowMs ? this.eventPollFastMs : this.eventPollMs
+      await new Promise((resolve) => setTimeout(resolve, interval))
+    }
+
+    // The user was told the wait gave up — but the turn is still running and
+    // its answer would be lost if we simply returned. Keep listening at a
+    // slow cadence until the turn settles, then hand the final text to the
+    // late-reply callback so the caller can deliver it out of band.
+    if (onLateReply === undefined) return { text: '（处理超时，请稍后查看会话）', sessionId }
+    if (!lateAnnounced) {
+      lateAnnounced = true
+      try {
+        await onLateReply({ kind: 'timeout-notice' })
+      } catch {
+        // The notice is best effort; the late answer still gets delivered.
+      }
+    }
+    // Keep the normal cadence: the loop is cheap (an in-memory event
+    // snapshot), and a slower tick risks missing a short late window.
+    const latePollMs = this.eventPollMs
+    const lateDeadline = Date.now() + (this.lateReplyMaxWaitMs ?? 60 * 60_000)
+    while (Date.now() < lateDeadline) {
+      if (signal?.aborted === true) return { text: '', sessionId, late: true }
+      // A cancelled turn is over; the late wait must not keep polling for a
+      // reply the user explicitly asked not to receive.
+      if (record.cancelled === true) {
+        this.#auditEvents(record, record.agent.session?.snapshotEvents?.() ?? [], before)
+        this.#auditAbandoned(record)
+        return { text: '', sessionId, late: true }
+      }
+      const events = record.agent.session?.snapshotEvents?.() ?? []
+      this.#auditEvents(record, events, before)
+      const reply = readAssistantReply({ events, afterSeq: before })
+      if (reply.text !== '') {
+        record.lastDeliveredSeq = Math.max(record.lastDeliveredSeq ?? -1, this.#lastSeq(record.agent))
+        try {
+          await onLateReply({ kind: 'reply', text: reply.text })
+        } catch (error) {
+          this.errLog(`late reply delivery failed: ${String(error)}`)
+        }
+        // The answer went out through the late-reply channel; the caller must
+        // not send the normal reply path again.
+        return { text: '', sessionId, late: true }
+      }
+      // Same failure rule as the primary loop: an errored turn is over, and
+      // the late wait must not spin for its full hour either.
+      if (reply.turnError !== undefined) {
+        record.lastDeliveredSeq = Math.max(record.lastDeliveredSeq ?? -1, this.#lastSeq(record.agent))
+        return { text: '', sessionId, late: true }
+      }
+      await new Promise((resolve) => setTimeout(resolve, latePollMs))
+    }
+    this.errLog(`late reply wait gave up for ${sessionId}`)
+    return { text: '', sessionId, late: true }
+  }
+
+  /**
+   * Poll idle conversation sessions for spontaneous turns (e.g. a delegated
+   * subagent finishes and calls send_message back into the parent session).
+   */
+  async #pollSpontaneous() {
+    for (const [sessionId, record] of this.sessions) {
+      if (record.busy === true || record.spontaneousSending === true) continue
+      if (record.isSideSession === true || sessionId.startsWith('wx-mem-')) continue
+      if (!record.conversationId) continue
+
+      const events = record.agent?.session?.snapshotEvents?.() ?? []
+      if (events.length === 0) continue
+
+      const afterSeq = record.lastDeliveredSeq ?? -1
+      this.#auditEvents(record, events, afterSeq)
+      const reply = readAssistantReply({ events, afterSeq })
+      if (reply.turnError !== undefined) {
+        record.lastDeliveredSeq = Math.max(afterSeq, this.#lastSeq(record.agent))
+        continue
+      }
+      if (reply.text !== '' && reply.turnSettled && reply.pendingTools.length === 0) {
+        record.lastDeliveredSeq = Math.max(afterSeq, this.#lastSeq(record.agent))
+        const trimmedReply = reply.text.trim()
+        if (/^(?:\[SILENT\]|HEARTBEAT_OK|（已取消）|（静默）)/i.test(trimmedReply)) {
+          this.log?.(`spontaneous reply suppressed as silent heartbeat for ${sessionId}`)
+          continue
+        }
+        const handler = record.onSpontaneousReply ?? this.onSpontaneousReply
+        if (typeof handler === 'function') {
+          record.spontaneousSending = true
+          try {
+            await handler({
+              accountId: record.accountId,
+              conversationId: record.conversationId,
+              sessionId,
+              text: reply.text,
+            })
+          } catch (error) {
+            this.errLog(`spontaneous reply delivery failed for ${sessionId}: ${String(error)}`)
+          } finally {
+            record.spontaneousSending = false
+          }
+        }
+      }
+    }
+  }
+
+  /** Tear down every session this bridge created. */
+  async dispose() {
+    if (this.#spontaneousTimer !== undefined) {
+      clearInterval(this.#spontaneousTimer)
+      this.#spontaneousTimer = undefined
+    }
+    const records = [...this.sessions.values()]
+    this.sessions.clear()
+    await Promise.all(
+      records.map(async (record) => {
+        try {
+          await record.dispose()
+        } catch (error) {
+          this.errLog(`session dispose failed: ${String(error)}`)
+        }
+      }),
+    )
+  }
+}
