@@ -85,7 +85,7 @@ export const FIELDS = [
         default: "",
         label: "默认工作目录 (cwd)",
         labelEn: "Working directory",
-        hint: "微信会话默认工作的目录（如 G:\\我的云端硬盘\\01_MyBrain），自动加载该目录下的 AGENTS.md。",
+        hint: "微信会话默认工作的目录（如 D:\\Workspace），自动加载该目录下的 AGENTS.md。",
         hintEn: "Directory the agent operates in.",
       },
       {

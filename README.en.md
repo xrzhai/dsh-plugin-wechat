@@ -1,16 +1,16 @@
 <div align="center">
 
-# WeChat BOT · dsh-plugin-weixin
+# WeChat BOT · dsh-plugin-wechat
 
 **Turn your personal WeChat into a remote control surface for DeepSeek Harness.**
 
 Say one line in WeChat; the DSH Agent opens a session on your own machine, runs it, and hands the result back to you — text, images, files and voice, in both directions.
 
-[![npm version](https://img.shields.io/npm/v/dsh-plugin-weixin.svg)](https://www.npmjs.com/package/dsh-plugin-weixin)
-[![npm downloads](https://img.shields.io/npm/dm/dsh-plugin-weixin.svg)](https://www.npmjs.com/package/dsh-plugin-weixin)
-[![CI](https://github.com/panqing0313/dsh-plugin-weixin/actions/workflows/ci.yml/badge.svg)](https://github.com/panqing0313/dsh-plugin-weixin/actions/workflows/ci.yml)
-[![node](https://img.shields.io/node/v/dsh-plugin-weixin.svg)](package.json)
-[![license](https://img.shields.io/npm/l/dsh-plugin-weixin.svg)](LICENSE)
+[![npm version](https://img.shields.io/npm/v/dsh-plugin-wechat.svg)](https://www.npmjs.com/package/dsh-plugin-wechat)
+[![npm downloads](https://img.shields.io/npm/dm/dsh-plugin-wechat.svg)](https://www.npmjs.com/package/dsh-plugin-wechat)
+[![CI](https://github.com/xrzhai/dsh-plugin-wechat/actions/workflows/ci.yml/badge.svg)](https://github.com/xrzhai/dsh-plugin-wechat/actions/workflows/ci.yml)
+[![node](https://img.shields.io/node/v/dsh-plugin-wechat.svg)](package.json)
+[![license](https://img.shields.io/npm/l/dsh-plugin-wechat.svg)](LICENSE)
 [![DSH Market](https://raw.githubusercontent.com/2BingLing/dsh-market/master/assets/readme/badge-listed-zh.svg)](https://dsh.market/)
 
 <p>
@@ -1304,18 +1304,12 @@ Three things to note:
 - [Security policy](docs/security.md)
 - [Third-party code](THIRD-PARTY-NOTICES.md)
 
-## Supporting the author
+## Support & Feedback
 
-If this plugin has been useful to you, you are welcome to buy the author a coffee — WeChat or Alipay, either code works. It encourages continued updates, polish and better features.
+If this plugin has been useful to you, feel free to give it a Star ⭐️ or open an Issue / PR:
 
-<p align="center">
-  <img src="assets/donate-qr.jpg" alt="WeChat tip QR code" width="240" align="middle" />
-  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
-  <img src="assets/donate-qr-alipay.jpg" alt="Alipay tip QR code" width="240" align="middle" />
-</p>
-<p align="center"><sub>Left: WeChat &nbsp;·&nbsp; Right: Alipay</sub></p>
-
-Or open an Issue / PR: [github.com/panqing0313/dsh-plugin-weixin](https://github.com/panqing0313/dsh-plugin-weixin)
+- Repository: [github.com/xrzhai/dsh-plugin-wechat](https://github.com/xrzhai/dsh-plugin-wechat)
+- Issues: [github.com/xrzhai/dsh-plugin-wechat/issues](https://github.com/xrzhai/dsh-plugin-wechat/issues)
 
 When you are mentioned in a group, the model sees only the message that mentioned you — what the previous twenty said is outside its window. With `groupSummaryEnabled` on (off by default, because it spends one background call per batch) the plugin collects group messages, summarizes them every `groupSummaryEvery` messages (12 by default), and folds those lines into the next mention's prompt. A summary older than three hours is not injected: three-day-old talk must not pass as today's context. It restates only what the messages say, never guesses, and the stats tab shows how much of the prompt it takes.
 | `contactStaleDays` | `45` | Days before a group member card is marked possibly out of date when injected (0 disables) |

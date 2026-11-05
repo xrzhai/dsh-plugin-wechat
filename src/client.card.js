@@ -1457,8 +1457,8 @@ window.__ModuleLoader__.load({
 						notice ? createElement("span", { style: captionStyle }, notice) : null),
 				]),
 				row(t("Project", "项目"), [
-					createElement("a", { key: "l", href: "https://github.com/panqing0313/dsh-plugin-weixin", target: "_blank", rel: "noreferrer", style: linkStyle },
-						"github.com/panqing0313/dsh-plugin-weixin"),
+					createElement("a", { key: "l", href: "https://github.com/xrzhai/dsh-plugin-wechat", target: "_blank", rel: "noreferrer", style: linkStyle },
+						"github.com/xrzhai/dsh-plugin-wechat"),
 					createElement("p", { key: "h", style: hintStyle },
 						t("Scan a QR code to bind a personal WeChat as a bot, chat with multiple accounts, per-account allowlists, session lines, voice replies.",
 							"扫码把个人微信绑成机器人：多账号、按账号白名单、会话线、语音回复。")),

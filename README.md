@@ -1,16 +1,16 @@
 <div align="center">
 
-# 微信BOT · dsh-plugin-weixin
+# 微信BOT · dsh-plugin-wechat
 
 **把你的个人微信，变成 DeepSeek Harness 的远程控制面。**
 
 在微信里说一句话，DSH Agent 在你自己的机器上开一个会话执行，把结果回给你 —— 文字、图片、文件、语音，双向都能走。
 
-[![npm version](https://img.shields.io/npm/v/dsh-plugin-weixin.svg)](https://www.npmjs.com/package/dsh-plugin-weixin)
-[![npm downloads](https://img.shields.io/npm/dm/dsh-plugin-weixin.svg)](https://www.npmjs.com/package/dsh-plugin-weixin)
-[![CI](https://github.com/panqing0313/dsh-plugin-weixin/actions/workflows/ci.yml/badge.svg)](https://github.com/panqing0313/dsh-plugin-weixin/actions/workflows/ci.yml)
-[![node](https://img.shields.io/node/v/dsh-plugin-weixin.svg)](package.json)
-[![license](https://img.shields.io/npm/l/dsh-plugin-weixin.svg)](LICENSE)
+[![npm version](https://img.shields.io/npm/v/dsh-plugin-wechat.svg)](https://www.npmjs.com/package/dsh-plugin-wechat)
+[![npm downloads](https://img.shields.io/npm/dm/dsh-plugin-wechat.svg)](https://www.npmjs.com/package/dsh-plugin-wechat)
+[![CI](https://github.com/xrzhai/dsh-plugin-wechat/actions/workflows/ci.yml/badge.svg)](https://github.com/xrzhai/dsh-plugin-wechat/actions/workflows/ci.yml)
+[![node](https://img.shields.io/node/v/dsh-plugin-wechat.svg)](package.json)
+[![license](https://img.shields.io/npm/l/dsh-plugin-wechat.svg)](LICENSE)
 [![DSH Market](https://raw.githubusercontent.com/2BingLing/dsh-market/master/assets/readme/badge-listed-zh.svg)](https://dsh.market/)
 
 **简体中文** ｜ [English](README.en.md)
@@ -1366,18 +1366,12 @@ node bin/release.mjs --finish 0.9.11   # 补齐 tag / Release / 核验 / 装本�
 - [实施方案](docs/plan.md) · [移植审查清单](docs/hermes-port-audit.md)
 - [第三方代码](THIRD-PARTY-NOTICES.md)
 
-## 打赏作者
+## 支持与交流
 
-如果这个插件帮到了你，欢迎请作者喝杯咖啡 —— 微信、支付宝扫码都行，鼓励作者持续更新、优化功能、推出更好的特性。
+如果这个插件帮到了你，欢迎点个 Star ⭐️ 或提交 Issue / PR 交流与反馈：
 
-<p align="center">
-  <img src="assets/donate-qr.jpg" alt="微信打赏二维码" width="240" align="middle" />
-  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
-  <img src="assets/donate-qr-alipay.jpg" alt="支付宝打赏二维码" width="240" align="middle" />
-</p>
-<p align="center"><sub>左：微信 &nbsp;·&nbsp; 右：支付宝</sub></p>
-
-也可以提 Issue / PR：[github.com/panqing0313/dsh-plugin-weixin](https://github.com/panqing0313/dsh-plugin-weixin)
+- 项目仓库：[github.com/xrzhai/dsh-plugin-wechat](https://github.com/xrzhai/dsh-plugin-wechat)
+- 问题反馈：[github.com/xrzhai/dsh-plugin-wechat/issues](https://github.com/xrzhai/dsh-plugin-wechat/issues)
 
 群里被叫到时，模型默认只看见被点名的那一条消息：前面二十条说过什么，它在自己的窗口之外。把 `groupSummaryEnabled` 打开（默认关闭，因为它每次都要花一次后台调用）之后，插件会悄悄攒群消息，每 `groupSummaryEvery` 条（默认 12）做一次摘要，下次被叫到时把那几行折进提示词 —— 摘要超过 3 小时就不再注入，三天前聊的事不该冒充今天的上下文。摘要只从群消息本身来，不发散、不推测；`/diag` 与统计页签里的「群里在聊什么」一段能看出它占了多少提示词。
 | `contactStaleDays` | `45` | 群成员名片超过这么多天没更新内容，注入时会注明「可能已过时」；0 关闭 |
