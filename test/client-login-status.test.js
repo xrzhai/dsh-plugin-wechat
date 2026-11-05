@@ -86,7 +86,10 @@ test('failed status RPC is not presented as logged out; retry restores bound acc
   const recovered = f.render()
   assert.match(text(recovered), /已绑定/)
   assert.doesNotMatch(text(recovered), /无法读取账号状态/)
-  assert.equal(button(recovered, '新增账号登录').props.disabled, false)
+  // A bound, healthy account offers no add-account action: the single-account
+  // UI hides multi-account entirely.
+  assert.equal(button(recovered, '新增账号登录'), undefined)
+  assert.equal(button(recovered, '扫码登录微信'), undefined)
 })
 
 test('only a successful empty account list is presented as logged out', async () => {
@@ -150,25 +153,49 @@ test('a settings RPC failure is visible instead of rendering an empty settings p
 })
 
 
-test('settings tabs switch between all four working sections and wrap with arrow keys', () => {
+test('primary tabs are account + persona; advanced reveals sessions + gateway', () => {
   const f = fixture(async () => ({ accounts: [] }), { component: 'WeixinSettingsCard' })
   const tabs = tree => nodes(tree).filter(node => node.props?.role === 'tab')
-  const expected = ['LoginSection', 'SessionsSection', 'PromptSection', 'ConfigSection']
-  const check = (tree, index) => {
-    assert.equal(tabs(tree).length, 4)
-    assert.deepEqual(tabs(tree).map(node => node.props['aria-selected']), expected.map((_, i) => i === index))
-    assert.deepEqual(nodes(tree).filter(node => typeof node.type === 'function').map(node => node.type.name),
-      ['TabIcon', 'TabIcon', 'TabIcon', 'TabIcon', expected[index]])
-  }
-  check(f.first, 0)
-  for (let index = 0; index < 4; index++) {
-    tabs(f.render())[index].props.onClick()
-    check(f.render(), index)
-  }
+  const fnNames = tree => nodes(tree).filter(node => typeof node.type === 'function').map(node => node.type.name)
+
+  // Beginner surface: 微信账号 + 人设 only.
+  assert.equal(tabs(f.first).length, 2)
+  assert.deepEqual(tabs(f.first).map(node => node.props['aria-selected']), [true, false])
+  assert.deepEqual(fnNames(f.first), ['TabIcon', 'TabIcon', 'LoginSection'])
+
+  // Switching to 人设 renders the AGENTS.md editor.
+  tabs(f.render())[1].props.onClick()
+  assert.deepEqual(fnNames(f.render()), ['TabIcon', 'TabIcon', 'PromptSection'])
+
+  // 高级 reveals the two ops sections.
+  const toggle = nodes(f.render()).find(node => node.type === 'button' && node.props?.['aria-expanded'] !== undefined)
+  assert.ok(toggle, 'advanced toggle exists')
+  toggle.props.onClick()
+  const expanded = f.render()
+  assert.equal(tabs(expanded).length, 4)
+  assert.deepEqual(tabs(expanded).map(node => node.props['aria-selected']), [false, true, false, false])
+  assert.deepEqual(fnNames(expanded).slice(0, 4), ['TabIcon', 'TabIcon', 'TabIcon', 'TabIcon'])
+
+  // Each advanced tab renders its own section.
+  tabs(expanded)[2].props.onClick()
+  assert.ok(fnNames(f.render()).includes('SessionsSection'))
+  tabs(f.render())[3].props.onClick()
+  assert.ok(fnNames(f.render()).includes('ConfigSection'))
+
+  // Collapsing 高级 while on an ops tab returns to 微信账号.
+  const collapse = nodes(f.render()).find(node => node.type === 'button' && node.props?.['aria-expanded'] === true)
+  assert.ok(collapse, 'collapse toggle exists')
+  collapse.props.onClick()
+  assert.equal(tabs(f.render()).length, 2)
+  assert.deepEqual(tabs(f.render()).map(node => node.props['aria-selected']), [true, false])
+
+  // Arrow keys wrap across the visible tabs.
   let prevented = 0
-  for (const [key, index] of [['ArrowRight', 0], ['ArrowLeft', 3]]) {
-    nodes(f.render()).find(node => node.props?.role === 'tablist').props.onKeyDown({ key, preventDefault: () => prevented++ })
-    check(f.render(), index)
-  }
+  const key = (name) => nodes(f.render()).find(node => node.props?.role === 'tablist')
+    .props.onKeyDown({ key: name, preventDefault: () => prevented++ })
+  key('ArrowRight')
+  assert.deepEqual(tabs(f.render()).map(node => node.props['aria-selected']), [false, true])
+  key('ArrowLeft')
+  assert.deepEqual(tabs(f.render()).map(node => node.props['aria-selected']), [true, false])
   assert.equal(prevented, 2)
 })

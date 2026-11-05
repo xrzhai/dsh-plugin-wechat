@@ -267,28 +267,6 @@ window.__ModuleLoader__.load({
 					result: { mode: "strict", typeSymbol: `${PKG}#weixin/onboarding:result`, create: _statusResult },
 				},
 				{
-					id: `${PKG}#weixin/contacts`,
-					service: "weixinLoginController",
-					namespace: "weixin",
-					method: "contacts",
-					invocation: { kind: "direct" },
-					parameters: [
-						{ name: "options", wire: "options", source: "json", codec: { mode: "strict", typeSymbol: `${PKG}#weixin/contacts:p0`, create: _strMap } },
-					],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixin/contacts:result`, create: _statusResult },
-				},
-				{
-					id: `${PKG}#weixin/contactSave`,
-					service: "weixinLoginController",
-					namespace: "weixin",
-					method: "contactSave",
-					invocation: { kind: "direct" },
-					parameters: [
-						{ name: "options", wire: "options", source: "json", codec: { mode: "strict", typeSymbol: `${PKG}#weixin/contactSave:p0`, create: _strMap } },
-					],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixin/contactSave:result`, create: _statusResult },
-				},
-				{
 					id: `${PKG}#weixin/packExport`,
 					service: "weixinLoginController",
 					namespace: "weixin",
@@ -1045,8 +1023,7 @@ window.__ModuleLoader__.load({
 						}
 					}
 				}
-				console.error("MAP BUILT size=" + map.size);
-							sessionOwnerMap = map;
+				sessionOwnerMap = map;
 			} catch {
 				// Remote not mounted yet, or the host refused: render no hint.
 				sessionOwnerMap = null;
@@ -1072,8 +1049,7 @@ window.__ModuleLoader__.load({
 				if (!sessionOwnerCtx) return undefined;
 				let alive = true;
 				loadSessionOwners(sessionOwnerCtx).then((map) => {
-					console.error("THEN alive=" + alive + " hit=" + !!map?.get(sessionId));
-								if (alive) setOwner(map?.get(sessionId) ?? null);
+					if (alive) setOwner(map?.get(sessionId) ?? null);
 				}).catch(() => {});
 				return () => {
 					alive = false;
@@ -1240,16 +1216,23 @@ window.__ModuleLoader__.load({
 			// passes `active`; only the size is ours to honour, since the row
 			// itself owns the hover/selected background. `aria-hidden` because
 			// the row's label is the accessible name.
+			//
+			// A whale (🐳), matching the "大肥鱼" name and workspace title, rather
+			// than the filled green WeChat logo: the old mark shouted louder than
+			// every other thin monochrome icon in the rail and read as a brand
+			// badge, not a friendly chat entry.
 			function WeixinPanelGlyph({ size = 16 } = {}) {
-				return createElement("svg", {
-					width: size,
-					height: size,
-					viewBox: "0 0 24 24",
-					fill: WECHAT_GREEN,
-					focusable: "false",
+				return createElement("span", {
 					"aria-hidden": "true",
-					style: { flex: "none" },
-				}, createElement("path", { d: WECHAT_GLYPH }));
+					style: {
+						display: "inline-flex",
+						alignItems: "center",
+						justifyContent: "center",
+						flex: "none",
+						fontSize: size,
+						lineHeight: 1,
+					},
+				}, "🐳");
 			}
 
 			// The page behind that row: the same card, but it owns the whole
@@ -1289,7 +1272,7 @@ window.__ModuleLoader__.load({
 						name: "sidebar.panellist",
 						id: PANEL_ID,
 						order: 20,
-						label: () => t("WeChat Gateway", "微信网关"),
+						label: () => t("WeChat", "大肥鱼"),
 						locale: NS,
 					},
 					WeixinPanelGlyph));
@@ -1314,29 +1297,16 @@ window.__ModuleLoader__.load({
 						name: "settings.section",
 						id: `${PKG}-settings`,
 						order: 22,
-						label: () => t("WeChat Gateway", "微信网关"),
+						label: () => t("WeChat", "大肥鱼"),
 						locale: NS,
 						inject: () => actions,
 					},
 					WeixinSettingsCard));
 
-			// The session row mark. ui-workspace declares this seat on every
-			// Session row and renders it only while the row is idle, so the
-			// occupant is asked about rows it has nothing to do with — hence
-			// `SessionRowMark` returning `null` rather than an empty glyph.
-			// Order 20 sits after ui-schedule's 10: when a WeChat Session also
-			// has an active scheduled task the host's clock still leads, and
-			// the mark follows it instead of competing for the same cell.
-			ctx.slots.inject("sidebar.session.row.leading", () =>
-				ctx.slots.register(
-					{
-						name: "sidebar.session.row.leading",
-						id: `${PKG}-row-mark`,
-						order: 20,
-						locale: NS,
-						inject: () => actions,
-					},
-					SessionRowMark));
+			// The session row leading mark used to stamp the WeChat logo on every
+			// WeChat Session row. It carried no information (ownership already
+			// lives in the title) and only added visual noise, so the seat is no
+			// longer registered.
 
 			// Fetch the chunk here, at activation, not on first paint: apply()
 			// awaits this registration, so the shell never sees a "loading" card.

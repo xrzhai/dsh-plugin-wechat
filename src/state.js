@@ -58,13 +58,102 @@ export function sessionsDir() {
 
 /**
  * Create {@link sessionsDir} if needed and return it.
+ *
+ * Also seeds two files into the plugin's own workspace on first run:
+ * a starter persona (AGENTS.md) and a starter memory note (memory.md). Without
+ * them a brand-new user lands in an empty workspace and the assistant has no
+ * voice and remembers nothing. Each seed is written only when the file is
+ * absent, so an operator's own persona / memory is never overwritten.
  * @throws when the directory cannot be created, since an agent cannot run
  *   without a working directory.
  */
 export function ensureSessionsDir() {
   const dir = sessionsDir()
   fs.mkdirSync(dir, { recursive: true })
+  ensureDefaultAgentInstructions(dir)
+  ensureDefaultMemoryFile(dir)
   return dir
+}
+
+/**
+ * The starter persona for a fresh walkthrough.
+ *
+ * Kept short and behaviour-first: who it is, how it talks on a phone screen,
+ * what it can do, and where its memory lives. Memory is a plain `memory.md`
+ * the assistant reads when it needs to and edits when it learns something —
+ * no always-injected memory engine.
+ */
+export const DEFAULT_AGENT_INSTRUCTIONS = `# 大肥鱼 · 微信里的 AI 伙伴
+
+你是「大肥鱼」，用户在微信里的 AI 伙伴，也是帮他打理日常和电脑的小助手。说话像老朋友，别用客服腔。
+
+## 说话方式
+- 微信屏幕小：默认 1~3 个短段落，80~180 字，结论先行；不要长篇大论，不要堆表格和多层列表。
+- 有温度，接得住情绪；除非用户说「展开讲讲」，只给最核心的判断。
+
+## 你能做
+- 记事情、设提醒（到点主动发微信提醒你）。
+- 查资料、读文件、写东西、整理信息。
+- 需要时在电脑上干活（跑命令、改文件）；动手前先确认，删改前先说清楚。
+
+## 你的记忆：memory.md
+- 记性放在同目录的 \`memory.md\` 里。**按需读取**——要回忆用户偏好、称呼、重要日期时再打开看，不用每轮都读全。
+- 学到值得长期记住的事（称呼、喜好、忌讳、重要日子、约定），就主动补进 \`memory.md\`。
+- 用户说「记住…」时也是写进 \`memory.md\`，不要另开一套记忆。
+
+## 第一次聊天（重要）
+第一次和用户说话时，先读一下 \`memory.md\` 里的「第一次见面」清单，照着做：简单自我介绍，再自然地聊 2~3 个问题（怎么称呼你、想让我长期记住什么、要不要固定提醒），把答案填进 \`memory.md\` 的「关于你」。
+
+## 边界
+- 只服务被授权的用户；不确定的操作先问，删除或对外发送前必须确认。
+- 这个文件（AGENTS.md）是你的人设，只由用户在设置里维护，你不要改它。
+`
+
+/**
+ * The starter memory note. It is data the assistant maintains, not instructions
+ * the gateway injects — the persona tells the model to read it on demand. Kept
+ * as a fill-in template with a one-time "第一次见面" checklist.
+ */
+export const DEFAULT_MEMORY_FILE = `# 大肥鱼 的记忆
+
+> 这是大肥鱼自己维护的备忘。需要回忆用户偏好时按需读一读，学到新的事就补进来。
+
+## 第一次见面（大肥鱼照着做，做完把这段删掉）
+- 先简单介绍自己：我叫大肥鱼，能帮你记事、设提醒、查资料、在电脑上干活。
+- 再自然地问 2~3 个问题：怎么称呼你？有什么想让我长期记住的？要不要固定提醒？
+- 把答案填到下面的「关于你」。
+
+## 关于你
+- 称呼：
+- 作息 / 时区：
+- 喜欢 / 不喜欢：
+- 重要日子：
+
+## 长期事项
+-
+
+## 大肥鱼 的笔记
+-
+`
+
+function ensureDefaultAgentInstructions(dir) {
+  const file = path.join(dir, 'AGENTS.md')
+  try {
+    if (fs.existsSync(file)) return
+    fs.writeFileSync(file, DEFAULT_AGENT_INSTRUCTIONS, 'utf8')
+  } catch {
+    // A persona seed failure must never stop the workspace from being usable.
+  }
+}
+
+function ensureDefaultMemoryFile(dir) {
+  const file = path.join(dir, 'memory.md')
+  try {
+    if (fs.existsSync(file)) return
+    fs.writeFileSync(file, DEFAULT_MEMORY_FILE, 'utf8')
+  } catch {
+    // A memory seed failure is cosmetic; never block the workspace.
+  }
 }
 
 /**

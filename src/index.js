@@ -21,8 +21,8 @@ import z from '@deepseek-ai/schemastery'
 import { fileURLToPath } from 'node:url'
 import fs from 'node:fs'
 import { randomBytes } from 'node:crypto'
-import { dirname, join, resolve as resolvePath } from 'node:path'
-import { configureWeixinStateDir, accountsDir, configFile, readSavedConfig, ensureSessionsDir, inboxDir, stateDir, withSavedConfig } from './state.js'
+import { dirname, join, basename, resolve as resolvePath } from 'node:path'
+import { configureWeixinStateDir, accountsDir, configFile, readSavedConfig, ensureSessionsDir, sessionsDir, inboxDir, stateDir, withSavedConfig } from './state.js'
 import { quietDelay } from './message/quiet-hours.js'
 import {
   MAX_TEMP_QUIET_MS,
@@ -95,7 +95,6 @@ import { extractUrls, fetchLinkText, describeLinkResults } from './message/links
 import { ReminderScheduler, parseWhen } from './message/scheduler.js'
 import { createAwayCommands, readAway, noteMissed, buildAwayReply, awaySummary, clearAway } from './message/away.js'
 import { buildDateReminderText, dateReminderDue, markDateReminderSent, upcomingDates } from './message/dates.js'
-import { CONTACT_REFRESH_DAYS, applyContactRefresh, buildContactRefreshPrompt, contactRefreshDue, markContactRefreshRun, parseContactRefresh, pickRefreshCandidates } from './message/contact-refresh.js'
 import { buildDraft, composeReminder, createDraftCommands, readDraft, saveDraft } from './message/drafts.js'
 import { createWebhookSender } from './webhook.js'
 import { backgroundBudget, recordBackgroundCall } from './budget.js'
@@ -160,12 +159,10 @@ import { routeFor, sideRouteFor } from './model-route.js'
 import { readOrInferLifeState, lifeBlock } from './message/life-state.js'
 import { readJournalRange, renderChatMarkdown, writeChatExport } from './message/chat-export.js'
 import { createNotifyServer, DEFAULT_NOTIFY_PORT, ensureNotifyToken } from './notify.js'
-import { countStaleContacts } from './message/contacts.js'
 import { describeAffinity, readAffinityHistory } from './message/affinity-history.js'
 import './message/dry-run.js'
 import { describeUnknownItems, firstSighting } from './message/unknown-items.js'
 import { statePaths } from './state-layout.js'
-import { createMemorySummarizer } from './memory-summarizer.js'
 import { ProactiveScheduler, readProactiveState } from './message/proactive.js'
 import { describeLearnedHours, learnActiveHours } from './message/proactive-timing.js'
 import { createGroupSummaries, groupSummaryPrompt } from './message/group-summary.js'
@@ -239,6 +236,7 @@ export const Config = z.object({
   readOnlyPaths: z.array(z.string()).default([]).description('Absolute workspace roots that session_dispatch must treat as read-only, including descendants and symlink aliases.'),
   accountId: z.string().default('').description('Weixin account id to use; empty means the only saved account.'),
   cwd: z.string().default('').description('Working directory the agent operates in; empty inherits the session default.'),
+  workspaceTitle: z.string().default('').description('Display title for the dedicated Weixin conversations workspace. Empty keeps the folder name. Only replaces the auto-derived name; a title the operator chose in the UI is never overwritten.'),
   allowedSenders: z.array(z.string()).default([]).description('Weixin user ids allowed to drive the agent. Empty denies everyone.'),
   allowedChats: z.array(z.string()).default([]).description('Optional conversation allowlist. Empty allows any conversation from an allowed sender.'),
   maxMessageLength: z.number().default(1500).description('Maximum characters per outbound Weixin message.'),
@@ -325,9 +323,6 @@ export const Config = z.object({
   groupChatEnabled: z.boolean().default(false).description('参加群聊：开启后才会在群里回话。默认关闭——一个对每条群消息都答的机器人，在真群里就是刷屏。私聊不受影响。'),
   groupSummaryEnabled: z.boolean().default(false).description('群聊上下文摘要：群里攒够 groupSummaryEvery 条消息后，用一次后台调用把最近聊的压成几行，下次被叫到时折进提示词。默认关闭——它每次都要花一次调用。'),
   groupSummaryEvery: z.number().min(4).max(100).default(12).description('攒多少条群消息做一次摘要（默认 12）。'),
-  contactStaleDays: z.number().min(0).max(3650).default(45).description('群成员名片多久算「旧」：超过这么多天没更新过内容时，注入时会注明「可能已过时」。0 表示不做这个判断。'),
-  contactRefreshEnabled: z.boolean().default(true).description('群成员名片自动补全：过时且最近说过话的名片，交给后台模型从他说过的话里补一遍（受后台预算与每天张数上限约束）。'),
-  contactRefreshPerDay: z.number().min(0).max(20).default(2).description('每次最多补几张名片（`contactRefreshEnabled` 打开时生效，0 等于关）。'),
   pricePer1kInputYuan: z.number().min(0).default(0).description('估算花费用：每千输入 token 多少元（0 表示不算钱，只显示 token）。'),
   pricePer1kOutputYuan: z.number().min(0).default(0).description('估算花费用：每千输出 token 多少元。'),
   usageAwarenessEnabled: z.boolean().default(false).description('把人设自己这个会话的消耗（估算 token / 元）写进提示词，让它有「我在花钱」的意识。'),
@@ -574,9 +569,13 @@ export function apply(ctx, config) {
   // rendered, a scan wrote a credential — but there was no controller left to
   // hear "the login finished", so the inbound loop never moved to the new
   // credential and WeChat kept reporting that it could not reach openclaw.
+  // Resolve once for this plugin lifetime: the editor and AgentBridge must
+  // share the effective profile/overlay directory and the same fallback.
+  let workspaceDirectory
+  const getWorkspaceDirectory = () => workspaceDirectory ??= resolveCwd(ctx, config, warn)
   let loginController
   try {
-    loginController = new WeixinLoginController(ctx, {})
+    loginController = new WeixinLoginController(ctx, { getWorkspaceDirectory })
   } catch (error) {
     warn(`settings login service unavailable: ${String(error)}`)
     loginController = undefined
@@ -633,8 +632,6 @@ export function apply(ctx, config) {
     const TOOL_NOTICE_WINDOW_MS = 10 * 60_000
     /** @type {AgentBridge | undefined} */
     let bridge
-    /** @type {ReturnType<typeof createMemorySummarizer> | undefined} */
-    let memorySummarizer
     /** @type {AsrBridge | undefined} */
     let asrBridge
     /** @type {string} */
@@ -647,7 +644,6 @@ export function apply(ctx, config) {
     let notifyBridge
     let awayTimer
     let dateTimer
-    let contactRefreshTimer
     /** @type {Array<() => void>} */
     const offWebhook = []
     const backupTimers = []
@@ -678,7 +674,9 @@ export function apply(ctx, config) {
     // start), but the effect disposer is synchronous-safe: it awaits the startup
     // promise, then tears down whatever got as far as existing.
     const setup = (async () => {
-      cwd = await resolveCwd(ctx, config, warn)
+      cwd = await getWorkspaceDirectory()
+      // A cosmetic rename, never allowed to fail bring-up.
+      await ensureWorkspaceTitle(ctx, withSavedConfig(config), warn)
       bridge = new AgentBridge({
         ctx,
         cwd,
@@ -783,49 +781,10 @@ export function apply(ctx, config) {
         },
       })
 
-      // The P2 memory summarizer: folds recent turns into conv memory every
-      // memorySummaryTurns settled turns. Reads the CURRENT account config per
-      // call (the card can flip the knobs live); account-scoped per call.
-      // The memory model (optional): background summaries, fact extraction and
-      // consolidation run on a cheaper route when one is configured, so a
-      // chatty day of persona upkeep cannot spend the conversation's model.
-      const memoryRoute = () => routeFor('memory', config)
-      // C20: background side sessions (summary, subscriptions, proactive) get
-      // their own route; without one they fall back to the memory route, so a
-      // single cheap model covers everything that is not the conversation.
-      // purpose 明确时优先用该用途自己的路由；否则保持原来的回落链。
+      // C20: background side sessions (subscriptions, proactive) get their own
+      // route; without one they fall back to the host default, so a single cheap
+      // model covers everything that is not the conversation.
       sideRoute = (purpose = 'side') => routeFor(purpose, config) ?? sideRouteFor(config)
-      memorySummarizer = createMemorySummarizer({
-        bridge,
-        stateRoot,
-        config: () => config,
-        route: memoryRoute,
-        logger: { log: (line) => log(line), errLog: (line) => warn(line) },
-        // Three failures in a row used to leave only log lines nobody reads:
-        // the memory files stay on disk looking fine while silently never
-        // growing. Say it once, in the chat, where the operator will see it.
-        onPersistentFailure: ({ failures, reason }) => {
-          warn(`dsh-weixin: memory summarizer failed ${failures} times in a row: ${reason}`)
-          // Same target rule as the reports: the conversation spoken in most
-          // recently, on whichever transport is up.
-          const live = withSavedConfig(config)
-          const accountId = [...transports.keys()].find((id) => pickConversation(listConvMemories(stateRoot, id)) !== undefined)
-          if (accountId === undefined) return
-          const transport = transports.get(accountId)
-          const target = pickConversation(listConvMemories(stateRoot, accountId))
-          if (transport === undefined || target === undefined) return
-          const route = sideRoute()
-          const modelHint = route === undefined ? '当前模型' : `${route.provider ?? '?'}/${route.model ?? '?'}`
-          sendChunked(transport, live, {
-            conversationId: target.conversationId,
-            text: [
-              '（记忆后台连着几次没能跑完，这次先停在这里——不是没在做，是卡住了。）',
-              `原因：${String(reason).slice(0, 200)}`,
-              `用的是 ${modelHint}；记忆模型可以在「记忆模型」里单独指定（memoryProvider / memoryModel），换一个能用的就不会再卡。`,
-            ].join('\n'),
-          }).catch((error) => warn(`could not report the memory failure: ${String(error?.message ?? error)}`))
-        },
-      })
 
       // Voice transcription is opt-in and out of tree: with no bridge configured
       // this stays undefined and voice notes are delivered as files, exactly as
@@ -1344,67 +1303,6 @@ export function apply(ctx, config) {
       }, 60_000)
       dateTimer.unref?.()
 
-      /**
-       * 给这个账号补名片：只挑「过时 + 最近说过话」的人，只写模型从话里读出来的字段。
-       * 每次最多 max 张；跑完（或没得跑）都记一次时间，避免坏账号每轮重试。
-       */
-      const refreshContactCards = async (id, max) => {
-        let entries = []
-        try {
-          entries = readJournalRange(stateRoot, { accountId: id, days: CONTACT_REFRESH_DAYS })
-        } catch (error) {
-          warn(`contact refresh read failed for ${id}: ${String(error)}`)
-          markContactRefreshRun(stateRoot, id, { warn })
-          return
-        }
-        const now = Date.now()
-        const candidates = pickRefreshCandidates(stateRoot, id, entries, { now, max, staleDays: withSavedConfig(config).contactStaleDays, warn })
-        if (candidates.length === 0) {
-          markContactRefreshRun(stateRoot, id, { warn })
-          return
-        }
-        const conversationId = pickConversation(listConvMemories(stateRoot, id)) ?? String(candidates[0].contact.contactId)
-        let changed = 0
-        for (const candidate of candidates) {
-          const prompt = buildContactRefreshPrompt({ contact: candidate.contact, lines: candidate.lines, now })
-          let result
-          try {
-            result = await bridge.summarize({ conversationId, accountId: id, prompt, sessionPrefix: 'wx-card-', route: sideRoute('memory') })
-          } catch (error) {
-            warn(`contact refresh call failed for ${candidate.contact.contactId}: ${String(error)}`)
-            continue
-          }
-          const profile = parseContactRefresh(typeof result?.text === 'string' ? result.text : '')
-          if (profile === undefined) {
-            fileLog.info(`contact refresh for ${candidate.contact.contactId} produced nothing readable`)
-            continue
-          }
-          const saved = applyContactRefresh(stateRoot, id, candidate.contact.contactId, profile, { warn })
-          if (saved.ok === true) {
-            changed += 1
-            fileLog.info(`contact card refreshed for ${candidate.contact.contactId}`)
-          } else {
-            warn(`contact card write failed for ${candidate.contact.contactId}: ${saved.reason}`)
-          }
-        }
-        markContactRefreshRun(stateRoot, id, { warn })
-        if (changed > 0) fileLog.info(`contact refresh: ${changed} card(s) for ${id}`)
-      }
-
-      // 群成员名片：过时 + 最近说过话的人，交给后台模型从话里补一遍。
-      // 走 bridge.summarize（因此受 backgroundDailyLimit 约束），每 20 小时最多跑一次。
-      contactRefreshTimer = setInterval(() => {
-        const live = withSavedConfig(config)
-        if (live.contactRefreshEnabled !== true) return
-        const max = Math.max(0, Math.floor(Number(live.contactRefreshPerDay ?? 0)))
-        if (max <= 0) return
-        for (const [id] of transports) {
-          if (!contactRefreshDue(stateRoot, id, { now: Date.now(), warn })) continue
-          refreshContactCards(id, max).catch((error) => warn(`contact refresh failed for ${id}: ${String(error)}`))
-        }
-      }, 6 * 60 * 60_000)
-      contactRefreshTimer.unref?.()
-
     })()
     // A disabled gateway has no startLoop awaiting setup, but setup failures
     // still need an observer and disposal must wait for its resources.
@@ -1550,7 +1448,6 @@ export function apply(ctx, config) {
         accountId: account.accountId,
         transport: next,
         bridge,
-        memorySummarizer,
         asrBridge,
         seen,
         log,
@@ -1679,7 +1576,6 @@ export function apply(ctx, config) {
       await notifyBridge?.stop()
       if (awayTimer !== undefined) clearInterval(awayTimer)
       if (dateTimer !== undefined) clearInterval(dateTimer)
-      if (contactRefreshTimer !== undefined) clearInterval(contactRefreshTimer)
       for (const off of offWebhook.splice(0)) off()
       if (retentionTimer !== undefined) clearInterval(retentionTimer)
       for (const timer of backupTimers) clearTimeout(timer)
@@ -1754,6 +1650,45 @@ async function resolveCwd(ctx, config, warn) {
     warn(`could not resolve the default working directory: ${String(error)}`)
   }
   return process.cwd()
+}
+
+/**
+ * Give the Weixin conversations' dedicated workspace a human display title.
+ *
+ * DSH derives a Workspace's default title from its directory basename, so the
+ * plugin's own workspace shows up as `sessions`. This renames that record at
+ * bring-up. It is a silent no-op unless all of these hold:
+ *
+ *  - `workspaceTitle` is configured (empty keeps the folder name);
+ *  - the plugin's own workspace ({@link sessionsDir}) exists and its current
+ *    title is still the auto-derived folder name — a title the operator chose in
+ *    the UI is never overwritten.
+ *
+ * No path is hardcoded: the directory comes from the state-dir accessor, so the
+ * same code is correct under any profile or DSH_WEIXIN_STATE_DIR. A user who
+ * points `cwd` at their own project keeps that project's workspace untouched;
+ * the README tells the Agent how to configure `cwd` / `workspaceTitle`.
+ *
+ * @param {any} ctx
+ * @param {{ workspaceTitle?: string }} config
+ * @param {(line: string) => void} warn
+ */
+async function ensureWorkspaceTitle(ctx, config, warn) {
+  const title = typeof config.workspaceTitle === 'string' ? config.workspaceTitle.trim() : ''
+  if (title === '') return
+  const dir = sessionsDir()
+  const folderName = basename(dir)
+  try {
+    const registry = ctx.get('workspaceRegistry')
+    if (registry?.resolveByPath === undefined) return
+    const workspace = await registry.resolveByPath(dir)
+    if (workspace === undefined) return
+    if (folderName === '' || workspace.title !== folderName) return
+    if (typeof workspace.setTitle !== 'function') return
+    await workspace.setTitle(title)
+  } catch (error) {
+    warn(`could not set the Weixin workspace title: ${String(error)}`)
+  }
 }
 
 /**
@@ -1868,7 +1803,7 @@ export function weixinSourceBlock(message) {
   return `<weixin_source ${fields.join(' ')} />`
 }
 
-function createInboundHandler({ config, accountId, transport, bridge, memorySummarizer, asrBridge, seen, log, warn, fileLog, stateRoot, mediaDirs, agentCwd, reminderScheduler, subscriptionScheduler, proactiveScheduler, journalInbound, senderGate, senderDailyGate, sideRoute, quietGate }) {
+function createInboundHandler({ config, accountId, transport, bridge, asrBridge, seen, log, warn, fileLog, stateRoot, mediaDirs, agentCwd, reminderScheduler, subscriptionScheduler, proactiveScheduler, journalInbound, senderGate, senderDailyGate, sideRoute, quietGate }) {
   const injectedPersonaBySession = new Map()
   // The effective allowlist is per account: an account-level override in the
   // registry narrows (or replaces) the global list.
@@ -2086,7 +2021,6 @@ function createInboundHandler({ config, accountId, transport, bridge, memorySumm
           accountId,
           transportUp: transport !== undefined,
           proactiveWindow: describeLearnedHours(learnActiveHours(readJournalRange(stateRoot, { accountId, days: 14 }), {})),
-          contacts: countStaleContacts(stateRoot, accountId, { staleDays: live.contactStaleDays }),
           modeName: current?.name ?? currentId,
           companion: isCompanionMode(current),
           config: live,

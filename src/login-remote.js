@@ -141,6 +141,7 @@ export class WeixinLoginController extends TypertRemoteService {
     constructor(ctx, options = {}) {
         super(ctx, "weixinLoginController", { namespace: "weixin" });
         this.botType = options.botType ?? DEFAULT_BOT_TYPE;
+        this.getWorkspaceDirectory = options.getWorkspaceDirectory;
         /**
          * Called after a login writes a new credential, so the host can start
          * (or restart) the inbound loop without waiting for a reload. Assigned
@@ -743,43 +744,6 @@ export class WeixinLoginController extends TypertRemoteService {
      * Markdown document for the settings card's one-click export. The card
      * downloads the text itself — no file has to travel through the plugin.
      */
-    /** ⑦ Who the bot has met in group chats, and what it wrote down about them. */
-    async contacts(options) {
-        const { listContacts } = await import("./message/contacts.js");
-        const accountId = typeof options?.accountId === "string" && options.accountId !== "" ? options.accountId : this.activeAccountId();
-        if (accountId === "") return { contacts: [], accountId: "" };
-        return { accountId, contacts: listContacts(stateDir(), accountId).map((entry) => ({
-            contactId: entry.contactId,
-            call: entry.profile?.call ?? "",
-            profile: entry.profile,
-            firstSeenAt: entry.firstSeenAt,
-            lastSeenAt: entry.lastSeenAt,
-        })) };
-    }
-
-    /**
-     * Write one down. Same shape as the owner's profile, stored per sender, and it
-     * only ever affects group chats — a 1:1 chat has no need for a name card.
-     */
-    async contactSave(options) {
-        const { saveContact } = await import("./message/contacts.js");
-        const accountId = typeof options?.accountId === "string" && options.accountId !== "" ? options.accountId : this.activeAccountId();
-        const contactId = String(options?.contactId ?? "");
-        if (accountId === "") throw new RemoteError("no-account", "还没有绑定微信账号", {});
-        if (contactId === "") throw new RemoteError("bad_contact", "缺少联系人 id", {});
-        let profile = options?.profile;
-        if (typeof profile === "string") {
-            try {
-                profile = JSON.parse(profile);
-            } catch {
-                throw new RemoteError("bad_contact", "档案不是合法的 JSON", {});
-            }
-        }
-        const result = saveContact(stateDir(), accountId, contactId, { call: options?.call, profile });
-        if (result.ok !== true) throw new RemoteError("bad_contact", `没写进去：${result.reason}`, {});
-        return { ok: true, contact: result.contact };
-    }
-
     /**
      * Export a shareable template: persona modes, behaviour knobs, subscriptions.
      *
@@ -1084,8 +1048,14 @@ export class WeixinLoginController extends TypertRemoteService {
      * @param {{ modeId?: string }} [options]
      */
     async promptPreview(options) {
-        const root = stateDir();
-        const filePath = path.join(root, "sessions", "AGENTS.md");
+        // Startup owns the effective cwd (including profile configuration and
+        // fallback). Do not re-read the saved overlay and redirect the editor
+        // while the bridge is still running in its original workspace.
+        if (typeof this.getWorkspaceDirectory !== "function") {
+            throw new RemoteError("workspace-unavailable", "Workspace directory is not available", {});
+        }
+        const directory = await this.getWorkspaceDirectory();
+        const filePath = path.join(directory, "AGENTS.md");
         const action = typeof options?.action === "string" ? options.action : "read";
         if (action === "save") {
             const content = typeof options?.content === "string" ? options.content : "";
@@ -1438,4 +1408,4 @@ export function purgeStaleLogins() {
     }
 }
 
-remoteMethods(WeixinLoginController, ["startLogin", "poll", "submitVerifyCode", "cancel", "status", "logout", "sessions", "useSession", "removeSession", "pause", "resume", "label", "allowlist", "journal", "journalExport", "stats", "onboarding", "storage", "metrics", "outbox", "outboxRetry", "outboxDrop", "reminders", "remindCancel", "donateQr", "donateQrAlipay", "usageLedger", "personaOverview", "personaExport", "personaImport", "contacts", "contactSave", "packExport", "packImport", "packIndex", "packInstallRemote", "packPresets", "packInstallPreset", "migrateSummary", "migrateExport", "migrateInspect", "migrateRestore", "promptPreview", "personaModeSave", "personaModeRemove", "personaDefaultSet", "personaAccountDefaultSet", "personaOverrideClear", "memoryFactAdd", "memoryFactRemove", "memoryConvClear", "memoryProfileSave", "memoryEventAdd", "memoryEventDone", "memoryEventRemove"]);
+remoteMethods(WeixinLoginController, ["startLogin", "poll", "submitVerifyCode", "cancel", "status", "logout", "sessions", "useSession", "removeSession", "pause", "resume", "label", "allowlist", "journal", "journalExport", "stats", "onboarding", "storage", "metrics", "outbox", "outboxRetry", "outboxDrop", "reminders", "remindCancel", "donateQr", "donateQrAlipay", "usageLedger", "personaOverview", "personaExport", "personaImport", "packExport", "packImport", "packIndex", "packInstallRemote", "packPresets", "packInstallPreset", "migrateSummary", "migrateExport", "migrateInspect", "migrateRestore", "promptPreview", "personaModeSave", "personaModeRemove", "personaDefaultSet", "personaAccountDefaultSet", "personaOverrideClear", "memoryFactAdd", "memoryFactRemove", "memoryConvClear", "memoryProfileSave", "memoryEventAdd", "memoryEventDone", "memoryEventRemove"]);
