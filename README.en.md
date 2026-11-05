@@ -1,11 +1,20 @@
-# dsh-plugin-wechat · Control Your DeepSeek Harness from WeChat
+<div align="center">
+
+<img src="assets/icon-128.png" width="72" alt="dsh-plugin-wechat" />
+
+# dsh-plugin-wechat
+
+**Control Your DeepSeek Harness Anytime from WeChat**
+
+[**简体中文**](README.md) · [**MIT License**](LICENSE)
+
+</div>
 
 Chat with the **DeepSeek Harness (DSH)** running on your computer directly from WeChat on your phone when you are away from your desk:
-- Send a message in WeChat to have your local Agent research, write code, edit docs, or run tasks, and receive the results (or generated files) back in WeChat;
-- Even when a task spawns multiple async Subagents running for minutes, final replies are automatically delivered in order;
-- Credentials and chat data stay strictly on your own machine (`~/.dsh/weixin/`).
 
-**[简体中文](README.md)** · **[MIT License](LICENSE)**
+- **Command from anywhere**: Send a message in WeChat to have your local Agent research, write code, edit docs, or run tasks, and receive results or files back in WeChat;
+- **Never miss async subagents**: Even when a task spawns multiple Subagents running for minutes, final replies are automatically delivered in order;
+- **100% local state**: Credentials and chat data stay strictly on your own machine (`~/.dsh/weixin/`).
 
 ---
 

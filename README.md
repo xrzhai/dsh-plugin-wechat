@@ -1,11 +1,20 @@
-# dsh-plugin-wechat · 在微信里随时使唤你的 DeepSeek Harness
+<div align="center">
 
-离开电脑桌的时候，直接用手机微信给家里的 / 办公室电脑上的 **DeepSeek Harness (DSH)** 发消息干活：
-- 在微信里说句话，电脑上的 Agent 帮你查资料、改代码、写文档、跑任务，跑完直接把结果（或生成的文件）发回你微信；
-- 就算任务派了好几个子 Agent 跑十几分钟，跑完也会自动推送到你微信上；
-- 所有账号凭证和聊天都只在你自己的电脑里，不经过任何第三方服务器。
+<img src="assets/icon-128.png" width="72" alt="dsh-plugin-wechat" />
 
-**[English](README.en.md)** · **[MIT License](LICENSE)**
+# dsh-plugin-wechat
+
+**在微信里随时使唤你的 DeepSeek Harness**
+
+[**English**](README.en.md) · [**MIT License**](LICENSE)
+
+</div>
+
+离开电脑桌的时候，直接用手机微信给家里或办公室电脑上的 **DeepSeek Harness (DSH)** 发消息干活：
+
+- **随时派活**：在微信里说句话，电脑上的 Agent 帮你查资料、改代码、写文档、跑任务，跑完直接把结果或生成的文件发回你微信；
+- **子任务不漏回**：就算主 Agent 派了好几个子 Agent 跑上十几分钟，跑完也会自动把汇总结果推到你微信上；
+- **纯本地更安心**：所有账号凭证和聊天记录都只存在你自己的电脑里（`~/.dsh/weixin/`），不经过任何第三方服务器。
 
 ---
 
