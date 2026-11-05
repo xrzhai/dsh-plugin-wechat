@@ -92,8 +92,8 @@ const CN_PERIOD_AM = new Set(['凌晨', '早上', '早晨', '上午'])
  * 中文口语时间：`明天 9:00`、`后天下午3点半`、`下周一 10点`、`3小时后`。
  *
  * 只认「日期词 + 时钟」这一种组合，不做模糊猜测：`明天下午`（没有钟点）
- * 会明确要求补一个时间，而不是替用户选一个。`下周一` 永远指下一周，
- * `周一` 指本周（已过则报错），避免同一个词在不同日子有两种解释。
+ * 会明确要求补一个时间，而不是替用户选一个。`下周一` 永远指下一个自然周，
+ * `周一` 指最近一次尚未过去的该星期几（当天已过 09:00 就顺延一周）。
  *
  * @param {string} spec
  * @param {Date} now
@@ -162,7 +162,12 @@ function parseNaturalWhen(spec, now) {
     target.setDate(target.getDate() + day.offset)
   } else if (day?.weekday !== undefined) {
     let delta = (day.weekday - now.getDay() + 7) % 7
-    if (day.next === true) delta += 7
+    if (day.next === true) {
+      // 「下周X」从下一个周一算起。先算今天到下周一的距离，再加目标星期
+      // 相对周一的偏移；直接给 `% 7` 的结果加 7 会让已过去的星期多等一周。
+      const daysToNextMonday = 7 - ((now.getDay() + 6) % 7)
+      delta = daysToNextMonday + ((day.weekday + 6) % 7)
+    }
     target.setDate(target.getDate() + delta)
   }
   target.setHours(hour, minute, 0, 0)

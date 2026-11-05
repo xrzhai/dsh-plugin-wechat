@@ -1,6 +1,18 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { parseSessionCommand, commandIds } from '../src/sessions.js'
+import { parseSessionCommand, commandIds, runSessionCommand } from '../src/sessions.js'
+
+function captureReminder(arg) {
+  let plan
+  const reminders = {
+    schedule(value) {
+      plan = value
+      return { id: 'r1' }
+    },
+  }
+  const reply = runSessionCommand(undefined, 'conversation', `/remind ${arg}`, 'account', { reminders })
+  return { plan, reply }
+}
 
 test('控制命令能被正确解析', () => {
   assert.deepEqual(parseSessionCommand('/new'), { command: 'new' })
@@ -36,4 +48,25 @@ test('commandIds 覆盖会话管理命令', () => {
   for (const id of ['new', 'list', 'use', 'clear', 'cancel', 'compact']) {
     assert.ok(ids.includes(id), `commandIds 缺少 ${id}`)
   }
+})
+
+test('/remind 优先采用最长可解析时间，星期和钟点不会被吞进正文', () => {
+  for (const arg of ['周五 10点 开会', '下周一 10点 开会']) {
+    const { plan } = captureReminder(arg)
+    const fireAt = new Date(plan.fireAt)
+    assert.equal(fireAt.getDay(), arg.startsWith('下周一') ? 1 : 5)
+    assert.equal(fireAt.getHours(), 10)
+    assert.equal(fireAt.getMinutes(), 0)
+    assert.equal(plan.text, '开会')
+  }
+})
+
+test('/remind 裸星期几仍使用 09:00，正文中的时间词完整保留', () => {
+  const bare = captureReminder('周五 开会 10点')
+  assert.equal(new Date(bare.plan.fireAt).getDay(), 5)
+  assert.equal(new Date(bare.plan.fireAt).getHours(), 9)
+  assert.equal(bare.plan.text, '开会 10点')
+
+  const duration = captureReminder('10m 9点 开会')
+  assert.equal(duration.plan.text, '9点 开会')
 })
