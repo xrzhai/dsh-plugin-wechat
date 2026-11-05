@@ -23,12 +23,19 @@ import zlib from 'node:zlib'
 /** 默认最多取这么多字符；超出部分丢弃并注明，避免一份 200 页文档吃掉上下文。 */
 export const DEFAULT_DOCUMENT_CHARS = 4000
 
+/** Hard ceiling for one decompressed DOCX XML part, including forged metadata cases. */
+export const MAX_DOCX_XML_BYTES = 8 * 1024 * 1024
+
 /** 没装 pdfjs-dist 时给用户看的说明（调用点把它当 reason 记日志）。 */
 export const PDF_LOAD_HINT = 'pdf support needs the optional pdfjs-dist package (npm i pdfjs-dist)'
 
 const TEXT_EXTENSIONS = new Set(['.txt', '.md', '.markdown', '.csv', '.json', '.log', '.xml', '.yaml', '.yml'])
 const DOCX_EXTENSIONS = new Set(['.docx'])
 const PDF_EXTENSIONS = new Set(['.pdf'])
+
+function documentXmlTooLarge() {
+  return new Error(`word/document.xml exceeds the ${MAX_DOCX_XML_BYTES / (1024 * 1024)} MiB extraction limit`)
+}
 
 /** Read one entry out of a zip's central directory. Returns undefined when absent. */
 function readZipEntry(buffer, wantedName) {
@@ -49,22 +56,42 @@ function readZipEntry(buffer, wantedName) {
     if (offset + 46 > buffer.length || buffer.readUInt32LE(offset) !== 0x02014b50) break
     const method = buffer.readUInt16LE(offset + 10)
     const compressedSize = buffer.readUInt32LE(offset + 20)
+    const uncompressedSize = buffer.readUInt32LE(offset + 24)
     const nameLength = buffer.readUInt16LE(offset + 28)
     const extraLength = buffer.readUInt16LE(offset + 30)
     const commentLength = buffer.readUInt16LE(offset + 32)
     const localOffset = buffer.readUInt32LE(offset + 42)
+    const nextOffset = offset + 46 + nameLength + extraLength + commentLength
+    if (nextOffset > buffer.length) break
     const name = buffer.subarray(offset + 46, offset + 46 + nameLength).toString('utf8')
     if (name === wantedName) {
+      // Trust the central directory only as an early refusal. The actual data
+      // path below still enforces the same cap, so forged small metadata cannot
+      // bypass decompression limits.
+      if (uncompressedSize > MAX_DOCX_XML_BYTES) throw documentXmlTooLarge()
+      if (localOffset + 30 > buffer.length) throw new Error('broken local header')
       if (buffer.readUInt32LE(localOffset) !== 0x04034b50) throw new Error('broken local header')
       const localNameLength = buffer.readUInt16LE(localOffset + 26)
       const localExtraLength = buffer.readUInt16LE(localOffset + 28)
       const dataStart = localOffset + 30 + localNameLength + localExtraLength
-      const data = buffer.subarray(dataStart, dataStart + compressedSize)
-      if (method === 0) return data
-      if (method === 8) return zlib.inflateRawSync(data)
+      const dataEnd = dataStart + compressedSize
+      if (dataStart > buffer.length || dataEnd > buffer.length) throw new Error('broken zip entry data')
+      const data = buffer.subarray(dataStart, dataEnd)
+      if (method === 0) {
+        if (data.length > MAX_DOCX_XML_BYTES) throw documentXmlTooLarge()
+        return data
+      }
+      if (method === 8) {
+        try {
+          return zlib.inflateRawSync(data, { maxOutputLength: MAX_DOCX_XML_BYTES })
+        } catch (error) {
+          if (error?.code === 'ERR_BUFFER_TOO_LARGE') throw documentXmlTooLarge()
+          throw error
+        }
+      }
       throw new Error(`unsupported zip compression method ${method}`)
     }
-    offset += 46 + nameLength + extraLength + commentLength
+    offset = nextOffset
   }
   return undefined
 }
