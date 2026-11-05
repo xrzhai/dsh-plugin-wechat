@@ -696,7 +696,12 @@ export function apply(ctx, config) {
           try { await transport.refreshConfig() } catch {}
           const current = sessionDispatcherConfig()
           if (transports.get(accountId) !== transport || !allowed(current)) return
-          await sendChunked(transport, current, { conversationId, text, contextToken: '' })
+          // #31: a parallel-session dispatch result is promised as plain text on
+          // the durable text pipeline. Force rich content off here so a long
+          // fenced code block stays inline instead of being swapped for a
+          // snippet attachment whose upload can fail and drop the body. Ordinary
+          // replies keep the user's richContent setting untouched.
+          await sendChunked(transport, { ...current, richContent: false }, { conversationId, text, contextToken: '' })
         },
         // 账本：桥每完成一个真正跑完的回合就报一次（谁会调用由它决定，写去哪
         // 由这里决定 —— 桥不认识 stateRoot）。

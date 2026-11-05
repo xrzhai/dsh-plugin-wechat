@@ -279,3 +279,58 @@ test('apply wires saved policy and exact account/chat dispatch notification rout
   await dispose()
   assert.equal(dispatcher.stopped.signal.aborted, true)
 })
+
+// #31: a parallel-session dispatch result is promised as plain text. When the
+// project reply carries a fenced code block over `codeFileThreshold`, rich
+// content would normally swap it for a snippet attachment — and a failed upload
+// silently drops the body. The real onDispatchReply callback must force rich
+// content off for this path so the full code stays inline.
+test('dispatch notifications keep long code inline as text, never as a lossy attachment (#31)', async (t) => {
+  const env = process.env.DSH_WEIXIN_STATE_DIR
+  const root = fs.mkdtempSync(path.join(stateDir(), 'dispatch-rich-'))
+  process.env.DSH_WEIXIN_STATE_DIR = root
+  configureWeixinStateDir()
+  fs.writeFileSync(configFile(), JSON.stringify({
+    enabled: true,
+    sessionDispatcherEnabled: true,
+    sessionDispatcherSenders: ['owner'],
+    sessionDispatcherTargets: ['project-fixture'],
+    allowedSenders: ['owner'],
+    allowedChats: ['owner'],
+  }))
+  const account = 'dispatch-rich-account'
+  saveWeixinAccount(account, { token: 'synthetic-test-token', userId: 'owner', baseUrl: 'https://example.invalid' })
+  registerWeixinAccountId(account)
+  const started = [], sent = [], mediaCalls = []
+  let dispatcher
+  const mount = SessionDispatcher.prototype.mount
+  t.mock.method(SessionDispatcher.prototype, 'mount', function (...args) { dispatcher = this; return mount.apply(this, args) })
+  t.mock.method(ILinkTransport.prototype, 'refreshConfig', async function () {})
+  t.mock.method(ILinkTransport.prototype, 'start', async function (inbound) { this.testInbound = inbound; started.push(this) })
+  t.mock.method(ILinkTransport.prototype, 'stop', async function () {})
+  t.mock.method(ILinkTransport.prototype, 'send', async function (message) { sent.push({ accountId: this.accountId, ...message }) })
+  t.mock.method(ILinkTransport.prototype, 'sendMedia', async function (message) { mediaCalls.push(message) })
+  const ctx = new Context()
+  ctx.provide('agents', { create: async ({ sessionId }) => ({ agent: { session: { id: sessionId, snapshotEvents: () => [] } }, dispose: async () => {} }) })
+  let disposed = false
+  const dispose = async () => { if (!disposed) { disposed = true; await ctx.fiber.dispose() } }
+  t.after(async () => { await dispose(); if (env === undefined) delete process.env.DSH_WEIXIN_STATE_DIR; else process.env.DSH_WEIXIN_STATE_DIR = env; fs.rmSync(root, { recursive: true, force: true }) })
+  apply(ctx, { enabled: true, allowedSenders: ['owner'], knowledgeEnabled: false, notifyEnabled: false, mediaEnabled: false, typingIndicator: false })
+  await until(() => started.length === 1)
+  await tick()
+  // Attaching a live controller is what creates the SessionDispatcher; drive one
+  // inbound command so the real bridge/dispatcher wiring exists before notifying.
+  const origin = started[0]
+  await origin.testInbound({ id: 'synthetic-command', type: 'text', text: '/compact', senderId: 'owner', conversationId: 'owner', contextToken: 'synthetic-context', timestamp: Date.now() })
+  assert.ok(dispatcher, 'apply must have mounted the session dispatcher')
+  sent.length = 0
+  const longBody = Array.from({ length: 120 }, (_, i) => `const value${i} = ${i}; KEEPMEINLINE`).join('\n')
+  assert.ok(longBody.length > 1200, 'fixture must exceed the default codeFileThreshold')
+  await dispatcher.notify({ accountId: account, conversationId: 'owner', senderId: 'owner', targetSessionId: 'project-fixture',
+    text: '实现如下：\n```js\n' + longBody + '\n```\n以上。' })
+  const deliveredText = sent.filter((m) => typeof m.text === 'string').map((m) => m.text).join('\n')
+  assert.ok(deliveredText.includes('const value119 = 119; KEEPMEINLINE'), 'long code body must stay inline in dispatch notifications')
+  assert.ok(!deliveredText.includes('已作为文件'), 'dispatch notification must not swap code for a file note')
+  assert.equal(mediaCalls.length, 0, 'dispatch notification must not attempt a media upload')
+  await dispose()
+})
