@@ -157,6 +157,41 @@ export function readLines() {
 }
 
 /**
+ * Conversation most recently used by one account.
+ *
+ * Store keys are account-scoped, so filtering by the account prefix is part
+ * of choosing the target; another account's more recent activity must never
+ * steal a notification. Timestamps are compared as instants because persisted
+ * ISO strings may carry different UTC offsets.
+ *
+ * @param {string} accountId
+ * @param {ReturnType<typeof readLines>} [store]
+ * @returns {string | undefined}
+ */
+export function mostRecentConversationId(accountId, store = readLines()) {
+  const account = String(accountId ?? '').trim()
+  if (account === '') return undefined
+  const prefix = `${conversationSlug(account)}:`
+  let best
+  for (const [key, entry] of Object.entries(store)) {
+    if (!key.startsWith(prefix) || key.length === prefix.length) continue
+    let lastUsed = Number.NEGATIVE_INFINITY
+    for (const line of Array.isArray(entry?.lines) ? entry.lines : []) {
+      const usedAt = Date.parse(line?.lastUsedAt ?? '')
+      const createdAt = Date.parse(line?.createdAt ?? '')
+      const candidate = Number.isFinite(usedAt)
+        ? usedAt
+        : Number.isFinite(createdAt) ? createdAt : Number.NEGATIVE_INFINITY
+      if (candidate > lastUsed) lastUsed = candidate
+    }
+    if (Number.isFinite(lastUsed) && (best === undefined || lastUsed > best.lastUsed)) {
+      best = { conversationId: key.slice(prefix.length), lastUsed }
+    }
+  }
+  return best?.conversationId
+}
+
+/**
  * Write the line store.
  *
  * Written through a temp file and renamed, so a crash mid-write cannot leave a
@@ -439,13 +474,15 @@ export class SessionLines {
     if (line === undefined) return undefined
     // Only the first message names a line: re-titling on every message would
     // make `/list` show whatever was said most recently.
-    if (typeof line.title === 'string' && line.title !== '') return undefined
+    // deliver() calls this for every message. Keep the first title, but record
+    // every visit so notifications can follow a conversation resumed later.
+    const alreadyNamed = typeof line.title === 'string' && line.title !== ''
     const now = new Date().toISOString()
     if (line.createdAt === undefined) line.createdAt = now
     line.lastUsedAt = now
-    line.title = titledWithAccount(text, accountId)
+    if (!alreadyNamed) line.title = titledWithAccount(text, accountId)
     this.#set(key, { lines, active: existing?.active ?? sessionId })
-    return line.title
+    return alreadyNamed ? undefined : line.title
   }
 
   /**
@@ -608,15 +645,11 @@ const COMMANDS = [
   { id: 'diag', pattern: /^\/diag(?:\s+([\S\s]+))?$/i, build: (match) => ({ arg: match[1]?.trim() ?? '' }), helpRank: 22, helpKey: 'help.diag' },
   { id: 'outbox', pattern: /^\/outbox(?:\s+([\s\S]+))?$/, build: (m) => ({ arg: m[1] ?? '' }), helpRank: 23, helpKey: 'help.outbox' },
   { id: 'quiet', pattern: /^\/quiet(?:\s+([\s\S]+))?$/, build: (m) => ({ arg: m[1] ?? '' }), helpRank: 24, helpKey: 'help.quiet' },
-  { id: 'bad', pattern: /^\/bad(?:\s+([\s\S]+))?$/i, build: (m) => ({ arg: m[1] ?? '' }), helpRank: 29, helpKey: 'help.bad' },
-  { id: 'good', pattern: /^\/good(?:\s+([\s\S]+))?$/i, build: (m) => ({ arg: m[1] ?? '' }), helpRank: 30, helpKey: 'help.good' },
   { id: 'say', pattern: /^\/say(?:\s+([\s\S]+))?$/, build: (m) => ({ arg: m[1] ?? '' }), helpRank: 32, helpKey: 'help.say' },
-  { id: 'style', pattern: /^\/style(?:\s+([\s\S]+))?$/i, build: (m) => ({ arg: m[1] ?? '' }), helpRank: 31, helpKey: 'help.style' },
   { id: 'draft', pattern: /^\/draft(?:\s+([\s\S]+))?$/i, build: (m) => ({ arg: m[1] ?? '' }), helpRank: 32, helpKey: 'help.draft' },
   { id: 'snooze', pattern: /^\/snooze(?:\s+(\S+))?$/, build: (m) => ({ arg: m[1] ?? '' }), helpRank: 25, helpKey: 'help.snooze' },
   { id: 'habit', pattern: /^\/habit(?:\s+([\s\S]+))?$/i, build: (m) => ({ arg: m[1] ?? '' }), helpRank: 26, helpKey: 'help.habit' },
   { id: 'media', pattern: /^\/media(?:\s+([\s\S]+))?$/i, build: (m) => ({ arg: m[1] ?? '' }), helpRank: 27, helpKey: 'help.media' },
-  { id: 'digest', pattern: /^\/digest$/i, build: identity, helpRank: 28, helpKey: 'help.digest' },
   { id: 'usage', pattern: /^\/usage$/i, build: identity, helpRank: 26, helpKey: 'help.usage' },
   // `/remind 明天 9:00 内容`：时间本身可能带空格（`明天 9:00`、`下周一 10点`），
   // 所以整段交给执行分支按前缀尝试解析，第一个能解析的前缀是时间，其余是内容。
@@ -650,10 +683,7 @@ const COMMANDS = [
     pattern: /^\/(?:subscribe|订阅)$/i,
     build: () => ({ when: '', text: '' }),
   },
-  { id: 'summary', pattern: /^\/(?:summary|总结)$/i, build: identity, helpRank: 11, helpKey: 'help.summary' },
-  {
-    id: 'export',
-    pattern: /^\/(?:export|导出)(?:\s+(\d{1,3}))?$/i,
+  { id: 'export', pattern: /^\/(?:export|导出)(?:\s+(\d{1,3}))?$/i,
     build: (match) => ({ days: match[1] === undefined ? undefined : Number(match[1]) }),
     helpRank: 12,
     helpKey: 'help.export',
@@ -666,26 +696,15 @@ const COMMANDS = [
     helpRank: 21,
     helpKey: 'help.subscribecancel',
   },
-  // Persona + memory commands (personalization round). Parsing stays pure:
-  // each one is ANSWERED by a handler the inbound handler provides under
-  // context.persona, because the store and the mode table live with the
-  // plugin's state root, not in this module.
-  { id: 'mode', pattern: /^\/(?:mode|模式)(?:\s+([\S\s]+))?$/i, build: (match) => ({ arg: match[1]?.trim() }), helpRank: 6, helpKey: 'help.mode' },
-  { id: 'remember', pattern: /^\/(?:remember|记住)(?:\s+([\S\s]+))?$/i, build: (match) => ({ arg: match[1]?.trim() ?? '' }), helpRank: 7, helpKey: 'help.remember' },
-  { id: 'forget', pattern: /^\/(?:forget|忘记)(?:\s+([\S\s]+))?$/i, build: (match) => ({ arg: match[1]?.trim() }), helpRank: 8, helpKey: 'help.forget' },
-  { id: 'memory', pattern: /^\/(?:memory|记忆)(?:\s+([\S\s]+))?$/i, build: (match) => ({ arg: match[1]?.trim() ?? '' }), helpRank: 9, helpKey: 'help.memory' },
-  { id: 'undo', pattern: /^\/(?:undo|撤销)(?:\s+([\S\s]+))?$/i, build: (match) => ({ arg: match[1]?.trim() ?? '' }), helpRank: 9, helpKey: 'help.undo' },
   { id: 'config', pattern: /^\/config$/i, build: identity, helpRank: 26, helpKey: 'help.config' },
   { id: 'keyword', pattern: /^\/(?:keyword|关键词)(?:\s+([\S\s]+))?$/i, build: (match) => ({ arg: match[1]?.trim() ?? '' }), helpRank: 22, helpKey: 'help.keyword' },
-  { id: 'import', pattern: /^\/(?:import|导入)(?:\s+([\S\s]+))?$/i, build: (match) => ({ arg: match[1]?.trim() ?? '' }), helpRank: 9, helpKey: 'help.import' },
-  { id: 'recall', pattern: /^\/(?:recall|回忆|翻记录)(?:\s+([\S\s]+))?$/i, build: (match) => ({ arg: match[1]?.trim() ?? '' }), helpRank: 10, helpKey: 'help.recall' },
   { id: 'todo', pattern: /^\/(?:todo|待办)(?:\s+([\S\s]+))?$/i, build: (match) => ({ arg: match[1]?.trim() ?? '' }), helpRank: 11, helpKey: 'help.todo' },
   { id: 'later', pattern: /^\/(?:later|稍后读|稍后)(?:\s+([\S\s]+))?$/i, build: (match) => ({ arg: match[1]?.trim() ?? '' }), helpRank: 12, helpKey: 'help.later' },
   { id: 'send', pattern: /^\/send(?:\s+([\S\s]+))?$/i, build: (match) => ({ arg: match[1]?.trim() ?? '' }), helpRank: 13, helpKey: 'help.send' },
 ]
 
 /** Commands answered by the inbound handler's persona bundle (state root lives there). */
-const PERSONA_COMMANDS = new Set(['mode', 'remember', 'forget', 'memory', 'undo', 'import', 'keyword', 'summary', 'export', 'recall', 'away', 'back', 'todo', 'later', 'send', 'diag', 'outbox', 'quiet', 'usage', 'habit', 'media', 'digest', 'config', 'bad', 'good', 'style', 'draft',
+const PERSONA_COMMANDS = new Set(['keyword', 'export', 'away', 'back', 'todo', 'later', 'send', 'diag', 'outbox', 'quiet', 'usage', 'habit', 'media', 'config', 'draft',
   'say',
 ])
 
@@ -756,7 +775,6 @@ function runStatus({ lines, conversationId, accountId, context }) {
     parts.push(`账号：${context.accountLabel ? `${context.accountLabel}（${context.accountId}）` : context.accountId}`)
     if (typeof context.paused === 'boolean') parts.push(`状态：${context.paused ? '已暂停（不收发消息）' : '正常收发'}`)
     if (context.lastSeenAt) parts.push(`最近收发：${context.lastSeenAt}`)
-    if (typeof context.bondLine === 'string' && context.bondLine !== '') parts.push(context.bondLine)
     if (context.allowlist) {
       const source = context.allowlist.source === 'account' ? '本账号专属名单' : '全局名单'
       parts.push(`发信人白名单：${context.allowlist.senders.length} 人（${source}）`)
@@ -801,12 +819,12 @@ export function runSessionCommand(lines, conversationId, text, accountId, contex
   const rule = COMMANDS.find((candidate) => candidate.id === command.command)
   if (rule?.run !== undefined) return rule.run({ lines, conversationId, accountId, command, context })
 
-  if (command.command === 'answer' && typeof context?.persona?.answer === 'function') {
+  if (command.command === 'answer') {
     // ② `/是`、`/不用` 只在真的有待答问题时才算命令：`/remember` 刚问过「要换成
-    //    这条吗」，下一句就靠这里认出来。handler 回 undefined 表示没人问话，
-    //    于是继续往下走 —— 最后落到桥的答案分支回 undefined，调用方当作普通聊天。
-    const answered = context.persona.answer(command.arg)
-    if (answered !== undefined) return answered
+    //    这条吗」，下一句就靠这里认出来。没有 handler 或 handler 回 undefined
+    //    都表示没人问话，调用方必须把正文继续交给普通聊天。
+    if (typeof context?.persona?.answer !== 'function') return undefined
+    return context.persona.answer(command.arg)
   }
   if (command.command === 'new') {
     const sessionId = lines.create(conversationId, accountId)

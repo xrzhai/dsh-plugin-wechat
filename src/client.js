@@ -265,59 +265,8 @@ window.__ModuleLoader__.load({
 					invocation: { kind: "direct" },
 					parameters: [],
 					result: { mode: "strict", typeSymbol: `${PKG}#weixin/onboarding:result`, create: _statusResult },
-				},
-				{
-					id: `${PKG}#weixin/packExport`,
-					service: "weixinLoginController",
-					namespace: "weixin",
-					method: "packExport",
-					invocation: { kind: "direct" },
-					parameters: [
-						{ name: "options", wire: "options", source: "json", codec: { mode: "strict", typeSymbol: `${PKG}#weixin/packExport:p0`, create: _strMap } },
-					],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixin/packExport:result`, create: _statusResult },
-				},
-				{
-					id: `${PKG}#weixin/packImport`,
-					service: "weixinLoginController",
-					namespace: "weixin",
-					method: "packImport",
-					invocation: { kind: "direct" },
-					parameters: [
-						{ name: "options", wire: "options", source: "json", codec: { mode: "strict", typeSymbol: `${PKG}#weixin/packImport:p0`, create: _strMap } },
-					],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixin/packImport:result`, create: _statusResult },
-				},
-				{
-					id: `${PKG}#weixin/packIndex`,
-					service: "weixinLoginController",
-					namespace: "weixin",
-					method: "packIndex",
-					invocation: { kind: "direct" },
-					parameters: [],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixin/packIndex:result`, create: _statusResult },
-				},
-				{
-					id: `${PKG}#weixin/packInstallRemote`,
-					service: "weixinLoginController",
-					namespace: "weixin",
-					method: "packInstallRemote",
-					invocation: { kind: "direct" },
-					parameters: [
-						{ name: "options", wire: "options", source: "json", codec: { mode: "strict", typeSymbol: `${PKG}#weixin/packInstallRemote:p0`, create: _strMap } },
-					],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixin/packInstallRemote:result`, create: _statusResult },
-				},
+				},
 
-				{
-					id: `${PKG}#weixin/packPresets`,
-					service: "weixinLoginController",
-					namespace: "weixin",
-					method: "packPresets",
-					invocation: { kind: "direct" },
-					parameters: [],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixin/packPresets:result`, create: _statusResult },
-				},
 				{
 					id: `${PKG}#weixin/migrateSummary`,
 					service: "weixinLoginController",
@@ -369,179 +318,7 @@ window.__ModuleLoader__.load({
 					parameters: [{ name: "options", wire: "options", source: "json", codec: { mode: "strict", typeSymbol: `${PKG}#weixin/promptPreview:p0`, create: _strMap } }],
 					result: { mode: "strict", typeSymbol: `${PKG}#weixin/promptPreview:result`, create: _statusResult },
 				},
-				{
-					id: `${PKG}#weixin/packInstallPreset`,
-					service: "weixinLoginController",
-					namespace: "weixin",
-					method: "packInstallPreset",
-					invocation: { kind: "direct" },
-					parameters: [
-						{ name: "options", wire: "options", source: "json", codec: { mode: "strict", typeSymbol: `${PKG}#weixin/packInstallPreset:p0`, create: _strMap } },
-					],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixin/packInstallPreset:result`, create: _statusResult },
-				},
-
-				{
-					id: `${PKG}#weixin/personaOverview`,
-					service: "weixinLoginController",
-					namespace: "weixin",
-					method: "personaOverview",
-					invocation: { kind: "direct" },
-					parameters: [
-						{ name: "options", wire: "options", source: "json", codec: { mode: "strict", typeSymbol: `${PKG}#weixin/personaOverview:p0`, create: _strMap } },
-					],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixin/personaOverview:result`, create: _statusResult },
-				},
-				{
-					id: `${PKG}#weixin/personaModeSave`,
-					service: "weixinLoginController",
-					namespace: "weixin",
-					method: "personaModeSave",
-					invocation: { kind: "direct" },
-					parameters: [
-						{ name: "options", wire: "options", source: "json", codec: { mode: "strict", typeSymbol: `${PKG}#weixin/personaModeSave:p0`, create: _strMap } },
-					],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixin/personaModeSave:result`, create: _statusResult },
-				},
-				{
-					id: `${PKG}#weixin/personaExport`,
-					service: "weixinLoginController",
-					namespace: "weixin",
-					method: "personaExport",
-					invocation: { kind: "direct" },
-					parameters: [],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixin/personaExport:result`, create: _statusResult },
-				},
-				{
-					id: `${PKG}#weixin/personaImport`,
-					service: "weixinLoginController",
-					namespace: "weixin",
-					method: "personaImport",
-					invocation: { kind: "direct" },
-					parameters: [{ name: "options", wire: "options", source: "json", codec: { mode: "strict", typeSymbol: `${PKG}#weixin/personaImport:p0`, create: _strMap } }],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixin/personaImport:result`, create: _statusResult },
-				},
-				{
-					id: `${PKG}#weixin/personaModeRemove`,
-					service: "weixinLoginController",
-					namespace: "weixin",
-					method: "personaModeRemove",
-					invocation: { kind: "direct" },
-					parameters: [
-						{ name: "modeId", wire: "modeId", source: "json", codec: { mode: "strict", typeSymbol: `${PKG}#weixin/personaModeRemove:p0`, create: _str } },
-					],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixin/personaModeRemove:result`, create: _statusResult },
-				},
-				{
-					id: `${PKG}#weixin/personaDefaultSet`,
-					service: "weixinLoginController",
-					namespace: "weixin",
-					method: "personaDefaultSet",
-					invocation: { kind: "direct" },
-					parameters: [
-						{ name: "modeId", wire: "modeId", source: "json", codec: { mode: "strict", typeSymbol: `${PKG}#weixin/personaDefaultSet:p0`, create: _str } },
-					],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixin/personaDefaultSet:result`, create: _statusResult },
-				},
-				{
-					id: `${PKG}#weixin/personaAccountDefaultSet`,
-					service: "weixinLoginController",
-					namespace: "weixin",
-					method: "personaAccountDefaultSet",
-					invocation: { kind: "direct" },
-					parameters: [
-						{ name: "options", wire: "options", source: "json", codec: { mode: "strict", typeSymbol: `${PKG}#weixin/personaAccountDefaultSet:p0`, create: _strMap } },
-					],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixin/personaAccountDefaultSet:result`, create: _statusResult },
-				},
-				{
-					id: `${PKG}#weixin/personaOverrideClear`,
-					service: "weixinLoginController",
-					namespace: "weixin",
-					method: "personaOverrideClear",
-					invocation: { kind: "direct" },
-					parameters: [
-						{ name: "options", wire: "options", source: "json", codec: { mode: "strict", typeSymbol: `${PKG}#weixin/personaOverrideClear:p0`, create: _strMap } },
-					],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixin/personaOverrideClear:result`, create: _statusResult },
-				},
-				{
-					id: `${PKG}#weixin/memoryEventAdd`,
-					service: "weixinLoginController",
-					namespace: "weixin",
-					method: "memoryEventAdd",
-					invocation: { kind: "direct" },
-					parameters: [
-						{ name: "options", wire: "options", source: "json", codec: { mode: "strict", typeSymbol: `${PKG}#weixin/memoryEventAdd:p0`, create: _strMap } },
-					],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixin/memoryEventAdd:result`, create: _statusResult },
-				},
-				{
-					id: `${PKG}#weixin/memoryEventDone`,
-					service: "weixinLoginController",
-					namespace: "weixin",
-					method: "memoryEventDone",
-					invocation: { kind: "direct" },
-					parameters: [
-						{ name: "options", wire: "options", source: "json", codec: { mode: "strict", typeSymbol: `${PKG}#weixin/memoryEventDone:p0`, create: _strMap } },
-					],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixin/memoryEventDone:result`, create: _statusResult },
-				},
-				{
-					id: `${PKG}#weixin/memoryEventRemove`,
-					service: "weixinLoginController",
-					namespace: "weixin",
-					method: "memoryEventRemove",
-					invocation: { kind: "direct" },
-					parameters: [
-						{ name: "options", wire: "options", source: "json", codec: { mode: "strict", typeSymbol: `${PKG}#weixin/memoryEventRemove:p0`, create: _strMap } },
-					],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixin/memoryEventRemove:result`, create: _statusResult },
-				},
-				{
-					id: `${PKG}#weixin/memoryProfileSave`,
-					service: "weixinLoginController",
-					namespace: "weixin",
-					method: "memoryProfileSave",
-					invocation: { kind: "direct" },
-					parameters: [
-						{ name: "options", wire: "options", source: "json", codec: { mode: "strict", typeSymbol: `${PKG}#weixin/memoryProfileSave:p0`, create: _strMap } },
-					],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixin/memoryProfileSave:result`, create: _statusResult },
-				},
-				{
-					id: `${PKG}#weixin/memoryFactAdd`,
-					service: "weixinLoginController",
-					namespace: "weixin",
-					method: "memoryFactAdd",
-					invocation: { kind: "direct" },
-					parameters: [
-						{ name: "options", wire: "options", source: "json", codec: { mode: "strict", typeSymbol: `${PKG}#weixin/memoryFactAdd:p0`, create: _strMap } },
-					],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixin/memoryFactAdd:result`, create: _statusResult },
-				},
-				{
-					id: `${PKG}#weixin/memoryFactRemove`,
-					service: "weixinLoginController",
-					namespace: "weixin",
-					method: "memoryFactRemove",
-					invocation: { kind: "direct" },
-					parameters: [
-						{ name: "options", wire: "options", source: "json", codec: { mode: "strict", typeSymbol: `${PKG}#weixin/memoryFactRemove:p0`, create: _strMap } },
-					],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixin/memoryFactRemove:result`, create: _statusResult },
-				},
-				{
-					id: `${PKG}#weixin/memoryConvClear`,
-					service: "weixinLoginController",
-					namespace: "weixin",
-					method: "memoryConvClear",
-					invocation: { kind: "direct" },
-					parameters: [
-						{ name: "options", wire: "options", source: "json", codec: { mode: "strict", typeSymbol: `${PKG}#weixin/memoryConvClear:p0`, create: _strMap } },
-					],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixin/memoryConvClear:result`, create: _statusResult },
-				},
+
 				{
 					id: `${PKG}#weixin/removeSession`,
 					service: "weixinLoginController",

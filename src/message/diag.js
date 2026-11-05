@@ -13,10 +13,6 @@ function onOff(value) {
   return value ? '开' : '关'
 }
 
-function clock(ms) {
-  return new Date(ms).toLocaleString('zh-CN', { hour12: false })
-}
-
 /**
  * @param {object} input
  * @param {string} [input.version]
@@ -48,11 +44,9 @@ export function buildDiagReport(input) {
   lines.push(`自检 · v${input.version ?? '?'}${host}`)
 
   lines.push(`账号：${input.accountId ?? '?'}${input.transportUp === false ? '（连接未就绪，收不到消息）' : ''}`)
-  lines.push(`模式：${input.modeName ?? '?'}${input.companion === true ? '（陪聊）' : ''}`)
 
   lines.push(
-    `开关：主动开口 ${onOff(config.proactiveEnabled !== false)} · 记忆 ${onOff(config.memoryEnabled !== false)}`
-    + ` · 群聊 ${onOff(config.groupChatEnabled === true)} · 免打扰 ${onOff(config.quietHoursEnabled === true)}`
+    `开关：群聊 ${onOff(config.groupChatEnabled === true)} · 免打扰 ${onOff(config.quietHoursEnabled === true)}`
     + ` · 文档抽取 ${onOff(config.documentExtract !== false)}`,
   )
 
@@ -68,20 +62,8 @@ export function buildDiagReport(input) {
     )
   }
 
-  const proactive = input.proactive
-  if (proactive === undefined || (proactive.count ?? 0) === 0 && proactive.lastAt === undefined) {
-    lines.push(`主动开口：今天还没有发过（额度 ${config.proactiveMaxPerDay ?? 3} 条/天）`)
-  } else {
-    const cap = config.proactiveMaxPerDay ?? 3
-    const last = proactive.lastAt === undefined ? '无' : clock(proactive.lastAt)
-    lines.push(`主动开口：今天 ${proactive.count ?? 0}/${cap} 条 · 上次 ${last} · 连发未回 ${proactive.misses ?? 0} 次`)
-    if (typeof input.proactiveWindow === 'string' && input.proactiveWindow !== '') {
-      lines.push(`主动时段：${input.proactiveWindow}`)
-    }
-  }
-
   lines.push(
-    `数据：今天流水 ${input.journalToday ?? 0} 条 · 会话记忆 ${input.conversations ?? 0} 个`
+    `数据：今天流水 ${input.journalToday ?? 0} 条`
     + ` · 白名单 ${input.allowlist ?? 0} 人`,
   )
 

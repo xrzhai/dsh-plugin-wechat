@@ -1,6 +1,7 @@
 ## 版本
 
 - **未发布（2026-11-05）—— 独立安装与可靠性修复**：
+  - 纯网关回归修复：旧人设配置不再使 onboarding 报错，清理已移除 RPC；无确认处理器时 `/是`、`/不用` 继续普通聊天；本地通知按同账号最新会话时间路由，增加隔离回归。
   - 人设编辑与 Agent 共用启动时的有效工作目录，支持 Profile 配置与默认路径；运行中更改 cwd 需要重启，避免保存到另一个项目。新增隔离工作目录回归测试。
   - 修复 #1–#6：移除失效 bench 命令与生成脚本引用；补齐附件安全及 vendor 维护文档；安装器支持帮助、严格参数校验和无写入预演。
   - Vendor 校验兼容 CRLF/LF，不重录已有 manifest；清理 50 个未使用 import，并将作用域检查和逐文件文案基线接入 `pnpm check`。处理失败及长任务等待提示迁入双语词条。
@@ -13,6 +14,7 @@
   - 增加安装流程、UI 交互与断点消息恢复的回归测试。
   - 精简新手 UI：侧栏改为「大肥鱼」+🐳；设置卡只留「微信账号 / 人设」，会话与网关配置收进「高级」；账号页隐藏白名单管理与被拒陌生人面板（安全逻辑保留，首条消息仍自动认主）。
   - 记忆收敛到单个 `memory.md`：首次运行在插件工作区种下 starter 人设 `AGENTS.md` 与 `memory.md`（都只在缺失时写入、绝不覆盖已有文件）；人设提示按需读取/维护 `memory.md`。旧的结构化记忆保持默认关闭（`memoryEnabled` 默认 false），不再为新用户开启。删除群成员名片（`contacts` / `contact-refresh`）与后台记忆摘要器（`memory-summarizer`）及其配置；「人设」页改为编辑实际加载的 `AGENTS.md`（跟随配置的 cwd，不再写死 sessions 路径）。
+  - **收敛为纯网关**：整层删除记忆引擎与拟人功能——`memory.js`、`persona.js`、`packs.js`/`pack-presets.js`、`proactive*`、`life-state`、`affinity-history`、`human-pace`、`style-feedback`、`digest`/`reports`/`promotions`、`memory-*`/`fact-dedupe`、`dates`（事件提醒）；对应删除 `/mode /remember /forget /memory /undo /import /digest /summary /recall` 命令、`/bad /good /style` 反馈、模板包（pack）CLI 与全部 remote 声明、相关 config 字段与后台调度器。保留：账号扫码、消息收发（文本/图片/文件/语音）、会话命令、提醒/订阅、待办/稍后读、白名单、媒体、日志/备份/指标/诊断，以及 `AGENTS.md` + `memory.md`（按需读写）。`src/index.js` 由 ~3400 行降到 ~2460 行，净删一个数量级的拟人复杂度。
 
 - **1.6.2（待本机 DSH / 微信验证）** —— **平行会话通知不再把长代码转附件丢正文（#31）**：
   - `onDispatchReply` 固定以 `richContent: false` 发送调度结果，长 fenced code block 始终走纯文本分段，不再生成 snippet 附件；即使媒体上传失败也不会丢掉代码正文。普通回复的富内容设置不受影响。

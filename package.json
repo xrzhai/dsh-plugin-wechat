@@ -39,7 +39,6 @@
     "i18n": "node bin/i18n-report.mjs",
     "metrics": "node bin/metrics.mjs",
     "soak": "node bin/soak.mjs",
-    "pack": "node bin/pack.mjs",
     "stickers": "node bin/stickers.mjs"
   },
   "dependencies": {

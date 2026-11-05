@@ -109,14 +109,8 @@ export function buildDiagExport(input) {
   lines.push(`- 白名单 ${Number(input.allowlist ?? 0)} 人`)
   lines.push('')
 
-  sections.push('模式')
-  lines.push('## 模式')
-  lines.push(`- ${maskDeep(input.modeName ?? '?')}${input.companion === true ? '（陪聊）' : ''}`)
-  lines.push('')
-
   sections.push('开关')
   lines.push('## 开关')
-  lines.push(`- 主动开口 ${onOff(config.proactiveEnabled !== false)} · 记忆 ${onOff(config.memoryEnabled !== false)}`)
   lines.push(`- 群聊 ${onOff(config.groupChatEnabled === true)} · 免打扰 ${onOff(config.quietHoursEnabled === true)}`)
   lines.push(`- 文档抽取 ${onOff(config.documentExtract !== false)} · 备份 ${onOff(config.backupEnabled === true)}`)
   if (input.quietDelayMs !== undefined && input.quietDelayMs > 0) {
@@ -127,11 +121,7 @@ export function buildDiagExport(input) {
   sections.push('计数')
   lines.push('## 计数')
   lines.push(`- 待发提醒 ${Number(input.reminders ?? 0)} 条 · 订阅 ${Number(input.subscriptions ?? 0)} 条`)
-  lines.push(`- 今天流水 ${Number(input.journalToday ?? 0)} 条 · 会话记忆 ${Number(input.conversations ?? 0)} 个`)
-  const proactive = input.proactive
-  if (proactive !== undefined) {
-    lines.push(`- 主动开口今天 ${Number(proactive.count ?? 0)} 条 · 连发未回 ${Number(proactive.misses ?? 0)} 次`)
-  }
+  lines.push(`- 今天流水 ${Number(input.journalToday ?? 0)} 条`)
   lines.push('')
 
   const errors = Array.isArray(input.recentErrors) ? input.recentErrors.slice(0, MAX_RECENT_ERRORS) : []
@@ -156,8 +146,6 @@ export function buildDiagExport(input) {
   if (input.transportUp === false) problems.push('连接未就绪')
   if (input.hostVersion !== undefined && input.hostTested !== true) problems.push('宿主版本不在已测列表')
   if ((input.allowlist ?? 0) === 0) problems.push('白名单为空')
-  if (config.proactiveEnabled === false) problems.push('主动开口是关的')
-  if (config.memoryEnabled === false) problems.push('记忆是关的')
   if (errors.some((entry) => entry.ok === false)) problems.push(`最近有 ${errors.filter((entry) => entry.ok === false).length} 条失败记录`)
   lines.push(problems.length === 0 ? '- 没发现明显问题' : problems.map((problem) => `- ${problem}`).join('\n'))
   lines.push('')
