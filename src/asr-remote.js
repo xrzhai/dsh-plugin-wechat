@@ -11,7 +11,7 @@ import os from "node:os";
 import http from "node:http";
 import https from "node:https";
 import { connect as tlsConnect } from "node:tls";
-import { TypertRemoteService, Remote, RemoteError } from "@deepseek-ai/dsh-typert-protocol";
+import { TypertRemoteService, RemoteError } from "@deepseek-ai/dsh-typert-protocol";
 import { stateDir } from "./state.js";
 import { remoteMethods } from "./typert-js.js";
 

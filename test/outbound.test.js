@@ -6,6 +6,35 @@ import { test } from 'node:test'
 import { createOutbox } from '../src/message/outbox.js'
 import { configureOutbound, sendChunked } from '../src/outbound.js'
 
+test('pure SILENT replies never reach transport, journal, hooks, or retry queue', async t => {
+  const calls = []
+  configureOutbound({
+    journal: () => calls.push('journal'),
+    hooks: { emit: () => calls.push('hook') },
+    outbox: { enqueue: () => calls.push('outbox') },
+  })
+  t.after(() => configureOutbound({ journal: null, hooks: undefined, outbox: undefined }))
+  const transport = { send: async () => { calls.push('send'); throw new Error('offline') } }
+  for (const text of ['[SILENT]', ' \n[silent]\t', '[SiLeNt]']) {
+    for (const richContent of [true, false]) {
+      await sendChunked(transport, { maxMessageLength: 3, richContent }, {
+        conversationId: 'synthetic-peer', text,
+      })
+    }
+  }
+  assert.deepEqual(calls, [])
+})
+
+test('a silent reply does not swallow the next answer or prose discussing the marker', async () => {
+  const sent = []
+  const transport = { send: async message => sent.push(message.text) }
+  const config = { maxMessageLength: 1500, markdownMode: 'off', richContent: false }
+  for (const text of ['[SILENT]', '任务已完成', '正文中的 [SILENT] 是一个标记', '[SILENT]\n这里还有正文']) {
+    await sendChunked(transport, config, { conversationId: 'synthetic-peer', text })
+  }
+  assert.deepEqual(sent, ['任务已完成', '正文中的 [SILENT] 是一个标记', '[SILENT]\n这里还有正文'])
+})
+
 test('failed chunk is queued as exact unsent bubbles and retried without the delivered prefix', async (t) => {
   const stateRoot = mkdtempSync(path.join(os.tmpdir(), 'weixin-outbound-test-'))
   t.after(() => {

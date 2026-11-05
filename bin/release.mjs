@@ -36,7 +36,7 @@
  * TTY. Run this script from a real terminal, not a captured shell.
  */
 
-import { execFileSync, spawnSync } from 'node:child_process'
+import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'

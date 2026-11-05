@@ -42,9 +42,9 @@ import { describeConfigEffect } from './config-effect.js'
 
 // 服务端也要知道自己的版本（`/diag` 用），但 client.js 是浏览器入口，不能 import。
 const PLUGIN_VERSION = createRequire(import.meta.url)('../package.json').version
-import { DEFAULT_RETENTION, SWEEP_INTERVAL_MS, describeSweep, directoryUsage, enforceMediaCap, sweepRetention } from './message/retention.js'
+import { DEFAULT_RETENTION, SWEEP_INTERVAL_MS, describeSweep, sweepRetention } from './message/retention.js'
 import { DEFAULT_KEEP, createBackup } from './backup.js'
-import { DEFAULT_DIGEST_WHEN, DEFAULT_REVIEW_WHEN, ReportScheduler, buildDigestPrompt, buildReviewPrompt, describeReport, pickConversation } from './message/reports.js'
+import { DEFAULT_DIGEST_WHEN, DEFAULT_REVIEW_WHEN, ReportScheduler, buildReviewPrompt, describeReport, pickConversation } from './message/reports.js'
 import { HEARTBEAT_MS, acquireInstanceLock, heartbeatInstanceLock, releaseInstanceLock } from './instance-lock.js'
 import { createOutbox, formatOutbox, CONTEXT_TOKEN_TTL_MS } from './message/outbox.js'
 import { createGatewayControl } from './gateway-control.js'
@@ -66,7 +66,7 @@ import { keywordGate, keywordStats, parseKeywordRules } from './message/keyword-
 import { isAllowedSender, denialReason } from './security/allowlist.js'
 import { ILinkTransport } from './transport/ilink.js'
 import { AgentBridge } from './agent-bridge.js'
-import { chunkText } from './message/chunker.js'
+import './message/chunker.js'
 import { appendJournal } from './message/journal.js'
 import { appendToolAudit, readToolAudit } from './message/audit.js'
 import { DEFAULT_SEND_INTERVAL_MS, DEFAULT_COOLDOWN_MS } from './message/rate-limit.js'
@@ -90,7 +90,7 @@ let outbox
 /** 群聊摘要：内存里攒群消息，够一批就后台压成几行。 */
 let groupSummaries
 import { MessageDeduper } from './message/dedupe.js'
-import { markdownToPlainText, resolveMarkdownMode } from './message/markdown.js'
+import './message/markdown.js'
 import { extractUrls, fetchLinkText, describeLinkResults } from './message/links.js'
 import { ReminderScheduler, parseWhen } from './message/scheduler.js'
 import { createAwayCommands, readAway, noteMissed, buildAwayReply, awaySummary, clearAway } from './message/away.js'
@@ -100,17 +100,17 @@ import { buildDraft, composeReminder, createDraftCommands, readDraft, saveDraft 
 import { createWebhookSender } from './webhook.js'
 import { backgroundBudget, recordBackgroundCall } from './budget.js'
 import { createListCommands } from './message/lists.js'
-import { createHabitCommands, habitDigestLine, habitsList } from './message/habits.js'
+import { createHabitCommands } from './message/habits.js'
 import { createMediaCommands, humanTime } from './message/media-archive.js'
 import { composeDigest } from './message/digest.js'
 import { startAccounts } from './startup.js'
 import { createReadingCommands } from './message/reading.js'
-import { formatStaleReport, staleDigestLine, staleFacts } from './message/memory-stale.js'
+import { formatStaleReport, staleFacts } from './message/memory-stale.js'
 import { IMPORT_CONFIRM_TTL_MS, applyMemoryImport, formatImportPreview, normalizeImportPolicy, parseMemoryMarkdown, planMemoryImport } from './message/memory-import.js'
 import { MemoryConflictQueue, conflictReply, findMemoryConflict, parseConflictAnswer } from './message/memory-conflict.js'
 import { createSendCommands } from './message/send-file.js'
 import { SubscriptionScheduler, formatStamp } from './message/subscriptions.js'
-import { allowedMediaDirs, deliverOutboundMedia, DEFAULT_MAX_MEDIA_BYTES, listProducedFiles } from './media/outbound.js'
+import { allowedMediaDirs, deliverOutboundMedia, DEFAULT_MAX_MEDIA_BYTES } from './media/outbound.js'
 import { AsrBridge, DEFAULT_ASR_TIMEOUT_MS, resolveAsrSettings } from './media/asr.js'
 import { DEFAULT_DOCUMENT_CHARS, extractDocumentTextAsync } from './media/document.js'
 import { resolveOcrSettings, extractImageText } from './media/ocr.js'
@@ -146,7 +146,6 @@ import {
   formatEvents,
   formatProfile,
   listConvMemories,
-  setConvRecentSession,
   openThreadLines,
   writeGlobalMemory,
 } from './memory.js'
@@ -154,24 +153,24 @@ import { queryRecall, formatRecallHits } from './message/recall.js'
 
 import { startKnowledgeRefresh } from './message/knowledge-refresh.js'
 import { buildHumanStyleBlock, isCompanionMode } from './message/human-pace.js'
-import { groupReplyPolicy, groupSharesMemory, isGroupMessage } from './message/groups.js'
+import { groupReplyPolicy, isGroupMessage } from './message/groups.js'
 import { classifyToolCall, noticeText } from './message/tool-guard.js'
 import { createTranslator, resolveLocale } from './i18n.js'
 import { routeFor, sideRouteFor } from './model-route.js'
 import { readOrInferLifeState, lifeBlock } from './message/life-state.js'
 import { readJournalRange, renderChatMarkdown, writeChatExport } from './message/chat-export.js'
 import { createNotifyServer, DEFAULT_NOTIFY_PORT, ensureNotifyToken } from './notify.js'
-import { countStaleContacts, listContacts, readContact, saveContact, touchContact } from './message/contacts.js'
-import { describeAffinity, readAffinityHistory, recordAffinitySnapshot } from './message/affinity-history.js'
-import { buildDryRunBlock, describeDryRun, isGoAhead } from './message/dry-run.js'
+import { countStaleContacts } from './message/contacts.js'
+import { describeAffinity, readAffinityHistory } from './message/affinity-history.js'
+import './message/dry-run.js'
 import { describeUnknownItems, firstSighting } from './message/unknown-items.js'
 import { statePaths } from './state-layout.js'
 import { createMemorySummarizer } from './memory-summarizer.js'
 import { ProactiveScheduler, readProactiveState } from './message/proactive.js'
 import { describeLearnedHours, learnActiveHours } from './message/proactive-timing.js'
-import { createGroupSummaries, groupSummaryPrompt, readGroupSummary } from './message/group-summary.js'
+import { createGroupSummaries, groupSummaryPrompt } from './message/group-summary.js'
 import { recordPromptComposition } from './message/prompt-composition.js'
-import { conversationRows, ledgerTotals, recordUsage, usageAwarenessLine } from './message/usage-ledger.js'
+import { recordUsage } from './message/usage-ledger.js'
 
 import { MAX_STICKERS_PER_REPLY, stickerPath, takeStickers } from './message/stickers.js'
 import { cleanSpeechText, synthesizeVoiceFile, ttsPlatformSupported } from './media/tts.js'
@@ -3241,7 +3240,7 @@ ${neutralizeTags(ocr.text)}
           if (late.kind === 'timeout-notice') {
             await sendChunked(transport, config, {
               conversationId: message.conversationId,
-              text: '（这条消息处理时间较长，先回复别的消息不影响它；结果出来后会直接发到这里）',
+              text: createTranslator(effectiveConfig.current.locale).t('notice.longRunning'),
               contextToken: await sendToken(),
               durable: false,
             })
@@ -3335,7 +3334,7 @@ ${neutralizeTags(ocr.text)}
       warn(`turn failed: ${String(error)}`)
       await sendChunked(transport, config, {
         conversationId: message.conversationId,
-        text: `（处理失败：${String(error)}）`,
+        text: createTranslator(effectiveConfig.current.locale).t('error.processing', { reason: String(error) }),
         contextToken: await sendToken(),
       })
     } finally {

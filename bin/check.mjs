@@ -6,6 +6,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { unusedImports } from './lib/unused-imports.mjs'
+import { report, baselineProblems } from './i18n-report.mjs'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const problems = []
@@ -33,6 +35,18 @@ for (const file of files) {
   }
 }
 
+for (const file of files.filter(file => !file.startsWith(path.join(ROOT, 'test') + path.sep))) {
+  try {
+    for (const item of unusedImports(fs.readFileSync(file, 'utf8'))) {
+      problems.push(`${path.relative(ROOT, file)}:${item.line}: unused import ${item.name}`)
+    }
+  } catch (error) { problems.push(`${path.relative(ROOT, file)}: ${error.message}`) }
+}
+try {
+  const baseline = JSON.parse(fs.readFileSync(path.join(ROOT, 'bin', 'i18n-baseline.json'), 'utf8'))
+  problems.push(...baselineProblems(report(ROOT), baseline).map(line => 'i18n baseline: ' + line))
+} catch (error) { problems.push('i18n baseline: ' + error.message) }
+
 const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'))
 const filesField = Array.isArray(pkg.files) ? pkg.files : []
 for (const required of ['src', 'bin', 'vendor', 'assets']) {
@@ -40,21 +54,19 @@ for (const required of ['src', 'bin', 'vendor', 'assets']) {
 }
 if (typeof pkg.dsh?.client === 'undefined') problems.push('package.json is missing dsh.client')
 
+// A provenance claim is valid only when the release workflow requests it.
+const releaseWorkflow = path.join(ROOT, '.github', 'workflows', 'release.yml')
+if (fs.existsSync(releaseWorkflow)) {
+  const text = fs.readFileSync(releaseWorkflow, 'utf8')
+  if (!text.includes('npm publish --provenance')) problems.push('.github/workflows/release.yml does not ask for provenance')
+  if (!text.includes('id-token: write')) problems.push('.github/workflows/release.yml cannot get an OIDC token (missing id-token: write)')
+} else {
+  console.log('· no .github/workflows/release.yml — publishes from CI are not wired up')
+}
 process.stdout.write(`checked ${files.length} files\n`)
 if (problems.length > 0) {
   for (const line of problems) process.stdout.write(`✗ ${line}\n`)
   process.exitCode = 1
 } else {
-  // C31: a provenance attestation is only possible from CI, so the workflow that
-// does the publish has to exist for the claim to be true.
-const releaseWorkflow = path.join(ROOT, '.github', 'workflows', 'release.yml')
-if (fs.existsSync(releaseWorkflow)) {
-	const text = fs.readFileSync(releaseWorkflow, 'utf8')
-	if (!text.includes('npm publish --provenance')) problems.push('.github/workflows/release.yml does not ask for provenance')
-	if (!text.includes('id-token: write')) problems.push('.github/workflows/release.yml cannot get an OIDC token (missing id-token: write)')
-} else {
-	console.log('· no .github/workflows/release.yml — publishes from CI are not wired up')
-}
-
-process.stdout.write('✓ every source file parses, packaging metadata intact\n')
+  console.log('✓ syntax, packaging, unused imports and i18n baseline checks passed')
 }

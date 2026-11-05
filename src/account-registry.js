@@ -17,7 +17,6 @@
 // read tolerates a missing or malformed file: the registry is metadata, and
 // losing it must never block messaging.
 // @module dsh-weixin/account-registry
-import fs from 'node:fs'
 import { readTextFileCached } from './atomic.js'
 import path from 'node:path'
 import { atomicWriteJson } from './atomic.js'

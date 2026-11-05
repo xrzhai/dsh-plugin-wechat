@@ -17,7 +17,6 @@
 
 import { statePath } from './state-layout.js'
 import fs from 'node:fs'
-import path from 'node:path'
 
 /** How often the holder refreshes the lock file. */
 export const HEARTBEAT_MS = 30_000

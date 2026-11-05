@@ -4,7 +4,7 @@
 // - 文本截断到 200 字符，避免一条长回复把流水文件撑爆；
 // - 按天一个文件（journal-YYYY-MM-DD.jsonl），读取时只取尾部，天然滚动。
 
-import { mkdirSync, appendFileSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { mkdirSync, appendFileSync, readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 
 export const MAX_JOURNAL_TEXT_CHARS = 200

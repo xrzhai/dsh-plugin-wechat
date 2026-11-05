@@ -9,7 +9,6 @@
  */
 import { statePath } from '../state-layout.js'
 import fs from 'node:fs'
-import path from 'node:path'
 import { atomicWriteJson } from '../atomic.js'
 import { parseWhen } from './scheduler.js'
 

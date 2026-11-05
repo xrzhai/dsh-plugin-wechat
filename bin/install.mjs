@@ -8,7 +8,7 @@
  * package is available on npm and never depends on an earlier Weixin install.
  *
  * Usage:
- *   node bin/install.mjs [--profile <name>] [--pin] [--uninstall]
+ *   node bin/install.mjs [--profile <name>] [--pin] [--uninstall] [--dry-run]
  */
 import fs from 'node:fs'
 import os from 'node:os'
@@ -25,18 +25,44 @@ import {
   samePath,
   sourceLinkSpec,
 } from './lib/install-profile.mjs'
+import {
+  INSTALL_HELP,
+  InstallArgumentError,
+  parseInstallArgs,
+  validateProfileName,
+} from './lib/install-args.mjs'
 import { pinProfileDependency, pinProfileSourceSpec } from './lib/profile-pin.mjs'
 
-const argv = process.argv.slice(2)
-function readFlag(name) {
-  const at = argv.indexOf('--' + name)
-  return at === -1 || at + 1 >= argv.length ? undefined : argv[at + 1]
+const sourceRoot = path.resolve(import.meta.dirname, '..')
+
+function argumentFail(message) {
+  process.stderr.write('dsh-weixin install: ' + message + '\n')
+  process.stderr.write('Try --help for usage.\n')
+  process.exit(2)
 }
 
-const uninstall = argv.includes('--uninstall')
-const pin = argv.includes('--pin')
-const sourceRoot = path.resolve(import.meta.dirname, '..')
-const profileName = readFlag('profile') ?? process.env.DSH_PROFILE ?? 'desktop'
+let cliOptions
+try {
+  cliOptions = parseInstallArgs(process.argv.slice(2))
+} catch (error) {
+  if (error instanceof InstallArgumentError) argumentFail(error.message)
+  throw error
+}
+if (cliOptions.help) {
+  process.stdout.write(INSTALL_HELP + '\n')
+  process.exit(0)
+}
+
+const uninstall = cliOptions.uninstall
+const pin = cliOptions.pin
+const dryRun = cliOptions.dryRun
+let profileName
+try {
+  profileName = validateProfileName(cliOptions.profile ?? process.env.DSH_PROFILE ?? 'desktop')
+} catch (error) {
+  if (error instanceof InstallArgumentError) argumentFail(error.message)
+  throw error
+}
 const dshHome = process.env.DSH_HOME ?? path.join(os.homedir(), '.dsh')
 const profileDir = path.join(dshHome, 'profiles', profileName)
 const profilePkgPath = path.join(profileDir, 'package.json')
@@ -159,6 +185,26 @@ if (!fs.existsSync(profileDir)) fail('profile not found: ' + profileDir)
 if (!fs.existsSync(profilePkgPath)) fail('profile package.json not found: ' + profilePkgPath)
 
 const profilePkg = readJson(profilePkgPath)
+
+if (dryRun) {
+  process.stdout.write('dry run: no files will be changed\n')
+  process.stdout.write('  profile: ' + profileDir + '\n')
+  if (uninstall) {
+    process.stdout.write('  would remove package link and plugin registrations\n')
+  } else {
+    validateSourceCheckout()
+    const patchBefore = fs.existsSync(patchPath) ? fs.readFileSync(patchPath, 'utf8') : '[]\n'
+    const migration = migratePatch(patchBefore)
+    process.stdout.write(
+      '  would link ' + targetDir + ' -> ' + sourceRoot + '\n' +
+      '  would register dependency ' + sourceLinkSpec(sourceRoot) + '\n' +
+      '  would register bundle ' + PKG_NAME + '\n' +
+      '  old mount rows to remove: ' + migration.blocks.length + '\n' +
+      '  pin lockfile: ' + (pin ? 'yes' : 'no') + '\n',
+    )
+  }
+  process.exit(0)
+}
 
 if (uninstall) {
   const removal = removeInstalledPackage(targetDir, sourceRoot)

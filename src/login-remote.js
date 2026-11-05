@@ -6,7 +6,7 @@
 // unusable from the settings UI. Here the verify code is submitted by the UI
 // through submitVerifyCode() instead.
 import { randomUUID } from "node:crypto";
-import { TypertRemoteService, Remote, RemoteError } from "@deepseek-ai/dsh-typert-protocol";
+import { TypertRemoteService, RemoteError } from "@deepseek-ai/dsh-typert-protocol";
 import { apiGetFetch, apiPostFetch } from "../vendor/openclaw-weixin/api/api.js";
 import {
     loadWeixinAccount,
@@ -23,16 +23,14 @@ import { readSavedConfig, stateDir } from "./state.js";
 import { DEFAULT_RETENTION, directoryUsage } from "./message/retention.js";
 import { readOutbox } from "./message/outbox.js";
 import { remoteMethods } from "./typert-js.js";
-import { readGlobalMemory, listConvMemories, addGlobalFact, removeGlobalFact, clearConvMemory, bondLine, addEvent, removeEvent, completeEvent, saveProfile, formatEvents } from "./memory.js";
+import { readGlobalMemory, listConvMemories, addGlobalFact, removeGlobalFact, clearConvMemory, bondLine, addEvent, removeEvent, completeEvent, saveProfile } from "./memory.js";
 import {
     activeModeFor,
     listActiveOverrides,
     readAccountDefaultMode,
     readGlobalDefaultMode,
     readPersonaStore,
-    buildPersonaBlock,
     resolveMode,
-    setActiveMode,
     writeAccountDefaultMode,
     writeGlobalDefaultMode,
     writePersonaStore,
@@ -44,12 +42,8 @@ import { detectHostVersion, hostStatus } from "./host-compat.js";
 import { listKnowledgeSources } from "./message/knowledge.js";
 import { buildOnboardingChecklist } from "./onboarding.js";
 import { lifeSummary, readOrInferLifeState } from "./message/life-state.js";
-import { lifeBlock } from "./message/life-state.js";
-import { buildHumanStyleBlock, isCompanionMode } from "./message/human-pace.js";
-import { buildStyleFeedbackBlock, readStyleRules } from "./message/style-feedback.js";
-import { usageAwarenessLine } from "./message/usage-ledger.js";
-import { buildMemoryBlock } from "./memory.js";
-import { readConvMemory } from "./memory.js";
+import "./message/human-pace.js";
+import "./message/style-feedback.js";
 import { qrDataUrl } from "./qr-png.js";
 import fs from "node:fs";
 import path from "node:path";
