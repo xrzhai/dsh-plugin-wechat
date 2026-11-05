@@ -30,7 +30,7 @@ export const CATALOG = Object.freeze({
     'notice.longRunning': { zh: '（这条消息处理时间较长，先回复别的消息不影响它；结果出来后会直接发到这里）', en: '(This task is taking longer. You can send other messages; its result will arrive here when ready.)' },
     // --- command help -------------------------------------------------------
     'help.header': { zh: '会话指令（发 /help 或 /帮助 可再看一遍）：', en: 'Session commands (send /help to see this again):' },
-    'help.new': { zh: '/new 开一条新会话（当前这条会保留，之后可以切回来）', en: '/new start a new session (this one is kept, you can switch back)' },
+    'help.new': { zh: '/new [标题] 开一条新会话（当前这条会保留，之后可以切回来）', en: '/new [title] start a new session (this one is kept, you can switch back)' },
     'help.list': { zh: '/list 查看这个微信会话下的所有会话', en: '/list list every session under this WeChat conversation' },
     'help.use': { zh: '/use <序号> 切换到第几条', en: '/use <n> switch to session number n' },
     'help.clear': { zh: '/clear 清空当前会话并重新开始（当前这条从列表里移除，不再占地方）', en: '/clear clear this session and start over (it is removed from the list)' },

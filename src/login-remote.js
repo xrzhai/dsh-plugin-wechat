@@ -24,32 +24,10 @@ import { DEFAULT_RETENTION, directoryUsage } from "./message/retention.js";
 import { readOutbox } from "./message/outbox.js";
 import { remoteMethods } from "./typert-js.js";
 import { detectHostVersion, hostStatus } from "./host-compat.js";
-import { listKnowledgeSources } from "./message/knowledge.js";
 import { buildOnboardingChecklist } from "./onboarding.js";
 import { qrDataUrl } from "./qr-png.js";
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-
-// The donate QRs ship as bundled assets (assets/donate-qr.jpg and
-// assets/donate-qr-alipay.jpg, both whitelisted through package.json "files").
-// Read one once, lazily, as a data URL - the settings card cannot reach plugin
-// files by path, so the image must ride the remote result like the login QR
-// does. A missing or unreadable file just means the About tab hides that one
-// code; nothing else may break because of it.
-const donateQrDataUrlCache = new Map();
-function donateQrDataUrl(name = "donate-qr.jpg") {
-    if (donateQrDataUrlCache.has(name)) return donateQrDataUrlCache.get(name);
-    let value;
-    try {
-        const file = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "assets", name);
-        value = `data:image/jpeg;base64,${fs.readFileSync(file).toString("base64")}`;
-    } catch {
-        value = null;
-    }
-    donateQrDataUrlCache.set(name, value);
-    return value;
-}
 import { SessionLines, conversationSlug } from "./sessions.js";
 import { readJournal, DEFAULT_JOURNAL_LIMIT } from "./message/journal.js";
 import { readJournalRange, renderChatMarkdown } from "./message/chat-export.js";
@@ -142,10 +120,6 @@ export class WeixinLoginController extends TypertRemoteService {
          * is missing instead of pretending the feature is broken.
          */
         this.remindersProvider = undefined;
-        /** SubscriptionScheduler, injected at setup; packs import schedules through it. */
-        this.subscriptionScheduler = undefined;
-        /** Optional hook the plugin sets so the card can say where a pack went. */
-        this.packWriter = undefined;
         /** Set by the plugin's setup: the live outbox. */
         this.outboxFlush = undefined;
         this.outboxDropItem = undefined;
@@ -404,35 +378,12 @@ export class WeixinLoginController extends TypertRemoteService {
     }
 
     /** Cancel one pending reminder from the settings card. */
-    /** The donate QRs as data URLs for the About tab; null when an asset is missing. */
-    donateQr() {
-        return { qrDataUrl: donateQrDataUrl("donate-qr.jpg") };
-    }
-
-    /** The Alipay code, shown beside the WeChat one. */
-    donateQrAlipay() {
-        return { qrDataUrl: donateQrDataUrl("donate-qr-alipay.jpg") };
-    }
-
     async remindCancel(id) {
         if (this.remindersProvider === undefined) return { removed: false, error: "\u8c03\u5ea6\u5668\u4e0d\u53ef\u7528" };
         const removed = this.remindersProvider.cancel(String(id));
         return removed ? { removed: true } : { removed: false, error: "\u6ca1\u6709\u8fd9\u4e2a\u7f16\u53f7" };
     }
 
-    /**
-     * The account a pack belongs to: the saved one, else the only bound account.
-     * A pack is per-account because subscriptions are; modes are shared and travel
-     * regardless.
-     */
-    activeAccountId() {
-        const saved = readSavedConfig();
-        if (typeof saved.accountId === "string" && saved.accountId !== "") return saved.accountId;
-        const ids = Object.keys(readRegistry());
-        return ids.length === 1 ? ids[0] : "";
-    }
-
-    /** Message journal for the settings card: newest first, optional account filter. */
     /** Message journal for the settings card: newest first, optional account filter. */
     async journal(options) {
         const opts = options ?? {};
@@ -443,14 +394,6 @@ export class WeixinLoginController extends TypertRemoteService {
         const before = Number.isFinite(beforeRaw) && beforeRaw > 0 ? beforeRaw : undefined;
         const conversationId = typeof opts.conversationId === "string" && opts.conversationId !== "" ? opts.conversationId : undefined;
         return { entries: readJournal(stateDir(), { limit, accountId, before, conversationId }) };
-    }
-
-    /** Recent strangers the allowlist refused, newest first — the card's one-click allow reads this. */
-    async strangers() {
-        const { readStrangers } = await import("./message/strangers.js");
-        const accountId = this.activeAccountId();
-        if (!accountId) return { accountId: "", strangers: [] };
-        return { accountId, strangers: readStrangers(stateDir(), accountId) };
     }
 
     /**
@@ -834,22 +777,12 @@ export class WeixinLoginController extends TypertRemoteService {
         }
         const hostVersion = detectHostVersion();
         const accountIds = accounts.map((account) => String(account?.accountId ?? "")).filter(Boolean);
-        let knowledgeFiles = 0;
-        for (const id of accountIds) {
-            try {
-                knowledgeFiles += listKnowledgeSources(path.join(stateDir(), "knowledge", id)).length;
-            } catch {
-                // A missing directory simply means "no files yet".
-            }
-        }
         return buildOnboardingChecklist({
             accounts,
             accountCount: accountIds.length,
             hostVersion,
             hostTested: hostStatus(hostVersion).status === "tested",
             allowedSenders: Array.isArray(live.allowedSenders) ? live.allowedSenders : [],
-            knowledgeEnabled: live.knowledgeEnabled !== false,
-            knowledgeFiles,
             backupEnabled: live.backupEnabled === true,
         });
     }
@@ -1041,4 +974,4 @@ export function purgeStaleLogins() {
     }
 }
 
-remoteMethods(WeixinLoginController, ["startLogin", "poll", "submitVerifyCode", "cancel", "status", "logout", "sessions", "useSession", "removeSession", "pause", "resume", "label", "allowlist", "journal", "journalExport", "stats", "onboarding", "storage", "metrics", "outbox", "outboxRetry", "outboxDrop", "reminders", "remindCancel", "donateQr", "donateQrAlipay", "usageLedger", "migrateSummary", "migrateExport", "migrateInspect", "migrateRestore", "promptPreview"]);
+remoteMethods(WeixinLoginController, ["startLogin", "poll", "submitVerifyCode", "cancel", "status", "logout", "sessions", "useSession", "removeSession", "pause", "resume", "label", "allowlist", "journal", "journalExport", "stats", "onboarding", "storage", "metrics", "outbox", "outboxRetry", "outboxDrop", "reminders", "remindCancel", "usageLedger", "migrateSummary", "migrateExport", "migrateInspect", "migrateRestore", "promptPreview"]);

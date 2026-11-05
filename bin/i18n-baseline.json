@@ -2,11 +2,11 @@
   "version": 1,
   "files": {
     "src/message/stickers.js": 280,
-    "src/client.card.js": 127,
+    "src/client.card.js": 117,
     "src/index.js": 103,
     "src/sessions.js": 95,
     "bin/stickers.mjs": 69,
-    "src/config-remote.js": 58,
+    "src/config-remote.js": 57,
     "src/message/scheduler.js": 51,
     "src/message/diag-export.js": 48,
     "src/onboarding.js": 42,

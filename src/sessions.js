@@ -225,9 +225,10 @@ export function writeLines(lines) {
 /**
  * Derive a short, human-readable title from the first user message of a line.
  *
- * The user never names a topic, so the only honest title is the first thing
- * they said. It is trimmed and collapsed to one line because it is rendered
- * into a WeChat message where a newline would break the list layout.
+ * A line is usually named by the first thing the user says, while `/new` may
+ * provide an explicit title. Either source is trimmed and collapsed to one
+ * line because it is rendered into a WeChat message where a newline would
+ * break the list layout.
  *
  * @param {string} text
  * @returns {string}
@@ -556,7 +557,7 @@ export function isInterruptCommand(text) {
  * worse failure than requiring the exact form.
  *
  * @param {string} text
- * @returns {{command: 'new'|'list'|'use'|'clear', index?: number} | undefined}
+ * @returns {{command: string} & Record<string, unknown> | undefined}
 // ---------------------------------------------------------------------------
 // The command table
 //
@@ -586,16 +587,22 @@ export function isInterruptCommand(text) {
 const identity = () => ({})
 
 /**
- * `/是`、`/不用`：an answer to the question the bot just asked. Not in
- * COMMANDS — it is not help-worthy, it is routing for one pending question.
+ * Phrases that used to answer a temporary persona/memory confirmation. The
+ * question state was removed with the memory subsystem; keep these exact
+ * slash-led messages on the ordinary chat path instead of turning them into
+ * unknown commands. The word may be followed by the user's explanation.
  */
-// The word first, then anything the user felt like adding (`/不用 我住在上海`).
-// Longest first so 不用 is not read as 不 followed by text.
-const ANSWER_PATTERN = /^\/(是|是的|对|好的|好|改|不用|不是|不|别|no|yes)(?:\s+[\S\s]+)?$/i
+const LEGACY_ANSWER_PATTERN = /^\/(?:是|是的|对|好的|好|行|改|不用|不是|不|别|算了|no|yes)(?:\s+[\S\s]+)?$/i
 
 /** @type {CommandRule[]} */
 const COMMANDS = [
-  { id: 'new', pattern: /^\/new$/i, build: identity, helpRank: 1, helpKey: 'help.new' },
+  {
+    id: 'new',
+    pattern: /^\/new(?:\s+([\S\s]+))?$/i,
+    build: (match) => match[1] === undefined ? {} : { arg: match[1].trim() },
+    helpRank: 1,
+    helpKey: 'help.new',
+  },
   { id: 'list', pattern: /^\/(?:list|sessions)$/i, build: identity, helpRank: 2, helpKey: 'help.list' },
   {
     id: 'use',
@@ -737,18 +744,11 @@ export const SESSION_COMMANDS_HELP = buildCommandsHelp()
  */
 export function parseSessionCommand(text) {
   const trimmed = String(text ?? '').trim()
-  // Answers to a pending question come FIRST. The bot asks 「要改成 X 吗？回「是」…」
-  // and the very next message is the answer; letting the normal table run first
-  // would quietly turn `/是` into `/use`, which answers with a session list
-  // instead. The router only consumes this when a question is actually pending
-  // (the handler answers `undefined` otherwise, and the message stays chat).
-  const answerMatch = ANSWER_PATTERN.exec(trimmed)
-  if (answerMatch !== null) return { command: 'answer', arg: answerMatch[1] }
   for (const rule of COMMANDS) {
     const match = rule.pattern.exec(trimmed)
     if (match !== null) return { command: rule.id, ...rule.build(match) }
   }
-  if (!/^\/steer(?:\s+[\s\S]*)?$/i.test(trimmed)) {
+  if (!LEGACY_ANSWER_PATTERN.test(trimmed) && !/^\/steer(?:\s+[\s\S]*)?$/i.test(trimmed)) {
     const unknownMatch = /^\/([a-zA-Z][a-zA-Z0-9_-]*|[\u4e00-\u9fa5]{1,12})(?:\s+([\s\S]*))?$/.exec(trimmed)
     if (unknownMatch !== null) {
       return { command: 'unknown_slash', raw: trimmed, name: unknownMatch[1] }
@@ -807,9 +807,8 @@ function runStatus({ lines, conversationId, accountId, context }) {
  *   scheduling is unavailable rather than crashing. `cancelRunningTurn` is the
  *   bridge's abort hook for `/cancel`: only the bridge holds the live agent
  *   handles, so this module asks it to do the interrupting and only relays the
- *   sentence it returns. `persona` bundles the handlers for /mode, /remember,
- *   /forget, /memory, /summary, /export and /recall — the store lives at the
- *   state root, which only the inbound handler knows.
+ *   sentence it returns. `persona` bundles the remaining stateful handlers;
+ *   their storage lives at the state root, which only the inbound handler knows.
  * @returns {string | Promise<string> | undefined}
  */
 export function runSessionCommand(lines, conversationId, text, accountId, context) {
@@ -819,19 +818,14 @@ export function runSessionCommand(lines, conversationId, text, accountId, contex
   const rule = COMMANDS.find((candidate) => candidate.id === command.command)
   if (rule?.run !== undefined) return rule.run({ lines, conversationId, accountId, command, context })
 
-  if (command.command === 'answer') {
-    // ② `/是`、`/不用` 只在真的有待答问题时才算命令：`/remember` 刚问过「要换成
-    //    这条吗」，下一句就靠这里认出来。没有 handler 或 handler 回 undefined
-    //    都表示没人问话，调用方必须把正文继续交给普通聊天。
-    if (typeof context?.persona?.answer !== 'function') return undefined
-    return context.persona.answer(command.arg)
-  }
   if (command.command === 'new') {
     const sessionId = lines.create(conversationId, accountId)
+    const title = typeof command.arg === 'string' ? command.arg.trim() : ''
+    if (title !== '') lines.title(conversationId, sessionId, title, accountId)
     const ordinal = lines.list(conversationId, accountId).length
-    // Deliberately no title yet: the line is named by its first real message,
-    // and stamping a placeholder here would count as "already titled" and keep
-    // the user looking at "(无标题)" forever.
+    // A bare `/new` is named by its first real message. An optional argument
+    // names it immediately through the same title path, so later messages do
+    // not overwrite it.
     return `已开启第 ${ordinal} 条会话，接下来的消息进入这里。\n（之前那条仍然保留，/list 可以切回去）`
   }
   if (command.command === 'list') {
