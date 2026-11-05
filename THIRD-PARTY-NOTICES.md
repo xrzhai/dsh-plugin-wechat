@@ -87,6 +87,12 @@ rewrite, so the vendored code runs under DSH. Every vendored file in `cdn/`, `me
    `messaging/partial-quote.js` is vendored alongside it for when the inbound layer is
    wired up. This is a change of *import site only* for one four-case label function; it
    touches no protocol, crypto or authorization logic.
+5. `api/api.js` now throws `SendMessageRejectedError` when a parsed
+   `sendmessage` response contains a nonzero `ret`. The typed error retains
+   `ret`, `errmsg`, and `sendOutcome: "rejected"`, allowing callers to
+   distinguish an explicit server rejection from fetch, HTTP, or parse failures
+   whose delivery outcome is unknown. The wire request and response handling
+   are otherwise unchanged.
 
 No protocol, crypto or authorization logic was altered.
 

@@ -44,11 +44,17 @@ export class OutboundMediaError extends Error {
   /**
    * @param {string} message  Human-readable reason, safe to send to the user.
    * @param {string} code
+   * @param {{ captionState?: 'not-sent'|'sent'|'unknown', voiceState?: 'not-attempted'|'rejected'|'unknown' }} [delivery]
+   *   What is known about the two protocol sends. `unknown` means a network
+   *   failure made acceptance indeterminate and a retry could duplicate a
+   *   message.
    */
-  constructor(message, code) {
+  constructor(message, code, delivery = {}) {
     super(message)
     this.name = 'OutboundMediaError'
     this.code = code
+    this.captionState = delivery.captionState
+    this.voiceState = delivery.voiceState
   }
 }
 
@@ -425,14 +431,15 @@ export async function sendOutboundMedia(params) {
  * @param {(params: { silk: Uint8Array, to: string, opts: object, cdnBaseUrl?: string }) => Promise<{ downloadEncryptedQueryParam: string, aeskey: string }>} [params.upload]
  * @param {(params: object) => Promise<object>} [params.send]
  * @returns {Promise<{ kind: 'voice', serverMessageId?: string }>}
- * @throws {OutboundMediaError} on transcode, upload or send failure — the
- *   caller falls back to a plain file send rather than dropping the audio.
+ * @throws {OutboundMediaError} on transcode, upload or send failure. The error
+ *   records whether a retry as a file is safe; see
+ *   {@link mediaFallbackParamsAfterVoiceError}.
  */
 export async function sendOutboundVoice(params) {
   const { transcodeToSilk, buildVoiceItem } = await import('./voice-encode.js')
   const transcode = params.transcode ?? transcodeToSilk
   const buildItem = params.buildItem ?? buildVoiceItem
-  const [{ getUploadUrl, sendMessage }, { uploadBufferToCdn }, { aesEcbPaddedSize }, { CDN_BASE_URL }, { UploadMediaType, MessageItemType, MessageType, MessageState }] =
+  const [{ getUploadUrl, sendMessage, SendMessageRejectedError }, { uploadBufferToCdn }, { aesEcbPaddedSize }, { CDN_BASE_URL }, { UploadMediaType, MessageItemType, MessageType, MessageState }] =
     await Promise.all([
       import('../../vendor/openclaw-weixin/api/api.js'),
       import('../../vendor/openclaw-weixin/cdn/cdn-upload.js'),
@@ -471,8 +478,17 @@ export async function sendOutboundVoice(params) {
     return { downloadEncryptedQueryParam: downloadParam, aeskey: aeskey.toString('hex') }
   })
   const send = params.send ?? sendMessage
-  const { silk, durationMs, sampleRate } = await transcode(params.filePath, { ...(params.ffmpegPath === undefined ? {} : { ffmpegPath: params.ffmpegPath }) })
-  const uploaded = await upload({ silk, to: params.to, opts: params.opts, cdnBaseUrl: params.cdnBaseUrl })
+  let prepared
+  try {
+    const { silk, durationMs, sampleRate } = await transcode(params.filePath, { ...(params.ffmpegPath === undefined ? {} : { ffmpegPath: params.ffmpegPath }) })
+    const uploaded = await upload({ silk, to: params.to, opts: params.opts, cdnBaseUrl: params.cdnBaseUrl })
+    prepared = { uploaded, durationMs, sampleRate }
+  } catch (error) {
+    throw new OutboundMediaError(`voice upload/send failed: ${String(error?.message ?? error)}`, 'send-failed', {
+      captionState: 'not-sent',
+      voiceState: 'not-attempted',
+    })
+  }
   const token = params.contextToken
   /** Mirrors ILinkTransport#body; see that method for the invariants. */
   const envelope = (item) => ({
@@ -492,14 +508,61 @@ export async function sendOutboundVoice(params) {
       // voice keeps the same rule instead of inventing a mixed item_list.
       await send({ baseUrl: params.opts.baseUrl, token: params.opts.token, body: envelope({ type: MessageItemType.TEXT, text_item: { text: params.text } }) })
     }
+  } catch (error) {
+    // A parsed `ret != 0` reply proves the server refused the caption. A
+    // timeout or transport error does not: the server may have accepted it
+    // before the response was lost.
+    const rejected = error instanceof SendMessageRejectedError
+    throw new OutboundMediaError(`voice upload/send failed: ${String(error?.message ?? error)}`, 'send-failed', {
+      captionState: rejected ? 'not-sent' : 'unknown',
+      voiceState: 'not-attempted',
+    })
+  }
+  let item
+  try {
+    item = envelope(buildItem(prepared))
+  } catch (error) {
+    throw new OutboundMediaError(`voice upload/send failed: ${String(error?.message ?? error)}`, 'send-failed', {
+      captionState: params.text ? 'sent' : 'not-sent',
+      voiceState: 'not-attempted',
+    })
+  }
+  try {
     const result = await send({
       baseUrl: params.opts.baseUrl,
       token: params.opts.token,
-      body: envelope(buildItem({ uploaded, durationMs, sampleRate })),
+      body: item,
     })
     return { kind: 'voice', ...(result && typeof result === 'object' ? result : {}) }
   } catch (error) {
-    throw new OutboundMediaError(`voice upload/send failed: ${String(error?.message ?? error)}`, 'send-failed')
+    const rejected = error instanceof SendMessageRejectedError
+    throw new OutboundMediaError(`voice upload/send failed: ${String(error?.message ?? error)}`, 'send-failed', {
+      captionState: params.text ? 'sent' : 'not-sent',
+      voiceState: rejected ? 'rejected' : 'unknown',
+    })
+  }
+}
+
+/**
+ * Build the file-send parameters after a voice attempt fails.
+ *
+ * Returning `undefined` is deliberate: when either protocol send has an
+ * indeterminate outcome, retrying as a file can duplicate a caption or media
+ * item. Only a known caption state plus a voice request that was never sent or
+ * was explicitly rejected is safe to retry.
+ *
+ * @param {object} mediaParams
+ * @param {unknown} error
+ * @returns {object | undefined}
+ */
+export function mediaFallbackParamsAfterVoiceError(mediaParams, error) {
+  const captionState = error?.captionState
+  const voiceState = error?.voiceState
+  if (!(captionState === 'not-sent' || captionState === 'sent')) return undefined
+  if (!(voiceState === 'not-attempted' || voiceState === 'rejected')) return undefined
+  return {
+    ...mediaParams,
+    ...(captionState === 'sent' ? { text: '' } : {}),
   }
 }
 

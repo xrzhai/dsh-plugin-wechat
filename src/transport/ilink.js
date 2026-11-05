@@ -388,8 +388,10 @@ export class ILinkTransport {
    * @param {import('../message/rate-limit.js').OutboundPacer} [options.pacer]
    *   Test seam: a pre-built pacer (the tests inject a fake clock through it).
    * @param {boolean} [options.voiceOutbound]  Audio attachments go out as Weixin
-   *   voice messages (SILK) instead of file attachments. Default true; a failed
-   *   voice send falls back to the file path inside {@link sendMedia}.
+   *   voice messages (SILK) instead of file attachments. Default true; a known
+   *   voice failure falls back to the file path inside {@link sendMedia}.
+   * @param {object} [options.outbound]  Outbound-media implementation. Test
+   *   seam for the dynamically imported media module.
    * @param {ReturnType<typeof createInboundPendingStore>} [options.pendingStore]
    *   Test seam for the crash-safe inbound ledger.
    * @param {typeof notifyStart} [options.notifyStart]
@@ -419,6 +421,7 @@ export class ILinkTransport {
       warn: this.errLog,
     })
     this.voiceOutbound = options.voiceOutbound !== false
+    this.outbound = options.outbound
     // The poll call is injectable so the resilience test can make one round
     // reject without a network double.
     this.getUpdatesImpl = options.getUpdates ?? getUpdates
@@ -876,12 +879,15 @@ export class ILinkTransport {
    * @param {string} params.conversationId  Peer id (`to_user_id`).
    * @param {string} [params.contextToken]
    * @param {string} [params.cdnBaseUrl]
-   * @param {string} [params.caption]  Optional text sent as its own item first.
+   * @param {string} [params.text]  Channel's optional caption text.
+   * @param {string} [params.caption]  Direct-call alias; wins when both are set.
    * @returns {Promise<{ kind: string, filekey?: string, serverMessageId?: string }>}
    * @throws when the upload or the send fails; the caller degrades to text.
    */
-  async sendMedia({ filePath, conversationId, contextToken, cdnBaseUrl, caption }) {
-    const { sendOutboundMedia, sendOutboundVoice, mediaSendOptions } = await import('../media/outbound.js')
+  async sendMedia({ filePath, conversationId, contextToken, cdnBaseUrl, text, caption }) {
+    const mediaCaption = caption ?? text
+    const outbound = this.outbound ?? await import('../media/outbound.js')
+    const { sendOutboundMedia, sendOutboundVoice, mediaFallbackParamsAfterVoiceError, mediaSendOptions } = outbound
     const { isVoiceCandidate } = await import('../media/voice-encode.js')
     const opts = mediaSendOptions({
       baseUrl: this.baseUrl,
@@ -902,19 +908,23 @@ export class ILinkTransport {
         contextToken: contextToken ?? this.#fallbackContextToken(),
         cdnBaseUrl: cdnBaseUrl ?? this.cdnBaseUrl,
         opts,
-        ...(caption === undefined || caption === '' ? {} : { text: caption }),
+        ...(mediaCaption === undefined || mediaCaption === '' ? {} : { text: mediaCaption }),
       }
       // Audio rides the voice path (SILK voice_item) instead of file_item.
-      // A voice failure degrades to the file path rather than dropping the
-      // audio: the shape is newer than every other item kind here, and the
-      // worst case of a bad wire shape must be "arrives as a file", not
-      // "the reply loses its attachment".
+      // A known voice failure degrades to the file path; an indeterminate
+      // network outcome stops here because retrying could deliver both shapes.
       if (this.voiceOutbound && isVoiceCandidate(filePath)) {
         try {
           result = await sendOutboundVoice(mediaParams)
         } catch (voiceError) {
-          this.log(`voice send failed (${String(voiceError?.message ?? voiceError)}); sending ${filePath} as a file instead`)
-          result = await sendOutboundMedia(mediaParams)
+          const fallbackParams = mediaFallbackParamsAfterVoiceError(mediaParams, voiceError)
+          if (fallbackParams === undefined) {
+            this.log(`voice send outcome is uncertain (${String(voiceError?.message ?? voiceError)}); not retrying ${filePath} as a file to avoid duplicate delivery`)
+            throw voiceError
+          }
+          const caption = voiceError.captionState === 'sent' ? '; caption already sent' : ''
+          this.log(`voice send failed (${String(voiceError?.message ?? voiceError)}); sending ${filePath} as a file instead${caption}`)
+          result = await sendOutboundMedia(fallbackParams)
         }
       } else {
         result = await sendOutboundMedia(mediaParams)
