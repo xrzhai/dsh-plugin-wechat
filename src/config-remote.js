@@ -17,6 +17,7 @@ import path from "node:path";
 import { TypertRemoteService, RemoteError } from "@deepseek-ai/dsh-typert-protocol";
 import { stateDir, readSavedConfig, configFile } from "./state.js";
 import { remoteMethods } from "./typert-js.js";
+import { CATALOG } from "./i18n.js";
 
 /** Shape declarations the card understands. `number` carries min/max/step. */
 const T = {
@@ -84,6 +85,15 @@ export const FIELDS = [
         labelEn: "Working directory",
         hint: "微信会话默认工作的目录（如 D:\\Workspace），自动加载该目录下的 AGENTS.md。",
         hintEn: "Directory the agent operates in.",
+      },
+      {
+        path: "workspaceTitle",
+        type: T.string,
+        default: "",
+        label: CATALOG['config.workspaceTitle.label'].zh,
+        labelEn: CATALOG['config.workspaceTitle.label'].en,
+        hint: CATALOG['config.workspaceTitle.hint'].zh,
+        hintEn: CATALOG['config.workspaceTitle.hint'].en,
       },
       {
         path: "chatProvider",

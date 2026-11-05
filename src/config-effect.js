@@ -4,10 +4,10 @@
  * 设置卡保存会写进 `config.json`，但「写进去了」和「什么时候算数」不是一件事。
  * 这个模块把三件事分开说清楚：
  *
- *   - `live`：**下一条消息**就按新值走。热路径（限流、会话命令、提醒、主动
- *     开口、记忆、群聊、导出……）每一处都重新读存档配置，所以这些立刻生效。
- *   - `restart`：要等插件重新加载。长轮询间隔、ASR 子进程、通知服务监听端口、
- *     OCR 超时这些在启动时一次性建立的东西，改了不会自己重建。
+ *   - `live`：**下一条消息**或下一次周期动作就按新值走。热路径（会话命令、
+ *     群聊、提醒闸门、保留策略……）重新读取存档配置，所以这些立刻生效。
+ *   - `restart`：要等插件重新加载。transport/bridge 构造参数、长轮询间隔、ASR
+ *     子进程、通知/webhook 监听与固定闭包里的值，改了不会自己重建。
  *   - `login`：改的是账号本身，要重新登录。
  *
  * 为什么要有这张表：改完设置发现「没反应」，最常见的原因不是没保存，而是改的
@@ -27,36 +27,44 @@
  * @type {Record<string, EffectKind>}
  */
 export const CONFIG_EFFECTS = Object.freeze({
-  // —— 重启后才生效：启动时一次性建立的东西 ——
-  'sendIntervalMs': 'restart', 'voiceOutbound': 'restart', 'ocrTimeoutMs': 'restart', 'notifyPort': 'restart', 'eventPollMs': 'restart',
-  'asr': 'restart',
-
-  // —— 保存即生效：每条消息 / 每个 tick 都重读存档配置 ——
+  // —— 保存即生效：消息热路径或周期任务会重读存档配置 ——
+  // Compatibility note: `knowledgeHits`, `dryRun`, and `usageAwarenessEnabled`
+  // remain `live` only because they still exist in Config and the table must be
+  // schema-complete. No current runtime consumer is wired for them; this label
+  // alone does not mean the feature works.
+  'enabled': 'live',
   'sessionDispatcherEnabled': 'live', 'sessionDispatcherSenders': 'live', 'sessionDispatcherTargets': 'live', 'protectedSessions': 'live', 'readOnlyPaths': 'live',
-  'enabled': 'live', 'accountId': 'live', 'cwd': 'restart', 'allowedSenders': 'live', 'allowedChats': 'live',
-  'maxMessageLength': 'live', 'sendCooldownMs': 'live', 'messageJournal': 'live', 'personaDefaultMode': 'live', 'memoryEnabled': 'live',
-  'memorySummaryTurns': 'live', 'memoryStaleDays': 'live', 'memoryGlobalMaxFacts': 'live', 'memorySimilarityRoute': 'live', 'memoryConvMaxChars': 'live', 'memoryGlobalMaxTokens': 'live',
-  'chatProvider': 'live', 'chatModel': 'live', 'sideProvider': 'live', 'sideModel': 'live', 'documentExtract': 'live',
-  'ocrEnabled': 'live', 'ocrCommand': 'live', 'ocrMaxChars': 'live', 'documentTextChars': 'live', 'proactiveProvider': 'live',
-  'proactiveModel': 'live', 'reportProvider': 'live', 'reportModel': 'live', 'memoryProvider': 'live', 'memoryModel': 'live',
-  'memoryRecentTurns': 'live', 'memoryRecall': 'live', 'memoryRecallDays': 'live', 'memoryRecallHits': 'live', 'knowledgeEnabled': 'live', 'knowledgeHits': 'live', 'humanPacing': 'live',
-  'replyDelayMaxMs': 'live', 'bubbleSplitMax': 'live', 'bubbleGapMs': 'live', 'lifeState': 'live', 'stickerEnabled': 'live',
-  'stickerKeepBuiltins': 'live',
-  'ttsVoice': 'live', 'voiceReplies': 'live', 'voiceReplyMaxChars': 'live',
-  'proactiveEnabled': 'live', 'proactiveMinGapMinutes': 'live', 'proactiveMaxPerDay': 'live', 'proactiveWindowStart': 'live', 'proactiveWindowEnd': 'live', 'proactiveLearnedWindow': 'live',
-  'groupChatEnabled': 'live', 'groupReplyWhen': 'live', 'groupBotNames': 'live', 'groupKeywords': 'live', 'packsIndexUrl': 'live',
-  'groupSummaryEnabled': 'live', 'groupSummaryEvery': 'live', 'pricePer1kInputYuan': 'live', 'pricePer1kOutputYuan': 'live', 'usageAwarenessEnabled': 'live',
-  'groupShareMemory': 'live', 'videoFrames': 'live', 'richContent': 'live', 'codeFileThreshold': 'live', 'locale': 'live',
-  'toolNotices': 'live', 'quietHoursEnabled': 'live', 'quietHoursStart': 'live', 'quietHoursEnd': 'live', 'senderRatePerMinute': 'live',
-  'senderDailyLimit': 'live', 'maxQueuedPerConversation': 'live', 'retentionJournalDays': 'live', 'retentionAuditDays': 'live', 'retentionMediaDays': 'live',
-  'retentionExportsDays': 'live', 'retentionLogsDays': 'live', 'dryRun': 'live', 'metricsExport': 'live', 'backupEnabled': 'live',
-  'backupKeep': 'live', 'notifyEnabled': 'live', 'notifyToken': 'live', 'webhookUrl': 'live', 'webhookSecret': 'live',
-  'webhookTimeoutMs': 'live', 'awayAutoReply': 'live', 'dateReminderEnabled': 'live', 'dateReminderWhen': 'live', 'mediaMaxBytes': 'live',
-  'dateReminderLeadDays': 'live', 'digestEnabled': 'live', 'backgroundDailyLimit': 'live', 'digestWhen': 'live', 'memoryReviewEnabled': 'live',
-  'memoryReviewWhen': 'live', 'toolAudit': 'live', 'markdownMode': 'live', 'busyMessageMode': 'live', 'sourceContext': 'live',
-  'readLinks': 'live', 'progressAfterMs': 'live', 'progressToolAfterMs': 'live', 'progressEveryMs': 'live', 'maxTurnWaitMs': 'live',
-  'typingIndicator': 'live', 'mediaEnabled': 'live', 'autoSendFiles': 'live', 'maxMediaBytes': 'live', 'maxInboundMediaBytes': 'live',
-  'cdnBaseUrl': 'live',
+  'allowedSenders': 'live', 'allowedChats': 'live',
+  'chatProvider': 'live', 'chatModel': 'live', 'documentExtract': 'live',
+  'ocrEnabled': 'live', 'ocrCommand': 'live', 'ocrTimeoutMs': 'live', 'ocrMaxChars': 'live', 'documentTextChars': 'live',
+  'knowledgeHits': 'live',
+  'ttsVoice': 'live',
+  'groupChatEnabled': 'live', 'groupReplyWhen': 'live', 'groupKeywords': 'live',
+  'groupSummaryEnabled': 'live', 'groupSummaryEvery': 'live',
+  'pricePer1kInputYuan': 'live', 'pricePer1kOutputYuan': 'live', 'usageAwarenessEnabled': 'live',
+  'videoFrames': 'live', 'locale': 'live',
+  'toolNotices': 'live', 'quietHoursEnabled': 'live', 'quietHoursStart': 'live', 'quietHoursEnd': 'live',
+  'senderDailyLimit': 'live',
+  'retentionJournalDays': 'live', 'retentionAuditDays': 'live', 'retentionMediaDays': 'live', 'retentionExportsDays': 'live', 'retentionLogsDays': 'live',
+  'dryRun': 'live', 'metricsExport': 'live', 'backupEnabled': 'live', 'backupKeep': 'live',
+  'awayAutoReply': 'live', 'mediaMaxBytes': 'live', 'backgroundDailyLimit': 'live',
+  'busyMessageMode': 'live',
+
+  // —— 重启后才生效：启动时被 transport、bridge、timer 或闭包捕获 ——
+  'accountId': 'restart', 'cwd': 'restart', 'workspaceTitle': 'restart',
+  'maxMessageLength': 'restart', 'sendIntervalMs': 'restart', 'sendCooldownMs': 'restart', 'voiceOutbound': 'restart', 'messageJournal': 'restart',
+  'sideProvider': 'restart', 'sideModel': 'restart',
+  'knowledgeEnabled': 'restart', 'groupBotNames': 'restart',
+  'richContent': 'restart', 'codeFileThreshold': 'restart',
+  'senderRatePerMinute': 'restart', 'maxQueuedPerConversation': 'restart',
+  'notifyEnabled': 'restart', 'notifyPort': 'restart', 'notifyToken': 'restart',
+  'webhookUrl': 'restart', 'webhookSecret': 'restart', 'webhookTimeoutMs': 'restart',
+  'toolAudit': 'restart', 'markdownMode': 'restart', 'sourceContext': 'restart', 'readLinks': 'restart',
+  'progressAfterMs': 'restart', 'progressToolAfterMs': 'restart', 'progressEveryMs': 'restart',
+  'maxTurnWaitMs': 'restart', 'eventPollMs': 'restart',
+  'typingIndicator': 'restart', 'mediaEnabled': 'restart', 'autoSendFiles': 'restart',
+  'maxMediaBytes': 'restart', 'maxInboundMediaBytes': 'restart', 'cdnBaseUrl': 'restart',
+  'asr': 'restart',
 })
 
 /**

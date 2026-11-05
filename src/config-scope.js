@@ -2,10 +2,10 @@
 //
 // The config schema has always been global-then-account: one set of values for
 // the whole plugin, optionally narrowed per bot account. That is the wrong
-// shape for the settings people actually want to change per chat — pace this
-// group chat slowly and this private chat quickly, keep memory off for the work
-// thread, use a different persona for each person. Today the only way to get
-// that is to switch accounts, which is not a choice.
+// shape for the settings people actually want to change per chat. Older
+// releases let a conversation override pacing, memory and persona fields; those
+// runtime features no longer exist, so the allowlist below is only the current
+// intersection that the message path can still layer safely.
 //
 // This module stores overrides keyed by (accountId, conversationId) and layers
 // them over the account config for one message. Only the keys listed in
@@ -22,18 +22,6 @@ export const SCOPABLE_KEYS = Object.freeze([
   'maxMessageLength',
   'markdownMode',
   'typingIndicator',
-  'humanPacing',
-  'replyDelayMaxMs',
-  'bubbleSplitMax',
-  'bubbleGapMs',
-  'lifeState',
-  'stickerEnabled',
-  'memoryEnabled',
-  'memoryRecentTurns',
-  'memoryRecall',
-  'memoryRecallDays',
-  'memoryRecallHits',
-  'personaDefaultMode',
   'usageAwarenessEnabled',
   'knowledgeEnabled',
 ]);
@@ -66,13 +54,22 @@ function sanitizeScope(raw) {
   return Object.keys(scope).length === 0 ? undefined : scope;
 }
 
-/** All overrides, as `{ 'account|conversation': { key: value } }`. */
-export function readScopes(stateRoot, { warn } = {}) {
+function readScopeStore(stateRoot, { warn } = {}) {
   const store = readJsonFile(scopeFilePath(stateRoot), {
     version: SCOPE_VERSION,
     fallback: () => ({ scopes: {} }),
     warn,
   });
+  const scopes = store?.scopes;
+  return {
+    ...store,
+    scopes: scopes !== null && typeof scopes === 'object' && !Array.isArray(scopes) ? scopes : {},
+  };
+}
+
+/** All overrides, as `{ 'account|conversation': { key: value } }`. */
+export function readScopes(stateRoot, { warn } = {}) {
+  const store = readScopeStore(stateRoot, { warn });
   const scopes = {};
   for (const [key, value] of Object.entries(store?.scopes ?? {})) {
     const scope = sanitizeScope(value);
@@ -92,13 +89,25 @@ export function readScope(stateRoot, accountId, conversationId, options) {
  * Returns what was stored, so the caller can echo it back.
  */
 export function writeScope(stateRoot, accountId, conversationId, patch, { warn } = {}) {
-  const scopes = readScopes(stateRoot, { warn });
+  // Keep the raw store for the write. readScopes intentionally filters keys
+  // that no longer have a runtime consumer, but rewriting a new override must
+  // not erase an older config-scope.json wholesale or destroy another
+  // conversation's values. Unsupported keys remain dormant on disk; only the
+  // explicit empty-patch clear removes this conversation's record.
+  const store = readScopeStore(stateRoot, { warn });
+  const scopes = { ...store.scopes };
   const key = keyFor(accountId, conversationId);
+  const existing = scopes[key];
+  const existingScope = existing !== null && typeof existing === 'object' && !Array.isArray(existing) ? existing : undefined;
   const scope = sanitizeScope(patch ?? {});
-  if (scope === undefined) delete scopes[key];
-  else scopes[key] = { ...scopes[key], ...scope };
-  atomicWriteJson(scopeFilePath(stateRoot), { schemaVersion: SCOPE_VERSION, scopes }, { warn });
-  return scopes[key];
+  if (scope === undefined) {
+    if (patch !== null && typeof patch === 'object' && Object.keys(patch).length > 0) return sanitizeScope(existingScope);
+    delete scopes[key];
+  } else {
+    scopes[key] = { ...existingScope, ...scope };
+  }
+  atomicWriteJson(scopeFilePath(stateRoot), { ...store, schemaVersion: SCOPE_VERSION, scopes }, { warn });
+  return sanitizeScope(scopes[key]);
 }
 
 /** Layer a scope over the account config. Unknown keys were already dropped. */
