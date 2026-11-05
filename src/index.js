@@ -461,9 +461,13 @@ export function apply(ctx, config) {
   // rendered, a scan wrote a credential — but there was no controller left to
   // hear "the login finished", so the inbound loop never moved to the new
   // credential and WeChat kept reporting that it could not reach openclaw.
+  // Resolve once for this plugin lifetime: the editor and AgentBridge must
+  // share the effective profile/overlay directory and the same fallback.
+  let workspaceDirectory
+  const getWorkspaceDirectory = () => workspaceDirectory ??= resolveCwd(ctx, config, warn)
   let loginController
   try {
-    loginController = new WeixinLoginController(ctx, {})
+    loginController = new WeixinLoginController(ctx, { getWorkspaceDirectory })
   } catch (error) {
     warn(`settings login service unavailable: ${String(error)}`)
     loginController = undefined
@@ -559,7 +563,7 @@ export function apply(ctx, config) {
     // start), but the effect disposer is synchronous-safe: it awaits the startup
     // promise, then tears down whatever got as far as existing.
     const setup = (async () => {
-      cwd = await resolveCwd(ctx, config, warn)
+      cwd = await getWorkspaceDirectory()
       // A cosmetic rename, never allowed to fail bring-up.
       await ensureWorkspaceTitle(ctx, withSavedConfig(config), warn)
       bridge = new AgentBridge({

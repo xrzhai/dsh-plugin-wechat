@@ -123,6 +123,7 @@ export class WeixinLoginController extends TypertRemoteService {
     constructor(ctx, options = {}) {
         super(ctx, "weixinLoginController", { namespace: "weixin" });
         this.botType = options.botType ?? DEFAULT_BOT_TYPE;
+        this.getWorkspaceDirectory = options.getWorkspaceDirectory;
         /**
          * Called after a login writes a new credential, so the host can start
          * (or restart) the inbound loop without waiting for a reload. Assigned
@@ -682,14 +683,14 @@ export class WeixinLoginController extends TypertRemoteService {
      * @param {{ modeId?: string }} [options]
      */
     async promptPreview(options) {
-        const root = stateDir();
-        // Edit the AGENTS.md the agent actually loads: the configured working
-        // directory when one is set, otherwise the plugin's own workspace.
-        // Mirrors resolveCwd() in index.js — never a hardcoded path, so the
-        // 人设 tab and the running agent can never drift to different files.
-        const saved = readSavedConfig();
-        const configured = typeof saved.cwd === "string" ? saved.cwd.trim() : "";
-        const filePath = configured !== "" ? path.join(configured, "AGENTS.md") : path.join(root, "sessions", "AGENTS.md");
+        // Startup owns the effective cwd (including profile configuration and
+        // fallback). Do not re-read the saved overlay and redirect the editor
+        // while the bridge is still running in its original workspace.
+        if (typeof this.getWorkspaceDirectory !== "function") {
+            throw new RemoteError("workspace-unavailable", "Workspace directory is not available", {});
+        }
+        const directory = await this.getWorkspaceDirectory();
+        const filePath = path.join(directory, "AGENTS.md");
         const action = typeof options?.action === "string" ? options.action : "read";
         if (action === "save") {
             const content = typeof options?.content === "string" ? options.content : "";
