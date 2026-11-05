@@ -726,7 +726,10 @@ export function detectMediaReferences(text) {
  * @returns {string} Same length as `text`, with code regions blanked.
  */
 function maskCode(text) {
-  const chars = [...text]
+  // RegExp match indices use UTF-16 code units. Iterating the string with a
+  // spread would produce code points instead, so any non-BMP character before
+  // a match shifts every later index when it is used against `chars`.
+  const chars = text.split('')
   const blank = (start, end) => {
     for (let i = start; i < end && i < chars.length; i += 1) {
       if (chars[i] !== '\n') chars[i] = ' '
