@@ -132,6 +132,60 @@ function senderCount(value) {
     : 0
 }
 
+const DEFAULT_ASR_MODEL_DIR = path.join(os.homedir(), '.dsh', 'weixin', 'asr-models')
+
+function nonEmptyString(value) {
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+/** Read the model directory persisted by the settings card, if it is usable. */
+function persistedAsrModelDir(root) {
+  const saved = readJson(path.join(root, 'asr-config.json'))
+  if (saved.__error !== undefined || saved === null || typeof saved !== 'object') return ''
+  return nonEmptyString(saved.modelDir)
+}
+
+/**
+ * Check the ASR setup the runtime would actually see.
+ *
+ * `asr.enabled` defaults to true even when no bridge command exists, so enabled
+ * alone is not evidence that transcription is active. The model directory uses
+ * the same precedence as AsrController: config, environment, settings-card
+ * persistence, then the download default. Flat asrEnabled/asrModelDir keys from
+ * older configs are reported explicitly as legacy because the current runtime
+ * requires the nested `asr.command`.
+ */
+function checkVoiceTranscription(root, config) {
+  const settings = config.asr !== null && typeof config.asr === 'object' ? config.asr : undefined
+  const command = nonEmptyString(settings?.command)
+  if (settings !== undefined && settings.enabled !== false && command !== '') {
+    const modelDir = nonEmptyString(settings.modelDir) ||
+      nonEmptyString(process.env.DSH_WEIXIN_ASR_MODEL_DIR) ||
+      persistedAsrModelDir(root) ||
+      DEFAULT_ASR_MODEL_DIR
+    let usable = false
+    try {
+      usable = fs.statSync(modelDir).isDirectory()
+    } catch {}
+    if (usable) ok('voice transcription', modelDir)
+    else note('voice transcription', `enabled but the model directory is missing (${modelDir || 'unset'})`)
+    return
+  }
+
+  if (config.asrEnabled === true) {
+    const legacyDir = nonEmptyString(config.asrModelDir)
+    let legacyState = 'unset'
+    if (legacyDir !== '') {
+      try {
+        legacyState = fs.statSync(legacyDir).isDirectory() ? legacyDir : `${legacyDir} (missing)`
+      } catch {
+        legacyState = `${legacyDir} (missing)`
+      }
+    }
+    note('voice transcription (legacy)', `asrEnabled/asrModelDir found (${legacyState}); current runtime requires a nested asr.command`)
+  }
+}
+
 function checkEffectiveAllowlist(root, config) {
   const signedIn = credentialAccounts(root).accounts
   if (signedIn.length === 0) {
@@ -168,14 +222,7 @@ function checkConfig(root) {
     if (config.__error !== undefined) return bad('config', `${file}: ${config.__error}`)
   }
   checkEffectiveAllowlist(root, config)
-  if (config.asrEnabled === true) {
-    const modelDir = typeof config.asrModelDir === 'string' ? config.asrModelDir : ''
-    if (modelDir === '' || fs.existsSync(modelDir) !== true) {
-      note('voice transcription', `enabled but the model directory is missing (${modelDir || 'unset'})`)
-    } else {
-      ok('voice transcription', modelDir)
-    }
-  }
+  checkVoiceTranscription(root, config)
   return config
 }
 
@@ -396,7 +443,7 @@ function applyFixes(root, { dryRun }) {
   //    account tokens and nothing the plugin writes needs group access.
   const ownedDirs = [
     [root, 'state root'],
-    [statePath(root, 'memoryDir'), 'memory/'],
+    [path.join(root, 'sessions'), 'sessions/'],
     [statePath(root, 'mediaInboundDir'), 'media/inbound/'],
     // knowledgeDir() lives in src/message/knowledge.js as <root>/knowledge/<account>.
     [path.join(root, 'knowledge'), 'knowledge/'],
