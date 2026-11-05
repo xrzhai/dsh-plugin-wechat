@@ -23,18 +23,23 @@ function reminder(id, fireAt, overrides = {}) {
   }
 }
 
-function scheduler(root, warn = () => {}) {
+function scheduler(root, warn = () => {}, overrides = {}) {
   return new ReminderScheduler({
     stateRoot: root,
     fire: () => {},
     warn,
     setTimeoutRef: () => ({}),
     clearTimeoutRef: () => {},
+    ...overrides,
   })
 }
 
 function recoveryCopies(root) {
   return readdirSync(root).filter((name) => /^reminders\.recovery-[0-9a-f]+\.json$/.test(name))
+}
+
+async function settle() {
+  await new Promise((resolve) => setImmediate(resolve))
 }
 
 test('mixed corrupt rows keep valid reminders and preserve the exact original before repair', (t) => {
@@ -149,36 +154,133 @@ test('a scheduler write failure rolls back the in-memory row and sequence', (t) 
 
   const store = scheduler(root)
   t.after(() => store.stop())
+  assert.equal(store.timers.size, 2)
   const file = path.join(root, 'reminders.json')
   const priorFile = path.join(root, 'reminders.before-failure.json')
   renameSync(file, priorFile)
   mkdirSync(file)
 
+  const result = store.schedule({ accountId: 'account', conversationId: 'conversation', text: 'cannot persist', fireAt })
+  assert.match(result.error, /写盘失败/)
+  assert.equal(store.timers.size, 0)
+  store.wake('account')
+  assert.equal(store.timers.size, 0)
   assert.equal(store.cancel('r7'), false)
   assert.equal(store.snoozeById('r7', 10, fireAt), undefined)
   assert.equal(store.list().find((item) => item.id === 'r7').fireAt, fireAt)
   assert.equal(store.skipNext('account'), undefined)
   assert.equal(store.list().find((item) => item.id === 'r8').scheduledFor, fireAt + 1)
-  const result = store.schedule({ accountId: 'account', conversationId: 'conversation', text: 'cannot persist', fireAt })
-  assert.match(result.error, /写盘失败/)
   assert.deepEqual(store.list().map((item) => item.id), ['r7', 'r8'])
   assert.equal(store.store.seq, 8)
   assert.equal(readFileSync(priorFile, 'utf8').length > 0, true)
 })
 
-test('a future schema stays readable but is never downgraded by a scheduler write', (t) => {
+test('a completed automatic delivery with an unpersisted completion stops all further sends', async (t) => {
+  const root = stateRoot(t, 'weixin-reminder-delivery-write-failure-')
+  const fireAt = Date.now() - 1
+  writeReminders(root, { seq: 1, items: [reminder('r1', fireAt)] })
+  const file = path.join(root, 'reminders.json')
+  const priorFile = path.join(root, 'reminders.before-delivery-failure.json')
+  const callbacks = []
+  const warnings = []
+  let fires = 0
+  const store = scheduler(root, (message) => warnings.push(message), {
+    fire: () => {
+      fires += 1
+      // The preflight succeeded; make the completion write fail after send.
+      renameSync(file, priorFile)
+      mkdirSync(file)
+    },
+    setTimeoutRef: (delay, callback) => { callbacks.push(callback); return { delay } },
+  })
+  t.after(() => store.stop())
+  assert.equal(callbacks.length, 1)
+
+  callbacks[0]()
+  await settle()
+
+  assert.equal(fires, 1)
+  assert.equal(store.timers.size, 0)
+  assert.deepEqual(store.list().map((item) => item.id), ['r1'])
+  assert.match(warnings.join('\n'), /automatic reminder delivery is disabled after a persistence failure/)
+  store.wake('account')
+  assert.equal(callbacks.length, 1)
+  assert.equal(fires, 1)
+  assert.equal(readFileSync(priorFile, 'utf8').length > 0, true)
+})
+
+test('a failed write preflight prevents an automatic delivery from starting', async (t) => {
+  const root = stateRoot(t, 'weixin-reminder-delivery-preflight-failure-')
+  const fireAt = Date.now() - 1
+  writeReminders(root, { seq: 1, items: [reminder('r1', fireAt)] })
+  const callbacks = []
+  const warnings = []
+  let fires = 0
+  const store = scheduler(root, (message) => warnings.push(message), {
+    fire: () => { fires += 1 },
+    setTimeoutRef: (delay, callback) => { callbacks.push(callback); return { delay } },
+  })
+  t.after(() => store.stop())
+  assert.equal(callbacks.length, 1)
+
+  const file = path.join(root, 'reminders.json')
+  const priorFile = path.join(root, 'reminders.before-preflight-failure.json')
+  renameSync(file, priorFile)
+  mkdirSync(file)
+  callbacks[0]()
+  await settle()
+
+  assert.equal(fires, 0)
+  assert.equal(store.timers.size, 0)
+  assert.deepEqual(store.list().map((item) => item.id), ['r1'])
+  assert.match(warnings.join('\n'), /automatic reminder delivery is disabled after a persistence failure/)
+  store.wake('account')
+  assert.equal(fires, 0)
+  assert.equal(readFileSync(priorFile, 'utf8').length > 0, true)
+})
+
+test('a future schema stays readable but never writes, arms, or automatically delivers', (t) => {
   const root = stateRoot(t, 'weixin-reminder-future-schema-')
-  const fireAt = Date.now() + 60 * 60_000
+  const fireAt = Date.now() - 1
   const original = `${JSON.stringify({ schemaVersion: 2, seq: 2, items: [reminder('r2', fireAt)] }, null, 2)}\n`
   writeFileSync(path.join(root, 'reminders.json'), original)
 
   const warnings = []
   const loaded = readReminders(root, (message) => warnings.push(message))
   assert.deepEqual(loaded.items.map((item) => item.id), ['r2'])
-  assert.match(warnings.join('\n'), /disabled writes to avoid a downgrade/)
+  assert.match(warnings.join('\n'), /writes and automatic delivery are disabled/)
+  assert.equal(recoveryCopies(root).length, 1)
 
-  const store = scheduler(root, (message) => warnings.push(message))
+  let timerArms = 0
+  let fires = 0
+  const store = scheduler(root, (message) => warnings.push(message), {
+    fire: () => { fires += 1 },
+    setTimeoutRef: () => { timerArms += 1; return {} },
+  })
   t.after(() => store.stop())
+  assert.equal(store.timers.size, 0)
+  store.wake('account')
+  assert.equal(timerArms, 0)
+  assert.equal(fires, 0)
+  assert.match(warnings.join('\n'), /automatic delivery is disabled/)
   assert.match(store.schedule({ accountId: 'account', conversationId: 'conversation', text: 'blocked', fireAt }).error, /当前只读/)
+  assert.equal(readFileSync(path.join(root, 'reminders.json'), 'utf8'), original)
+})
+
+test('an exhausted safe sequence returns before probing an unsafe rN id', (t) => {
+  const root = stateRoot(t, 'weixin-reminder-sequence-boundary-')
+  const fireAt = Date.now() + 60 * 60_000
+  const original = `${JSON.stringify({
+    schemaVersion: 1,
+    seq: Number.MAX_SAFE_INTEGER,
+    items: [reminder('r9007199254740992', fireAt)],
+  }, null, 2)}\n`
+  writeFileSync(path.join(root, 'reminders.json'), original)
+
+  const store = scheduler(root)
+  t.after(() => store.stop())
+  const result = store.schedule({ accountId: 'account', conversationId: 'conversation', text: 'no id left', fireAt })
+  assert.match(result.error, /编号已耗尽/)
+  assert.equal(store.store.seq, Number.MAX_SAFE_INTEGER)
   assert.equal(readFileSync(path.join(root, 'reminders.json'), 'utf8'), original)
 })

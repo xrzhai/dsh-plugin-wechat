@@ -320,6 +320,18 @@ function sequenceFromItems(items) {
   return sequence
 }
 
+/** Next free safe rN id, checking the bound before and after every increment. */
+function nextReminderSequence(current, ids) {
+  if (!Number.isSafeInteger(current) || current < 0 || current >= Number.MAX_SAFE_INTEGER) return undefined
+  let next = current
+  while (next < Number.MAX_SAFE_INTEGER) {
+    next += 1
+    if (!Number.isSafeInteger(next)) return undefined
+    if (!ids.has(`r${next}`)) return next
+  }
+  return undefined
+}
+
 function isRecurrence(value) {
   if (value === undefined) return true
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
@@ -455,7 +467,7 @@ export function readReminders(stateRoot, warn = () => {}) {
   if (recovery !== undefined) warn(`kept a recoverable copy of the reminder store at ${recovery}`)
   if (futureSchema) {
     const reason = `reminders.json uses unsupported schemaVersion ${version}`
-    warn(`${reason}; kept ${items.length} readable row(s) but disabled writes to avoid a downgrade`)
+    warn(`${reason}; kept ${items.length} readable row(s), but writes and automatic delivery are disabled until the schema is understood`)
     return makeReminderStore(seq, items, reason)
   }
   if (needsRepair && recovery === undefined) {
@@ -528,7 +540,14 @@ export class ReminderScheduler {
     this.pendingAttempts = new Set()
     this.store = readReminders(stateRoot, warn)
     this.stopped = false
-    for (const reminder of this.store.items) this.#arm(reminder)
+    const writeBlock = this.store[WRITE_BLOCK_REASON]
+    if (writeBlock !== undefined) {
+      if (this.store.items.length > 0) {
+        warn(`kept ${this.store.items.length} readable reminder(s), but automatic delivery is disabled: ${writeBlock}`)
+      }
+    } else {
+      for (const reminder of this.store.items) this.#arm(reminder)
+    }
   }
 
   /**
@@ -548,10 +567,9 @@ export class ReminderScheduler {
     const pending = this.store.items.filter((item) => item.accountId === plan.accountId)
     if (pending.length >= MAX_PENDING_PER_ACCOUNT) return { error: `这个账号的待发提醒太多了（最多 ${MAX_PENDING_PER_ACCOUNT} 条），先用 /remindlist 看，/remindcancel 删掉一些` }
     const previousSeq = this.store.seq
-    let nextSeq = previousSeq + 1
     const ids = new Set(this.store.items.map((item) => item.id))
-    while (ids.has(`r${nextSeq}`)) nextSeq += 1
-    if (!Number.isSafeInteger(nextSeq)) return { error: translate('error.reminderSequenceExhausted') }
+    const nextSeq = nextReminderSequence(previousSeq, ids)
+    if (nextSeq === undefined) return { error: translate('error.reminderSequenceExhausted') }
     this.store.seq = nextSeq
     const id = `r${nextSeq}`
     const reminder = {
@@ -572,7 +590,7 @@ export class ReminderScheduler {
           }),
     }
     this.store.items.push(reminder)
-    if (!writeReminders(this.stateRoot, this.store, this.warn)) {
+    if (!this.#persist()) {
       this.store.items.pop()
       this.store.seq = previousSeq
       return { error: translate('error.reminderWriteFailed') }
@@ -589,7 +607,7 @@ export class ReminderScheduler {
     const index = this.store.items.findIndex((item) => item.id === id)
     if (index === -1) return false
     const [item] = this.store.items.splice(index, 1)
-    if (!writeReminders(this.stateRoot, this.store, this.warn)) {
+    if (!this.#persist()) {
       this.store.items.splice(index, 0, item)
       return false
     }
@@ -632,7 +650,7 @@ export class ReminderScheduler {
     const base = Math.max(item.fireAt, now)
     item.fireAt = base + span
     if (item.recurrence !== undefined) item.scheduledFor = item.fireAt
-    if (!writeReminders(this.stateRoot, this.store, this.warn)) {
+    if (!this.#persist()) {
       item.fireAt = previousFireAt
       if (previousScheduledFor === undefined) delete item.scheduledFor
       else item.scheduledFor = previousScheduledFor
@@ -660,7 +678,7 @@ export class ReminderScheduler {
     const previousScheduledFor = item.scheduledFor
     item.scheduledFor = next
     item.fireAt = next
-    if (!writeReminders(this.stateRoot, this.store, this.warn)) {
+    if (!this.#persist()) {
       item.fireAt = previousFireAt
       if (previousScheduledFor === undefined) delete item.scheduledFor
       else item.scheduledFor = previousScheduledFor
@@ -686,7 +704,7 @@ export class ReminderScheduler {
    * becomes live so a startup or reconnect does not wait for the next backoff.
    */
   wake(accountId) {
-    if (this.stopped) return
+    if (this.stopped || this.store[WRITE_BLOCK_REASON] !== undefined) return
     const now = this.nowRef()
     for (const item of this.store.items) {
       if (item.accountId !== accountId || item.fireAt > now) continue
@@ -717,12 +735,33 @@ export class ReminderScheduler {
   }
 
   /**
+   * Persist a state transition. Once a write fails, stop every automatic timer
+   * for this process rather than sending more work whose completion cannot be
+   * durably committed.
+   */
+  #persist() {
+    if (this.store[WRITE_BLOCK_REASON] !== undefined) {
+      this.warn(`refusing to write reminders.json: ${this.store[WRITE_BLOCK_REASON]}`)
+      return false
+    }
+    if (writeReminders(this.stateRoot, this.store, this.warn)) return true
+    const reason = 'the last reminders.json write failed'
+    Object.defineProperty(this.store, WRITE_BLOCK_REASON, { value: reason })
+    for (const timer of this.timers.values()) timer.cancel()
+    this.timers.clear()
+    this.retryAttempts.clear()
+    this.pendingAttempts.clear()
+    this.warn(`automatic reminder delivery is disabled after a persistence failure: ${reason}`)
+    return false
+  }
+
+  /**
    * Arm one reminder's timer. Overdue ones fire right away rather than being
    * dropped: the host was probably down or reloading when their moment
    * passed, and the user asked for the message, not for its punctuality.
    */
   #arm(reminder, dueAt = reminder.fireAt) {
-    if (this.stopped) return
+    if (this.stopped || this.store[WRITE_BLOCK_REASON] !== undefined) return
     this.#clearTimer(reminder.id)
     let timer
     timer = armLongTimer({
@@ -738,8 +777,12 @@ export class ReminderScheduler {
         if (quietMs > 0) {
           // 免打扰时段: the item was not removed yet — keep it in the store with
           // a pushed fireAt so it survives a restart, then re-arm for the end.
+          const previousFireAt = reminder.fireAt
           reminder.fireAt = now + quietMs
-          writeReminders(this.stateRoot, this.store, this.warn)
+          if (!this.#persist()) {
+            reminder.fireAt = previousFireAt
+            return
+          }
           this.warn(`免打扰时段，提醒 ${reminder.id} 推迟到 ${new Date(reminder.fireAt).toLocaleString('zh-CN', { hour12: false })} 发送`)
           this.#arm(reminder)
           return
@@ -751,18 +794,22 @@ export class ReminderScheduler {
   }
 
   async #attempt(reminder) {
-    if (this.stopped) return
+    if (this.stopped || this.store[WRITE_BLOCK_REASON] !== undefined) return
     if (this.inFlight.has(reminder.id)) {
       this.pendingAttempts.add(reminder.id)
       return
     }
+    // Prove the completion can be committed before sending. A persistently
+    // read-only store must not deliver once per restart merely because the row
+    // it cannot clear remains on disk.
+    if (!this.#persist()) return
     const attemptedFireAt = reminder.fireAt
     const slot = reminder.scheduledFor ?? reminder.fireAt
     const task = (async () => {
       try {
         await this.fire(reminder)
       } catch (error) {
-        if (this.stopped) return
+        if (this.stopped || this.store[WRITE_BLOCK_REASON] !== undefined) return
         const current = this.store.items.find((item) => item.id === reminder.id)
         if (current === undefined || current.fireAt !== attemptedFireAt) return
         if (current.recurrence !== undefined && (current.scheduledFor ?? current.fireAt) !== slot) return
@@ -773,7 +820,7 @@ export class ReminderScheduler {
         this.#arm(current, this.nowRef() + delay)
         return
       }
-      if (this.stopped) return
+      if (this.stopped || this.store[WRITE_BLOCK_REASON] !== undefined) return
       this.retryAttempts.delete(reminder.id)
       const current = this.store.items.find((item) => item.id === reminder.id)
       if (current === undefined) return
@@ -781,15 +828,22 @@ export class ReminderScheduler {
       if (current.recurrence === undefined) {
         // A snooze or skip during delivery changes fireAt; cancellation removes
         // the row. In either case the user's newer state wins over this ack.
-        this.store.items = this.store.items.filter((item) => item.id !== reminder.id)
-        writeReminders(this.stateRoot, this.store, this.warn)
+        const index = this.store.items.findIndex((item) => item.id === reminder.id)
+        const [delivered] = this.store.items.splice(index, 1)
+        if (!this.#persist()) this.store.items.splice(index, 0, delivered)
         return
       }
       if ((current.scheduledFor ?? current.fireAt) !== slot) return
       const next = nextRecurrenceAt(current.recurrence, Number(current.hour ?? 0), Number(current.minute ?? 0), slot)
+      const previousScheduledFor = current.scheduledFor
       current.scheduledFor = next
       current.fireAt = next
-      writeReminders(this.stateRoot, this.store, this.warn)
+      if (!this.#persist()) {
+        if (previousScheduledFor === undefined) delete current.scheduledFor
+        else current.scheduledFor = previousScheduledFor
+        current.fireAt = attemptedFireAt
+        return
+      }
       this.#arm(current)
     })().finally(() => {
       if (this.inFlight.get(reminder.id) === task) this.inFlight.delete(reminder.id)
