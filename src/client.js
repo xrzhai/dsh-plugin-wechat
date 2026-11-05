@@ -136,24 +136,6 @@ window.__ModuleLoader__.load({
 					result: { mode: "strict", typeSymbol: `${PKG}#weixin/reminders:result`, create: _statusResult },
 				},
 				{
-					id: `${PKG}#weixin/donateQr`,
-					service: "weixinLoginController",
-					namespace: "weixin",
-					method: "donateQr",
-					invocation: { kind: "direct" },
-					parameters: [],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixin/donateQr:result`, create: _statusResult },
-				},
-				{
-					id: `${PKG}#weixin/donateQrAlipay`,
-					service: "weixinLoginController",
-					namespace: "weixin",
-					method: "donateQrAlipay",
-					invocation: { kind: "direct" },
-					parameters: [],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixin/donateQrAlipay:result`, create: _statusResult },
-				},
-				{
 					id: `${PKG}#weixin/remindCancel`,
 					service: "weixinLoginController",
 					namespace: "weixin",
@@ -265,8 +247,7 @@ window.__ModuleLoader__.load({
 					invocation: { kind: "direct" },
 					parameters: [],
 					result: { mode: "strict", typeSymbol: `${PKG}#weixin/onboarding:result`, create: _statusResult },
-				},
-
+				},
 				{
 					id: `${PKG}#weixin/migrateSummary`,
 					service: "weixinLoginController",
@@ -309,6 +290,7 @@ window.__ModuleLoader__.load({
 					],
 					result: { mode: "strict", typeSymbol: `${PKG}#weixin/migrateRestore:result`, create: _statusResult },
 				},
+
 				{
 					id: `${PKG}#weixin/promptPreview`,
 					service: "weixinLoginController",
@@ -318,7 +300,7 @@ window.__ModuleLoader__.load({
 					parameters: [{ name: "options", wire: "options", source: "json", codec: { mode: "strict", typeSymbol: `${PKG}#weixin/promptPreview:p0`, create: _strMap } }],
 					result: { mode: "strict", typeSymbol: `${PKG}#weixin/promptPreview:result`, create: _statusResult },
 				},
-
+
 				{
 					id: `${PKG}#weixin/removeSession`,
 					service: "weixinLoginController",

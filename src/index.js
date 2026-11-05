@@ -738,7 +738,6 @@ export function apply(ctx, config) {
         })
       }
       if (loginController !== undefined) {
-        loginController.subscriptionScheduler = subscriptionScheduler
         loginController.outboxFlush = (options) => outbox.flush(options)
         loginController.outboxDropItem = (id) => outbox.drop(id)
       }
@@ -1946,8 +1945,8 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
             `allowedSenders=${JSON.stringify(effectiveConfig.current.allowedSenders ?? [])}`,
         )
         warn(`refused message from ${message.senderId}: ${denialReason(effectiveConfig.current, message.senderId, message.conversationId)}`)
-        // Stranger audit trail: the card reads this list and offers a one-click
-        // allow. Silent refusals were indistinguishable from silence itself.
+        // Persist a bounded stranger audit trail for diagnostics even though
+        // the simplified settings card no longer exposes a one-click allow.
         recordStranger(stateRoot, accountId, {
           senderId: message.senderId,
           conversationId: message.conversationId,
