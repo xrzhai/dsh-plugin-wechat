@@ -1284,6 +1284,9 @@ export class AgentBridge {
         }
         const handler = record.onSpontaneousReply ?? this.onSpontaneousReply
         if (typeof handler === 'function') {
+          if (turn.silentRecoveredFromSeq !== undefined) {
+            this.log?.(`spontaneous reply recovered before trailing silent step for ${sessionId}: replySeq=${turn.silentRecoveredFromSeq} settledSeq=${turn.settledSeq}`)
+          }
           record.spontaneousSending = true
           try {
             await handler({

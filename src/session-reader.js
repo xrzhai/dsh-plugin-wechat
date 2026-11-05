@@ -148,6 +148,68 @@ export function readAssistantReply({ events, afterSeq = -1 }) {
 }
 
 /**
+ * A successful model step can finish before a newly injected notice keeps the
+ * SAME host turn running. Recover only its last complete reply when later steps
+ * say just [SILENT]. This is not a search for arbitrary earlier nonempty text.
+ *
+ * DSH agent-loop 0.2.2-rc.1 records identified step boundaries, a canonical
+ * assistant/message, and a compact stream ending in finish(stop). Tool-bearing
+ * messages, log-only attempts and interruption prefixes are not final replies.
+ * Older/unknown event shapes keep the existing behavior rather than guessing.
+ */
+function replyBeforeSilent(events) {
+  const pureSilent = text => /^\[SILENT\]$/i.test(text.trim())
+  const body = event => streamText(event.data?.stream) || messageText(event.data?.message)
+  const outputIndexes = events.flatMap((event, index) =>
+    SETTLED_TYPES.has(event.type) && body(event) !== '' ? [index] : [])
+  const last = outputIndexes.at(-1)
+  if (last === undefined || !pureSilent(body(events[last]))) return undefined
+
+  function completeMessage(index) {
+    const event = events[index], data = event.data, message = data?.message
+    if (event.type !== 'assistant/message' || data?.interrupted === true
+      || event.surfaceOp !== 'append'
+      || !Number.isSafeInteger(event.seq)
+      || !Number.isSafeInteger(data?.turn) || !Number.isSafeInteger(data?.step)
+      || events[0]?.type !== 'turn/start' || events[0].data?.turn !== data.turn
+      || message?.role !== 'assistant' || message.source?.kind !== 'model'
+      || !Array.isArray(message.content) || message.content.some(block => block?.type === 'tool-call')) return false
+    // Both representations must agree before replaying an earlier response.
+    const text = messageText(message)
+    const streamedText = streamText(data.stream)
+    if (text === '' || (streamedText !== '' && streamedText !== text)) return false
+    const stream = data.stream
+    if (!Array.isArray(stream) || stream.at(-1)?.type !== 'chunk'
+      || stream.at(-1)?.chunk?.type !== 'finish' || stream.at(-1).chunk.reason?.kind !== 'stop') return false
+    if (stream.some(record => record?.type === 'tool-call-chunks'
+      || record?.chunk?.type === 'tool-call-delta'
+      || record?.chunk?.blockType === 'tool-call' || record?.chunk?.block?.type === 'tool-call')) return false
+    const sameStep = item => item.data?.turn === data.turn && item.data?.step === data.step
+    const start = events.findLastIndex((item, i) => i < index && item.type === 'step/start')
+    const end = events.findIndex((item, i) => i > index && (item.type === 'step/start' || item.type === 'step/end' || item.type === 'turn/end'))
+    if (start < 0 || !sameStep(events[start]) || end < 0
+      || events[end].type !== 'step/end' || !sameStep(events[end])) return false
+    const stepEvents = events.slice(start + 1, end)
+    return stepEvents.filter(item => item.type === 'assistant/message').length === 1
+      && !stepEvents.some(item => item.type === 'assistant/attempt' || item.type === 'tool/call' || item.type === 'tool/result')
+  }
+
+  if (!completeMessage(last)) return undefined
+  const candidate = outputIndexes.findLast(index => index < last && !pureSilent(body(events[index])))
+  if (candidate === undefined || !completeMessage(candidate)) return undefined
+  // A later human instruction may retract the earlier answer. Do not walk past
+  // tool work, failed attempts, or an unverified silent step to resurrect it.
+  for (let i = candidate + 1; i < events.length; i++) {
+    const event = events[i]
+    if (event.type === 'assistant/attempt' || event.type === 'tool/call' || event.type === 'tool/result'
+      || (event.type === 'user/message' && event.data?.source?.kind === 'user')
+      || typeof event.surfaceOp === 'object') return undefined
+    if (event.type === 'assistant/message' && (!pureSilent(body(event)) || !completeMessage(i))) return undefined
+  }
+  return { text: messageText(events[candidate].data.message), seq: events[candidate].seq }
+}
+
+/**
  * Read all settled turns after `afterSeq`.
  *
  * Splitting by turn boundaries ensures multi-turn streams (e.g. Subagent
@@ -158,7 +220,7 @@ export function readAssistantReply({ events, afterSeq = -1 }) {
  * @param {readonly any[]} params.events  `agent.session.snapshotEvents()`.
  * @param {number} [params.afterSeq]      Ignore events at or below this seq.
  * @returns {Array<{ text: string, settledSeq: number, pendingTools: string[],
- *   turnError: (string | undefined), turnSettled: boolean }>}
+ *   turnError: (string | undefined), turnSettled: boolean, silentRecoveredFromSeq?: number }>}
  */
 export function readSettledTurns({ events, afterSeq = -1 }) {
   /** @type {Array<{ text: string, settledSeq: number, pendingTools: string[], turnError: (string | undefined), turnSettled: boolean }>} */
@@ -175,6 +237,7 @@ export function readSettledTurns({ events, afterSeq = -1 }) {
       turnError: undefined,
       inTurn,
       turnSettled: false,
+      events: [],
     }
   }
 
@@ -184,6 +247,7 @@ export function readSettledTurns({ events, afterSeq = -1 }) {
     if (event?.type === 'turn/start') {
       sawTurnBoundary = true
       current = initTurn(event.seq, true)
+      current.events.push(event)
       continue
     }
 
@@ -191,6 +255,7 @@ export function readSettledTurns({ events, afterSeq = -1 }) {
       if (!TURN_EVENT_TYPES.has(event?.type)) continue
       current = initTurn(event?.seq, false)
     }
+    current.events.push(event)
 
     if (typeof event?.seq === 'number' && event.seq > current.settledSeq) {
       current.settledSeq = event.seq
@@ -210,8 +275,11 @@ export function readSettledTurns({ events, afterSeq = -1 }) {
         if (typeof event.seq === 'number' && event.seq > current.settledSeq) {
           current.settledSeq = event.seq
         }
+        const recovered = reason?.kind === 'completed' && /^\[SILENT\]$/i.test(current.text.trim())
+          ? replyBeforeSilent(current.events) : undefined
         turns.push({
-          text: current.text,
+          text: recovered?.text ?? current.text,
+          ...(recovered ? { silentRecoveredFromSeq: recovered.seq } : {}),
           settledSeq: current.settledSeq,
           pendingTools: [...current.pending.values()],
           turnError: current.turnError,
