@@ -32,6 +32,7 @@ import {
   validateProfileName,
 } from './lib/install-args.mjs'
 import { pinProfileDependency, pinProfileSourceSpec } from './lib/profile-pin.mjs'
+import { translate } from '../src/i18n.js'
 
 const sourceRoot = path.resolve(import.meta.dirname, '..')
 
@@ -298,10 +299,11 @@ if (pin) {
 }
 
 process.stdout.write(
-  '\n完成。\n' +
-  '  dependency: ' + sourceLinkSpec(sourceRoot) + '\n' +
-  '  entry: ' + resolvedEntry + '\n' +
-  '  1. 重启 DSH\n' +
-  '  2. node ' + path.join(targetDir, 'bin', 'login.js') + '  # 扫码绑定微信\n' +
-  '\n设置存在 ' + settingsPath + '，重装不会丢。\n',
+  '\n安装好了。\n' +
+  '  1. 完整退出并重新打开 DSH。\n' +
+  '  2. 打开左侧栏的「大肥鱼」→「微信账号」→「扫码登录微信」。\n' +
+  '  3. 用手机微信给助手发一句话，确认能收到回复。\n' +
+  '  English: Fully quit and reopen DSH, then open WeChat → WeChat Account → Scan QR code to log in.\n' +
+  '\n' + translate('install.success.settings', { path: settingsPath }, 'zh') + '\n' +
+  '  English: ' + translate('install.success.settings', { path: settingsPath }, 'en') + '\n',
 )

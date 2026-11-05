@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "大肥鱼",
-    "description": "个人微信纯净消息网关（iLink Bot API）：零 Prompt 污染、Subagent 异步回合自动回推、支持 /compact。"
+    "description": "在微信里和你的 DSH 助理聊天：收发文字、图片、文件和语音，管理话题、提醒与账号。"
   },
   "help.compact": "  /compact — 立即压缩当前会话历史上下文"
 }

@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { parseSessionCommand, commandIds, runSessionCommand } from '../src/sessions.js'
+import { createTranslator } from '../src/i18n.js'
 
 function captureReminder(arg) {
   let plan
@@ -83,6 +84,32 @@ test('commandIds 覆盖会话管理命令', () => {
   for (const id of ['new', 'list', 'use', 'clear', 'cancel', 'compact']) {
     assert.ok(ids.includes(id), `commandIds 缺少 ${id}`)
   }
+})
+
+test('/clear explains that the WeChat topic list resets while DSH history remains', () => {
+  let cleared = false
+  const reply = runSessionCommand({
+    clear() { cleared = true },
+  }, 'conversation', '/clear', 'account', {})
+
+  assert.equal(cleared, true)
+  assert.match(reply, /^已从当前微信聊天的话题列表移除所有话题，并新开一个。/)
+  assert.match(reply, /DSH 里原来的会话历史仍会保留/)
+  assert.doesNotMatch(reply, /当前会话/)
+})
+
+test('/status names the effective contact list without internal allowlist jargon', () => {
+  const reply = runSessionCommand({
+    list: () => [{ sessionId: 'session-1', title: '整理周报' }],
+    active: () => 'session-1',
+  }, 'conversation', '/status', 'account', {
+    accountId: 'account',
+    allowlist: { source: 'account', senders: ['owner'] },
+  })
+
+  assert.match(reply, /可对话联系人：1 人（本账号专属名单）/)
+  assert.match(reply, /1 个话题/)
+  assert.doesNotMatch(reply, /发信人白名单|会话线/)
 })
 
 test('/remind 优先采用最长可解析时间，星期和钟点不会被吞进正文', () => {
@@ -198,4 +225,62 @@ test('/subscribe 缺少主题或时间无效时不会创建订阅', () => {
     assert.equal(invalid.plan, undefined)
     assert.match(invalid.reply, /^没有安排：/)
   }
+})
+
+test('reminder mutation replies do not confuse missing rows with failed persistence', () => {
+  const now = Date.now()
+  const cases = [
+    ['/remind skip', { skipNext: () => undefined }],
+    ['/snooze 10m', { snooze: () => undefined }],
+    ['/remindcancel r1', { cancel: () => false }],
+    ['/remindlist 2 1h', {
+      list: () => [
+        { id: 'r1', fireAt: now + 60_000 },
+        { id: 'r2', fireAt: now + 120_000 },
+      ],
+      snoozeById: () => undefined,
+    }],
+  ]
+
+  for (const [text, reminders] of cases) {
+    const reply = runSessionCommand(undefined, 'conversation', text, 'account', { reminders })
+    assert.match(reply, /可能没有找到合适的提醒，也可能刚才的改动没能保存/, text)
+    assert.match(reply, /\/remindlist/, text)
+    assert.doesNotMatch(reply, /没有找到编号|没有待发的提醒/, text)
+  }
+
+  const english = runSessionCommand(undefined, 'conversation', '/remindcancel r1', 'account', {
+    reminders: { cancel: () => false },
+    t: createTranslator('en').t,
+  })
+  assert.match(english, /^Could not cancel reminder r1/)
+  assert.match(english, /may no longer exist/)
+  assert.match(english, /\/remindlist/)
+})
+
+test('unavailable service copy makes no unsupported recovery promises', () => {
+  const reminder = runSessionCommand(undefined, 'conversation', '/remind 10m test', 'account', {})
+  assert.match(reminder, /提醒服务现在没有准备好/)
+  assert.doesNotMatch(reminder, /调度器|写盘/)
+
+  const cancel = runSessionCommand(undefined, 'conversation', '/cancel', 'account', {})
+  assert.match(cancel, /当前 DSH 环境没有提供停止功能/)
+  assert.doesNotMatch(cancel, /重启/)
+  assert.doesNotMatch(cancel, /排队.*继续/)
+
+  const compact = runSessionCommand(undefined, 'conversation', '/compact', 'account', {})
+  assert.match(compact, /支持“压缩会话”的 DSH 版本/)
+  assert.doesNotMatch(compact, /重启/)
+
+  const english = runSessionCommand(undefined, 'conversation', '/remind 10m test', 'account', {
+    t: createTranslator('en').t,
+  })
+  assert.match(english, /^The reminder service is not ready/)
+
+  const cancelEnglish = runSessionCommand(undefined, 'conversation', '/cancel', 'account', {
+    t: createTranslator('en').t,
+  })
+  assert.match(cancelEnglish, /DSH environment does not provide cancellation/)
+  assert.doesNotMatch(cancelEnglish, /restart/i)
+  assert.doesNotMatch(cancelEnglish, /queued messages will still be processed/i)
 })

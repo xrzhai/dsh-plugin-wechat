@@ -506,9 +506,9 @@ export class SessionLines {
       return `${marker} ${index}. ${title}`
     })
     const hidden = numbered.length - shown.length
-    const header = `共 ${all.length} 条会话，当前使用第 ${numbered.find(({ line }) => line.sessionId === activeId)?.index ?? 1} 条：`
+    const header = `共 ${all.length} 个话题，当前使用第 ${numbered.find(({ line }) => line.sessionId === activeId)?.index ?? 1} 个：`
     const footer = hidden > 0 ? `\n（只显示最近 ${LIST_LIMIT} 条，更早的 ${hidden} 条仍在，可用 /use <序号> 切换）` : ''
-    const usage = '\n\n/new 开新会话 ｜ /use <序号> 切换'
+    const usage = '\n\n/new 新建话题 ｜ /use <序号> 切换'
     return `${header}\n${rows.join('\n')}${footer}${usage}`
   }
 
@@ -777,10 +777,10 @@ function runStatus({ lines, conversationId, accountId, context }) {
     if (context.lastSeenAt) parts.push(`最近收发：${context.lastSeenAt}`)
     if (context.allowlist) {
       const source = context.allowlist.source === 'account' ? '本账号专属名单' : '全局名单'
-      parts.push(`发信人白名单：${context.allowlist.senders.length} 人（${source}）`)
+      parts.push(`可对话联系人：${context.allowlist.senders.length} 人（${source}）`)
     }
   }
-  parts.push(`本微信会话共 ${statusLines.length} 条会话线，当前使用第 ${statusLines.findIndex((candidate) => candidate.sessionId === active) + 1 || '?'} 条：${activeLine?.title ?? '(尚无对话)'}`)
+  parts.push(`当前微信聊天共 ${statusLines.length} 个话题，正在使用第 ${statusLines.findIndex((candidate) => candidate.sessionId === active) + 1 || '?'} 个：${activeLine?.title ?? '(尚无对话)'}`)
   return parts.join('\n')
 }
 
@@ -800,6 +800,7 @@ function runStatus({ lines, conversationId, accountId, context }) {
  *   reminders?: import('./message/scheduler.js').ReminderScheduler,
  *   subscription?: import('./message/subscriptions.js').SubscriptionScheduler,
  *   cancelRunningTurn?: () => string,
+ *   t?: (key: string, params?: Record<string, unknown>) => string,
  *   persona?: Record<string, (arg?: string) => string | Promise<string>> }} [context]
  *   account-level facts for `/status`, assembled by the inbound handler;
  *   optional so the command works for bare callers too. `reminders` is the
@@ -814,6 +815,9 @@ function runStatus({ lines, conversationId, accountId, context }) {
 export function runSessionCommand(lines, conversationId, text, accountId, context) {
   const command = parseSessionCommand(text)
   if (command === undefined) return undefined
+  const t = typeof context?.t === 'function'
+    ? context.t
+    : (key, params) => translate(key, params)
 
   const rule = COMMANDS.find((candidate) => candidate.id === command.command)
   if (rule?.run !== undefined) return rule.run({ lines, conversationId, accountId, command, context })
@@ -826,7 +830,7 @@ export function runSessionCommand(lines, conversationId, text, accountId, contex
     // A bare `/new` is named by its first real message. An optional argument
     // names it immediately through the same title path, so later messages do
     // not overwrite it.
-    return `已开启第 ${ordinal} 条会话，接下来的消息进入这里。\n（之前那条仍然保留，/list 可以切回去）`
+    return `已开启第 ${ordinal} 个话题，接下来的消息进入这里。\n（之前的话题仍然保留，/list 可以切回去）`
   }
   if (command.command === 'list') {
     return lines.render(conversationId, accountId)
@@ -837,19 +841,19 @@ export function runSessionCommand(lines, conversationId, text, accountId, contex
     // a rarer need than "start over" — misfiring it destroys context, so the
     // safer surface is the one that cannot be aimed at the wrong line.
     lines.clear(conversationId, accountId)
-    return `已清空当前会话，接下来是一条全新的会话。\n之前的上下文不再使用，也没有别的影响。`
+    return `已从当前微信聊天的话题列表移除所有话题，并新开一个。\nDSH 里原来的会话历史仍会保留，不会因为这一步被删除。`
   }
   if (command.command === 'cancel') {
     // The bridge owns the live agent handles; a bare caller (tests, tooling)
     // has no turn to interrupt and says so instead of pretending.
     const cancel = context?.cancelRunningTurn
-    if (cancel === undefined) return '当前入口无法停止正在运行的任务。'
+    if (cancel === undefined) return t('error.cancelUnavailable')
     return cancel()
   }
   if (command.command === 'compact') {
     return typeof context?.compactSession === 'function'
       ? context.compactSession(command.arg)
-      : '当前宿主不支持手动压缩上下文。'
+      : t('error.compactUnavailable')
   }
   if (command.command === 'unknown_slash') {
     if (typeof context?.executeHostCommand === 'function') {
@@ -864,19 +868,23 @@ export function runSessionCommand(lines, conversationId, text, accountId, contex
     // stored something. The handler may be async (/summary) — return the
     // promise as-is; the inbound handler awaits command replies.
     const handler = context?.persona?.[command.command]
-    if (typeof handler !== 'function') return '该指令在当前入口不可用。'
+    if (typeof handler !== 'function') return t('error.featureUnavailable')
     return handler(command.arg)
   }
   if (command.command === 'remind') {
     // Scheduling needs the live scheduler; a caller without one (bare tests,
     // tooling) gets an honest refusal rather than a silently dropped remind.
     const scheduler = context?.reminders
-    if (scheduler === undefined) return '当前无法安排提醒（调度器不可用）。'
+    if (scheduler === undefined) {
+      return t('error.reminderServiceUnavailable', { action: '安排提醒', actionEn: 'schedule a reminder' })
+    }
     const raw = String(command.arg ?? '').trim()
     const accountIdForRemind = context?.accountId ?? accountId ?? ''
     if (/^(?:skip|跳过)$/i.test(raw)) {
       const skipped = scheduler.skipNext(accountIdForRemind)
-      if (skipped === undefined) return '没有可跳过的重复提醒（/remindlist 看有哪些；一次性提醒用 /remindcancel 取消）。'
+      if (skipped === undefined) {
+        return t('error.reminderChangeUnclear', { action: '跳过下一次重复提醒', actionEn: 'skip the next repeating reminder' })
+      }
       const next = new Date(skipped.fireAt).toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
       return `已跳过下一次：${skipped.text}（${skipped.recurrenceLabel ?? '重复'}，下次 ${next}）`
     }
@@ -934,20 +942,26 @@ export function runSessionCommand(lines, conversationId, text, accountId, contex
   }
   if (command.command === 'snooze') {
     const scheduler = context?.reminders
-    if (scheduler === undefined) return '当前无法推后提醒（调度器不可用）。'
+    if (scheduler === undefined) {
+      return t('error.reminderServiceUnavailable', { action: '把提醒往后推', actionEn: 'snooze a reminder' })
+    }
     const raw = String(command.arg ?? '').trim()
     if (raw === '') return '用法：/snooze 10m —— 把最近的一条提醒往后推；/remind skip 跳过重复提醒的下一次。'
     const parsed = parseWhen(raw)
     if (parsed.ok !== true) return `没听懂「${raw}」。用法：/snooze 10m、/snooze 1h。`
     const minutes = Math.max(1, Math.round((parsed.fireAt - Date.now()) / 60_000))
     const item = scheduler.snooze(context?.accountId ?? accountId ?? '', minutes)
-    if (item === undefined) return '没有待发的提醒可以推后。'
+    if (item === undefined) {
+      return t('error.reminderChangeUnclear', { action: '把提醒往后推', actionEn: 'snooze the reminder' })
+    }
     const at = new Date(item.fireAt).toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
     return `已推后 ${minutes} 分钟：${item.text}（${at}）`
   }
   if (command.command === 'remindlist') {
     const scheduler = context?.reminders
-    if (scheduler === undefined) return '当前无法查看提醒（调度器不可用）。'
+    if (scheduler === undefined) {
+      return t('error.reminderServiceUnavailable', { action: '查看提醒', actionEn: 'list reminders' })
+    }
     const items = scheduler.list(context?.accountId ?? accountId ?? '')
 
     // ⑤ `/remindlist 2 1h`：第 2 条往后推一小时。编号和 /remindlist 打印的顺序一致
@@ -960,7 +974,12 @@ export function runSessionCommand(lines, conversationId, text, accountId, contex
       if (span.ok !== true) return `没听懂「${shift[2]}」。用法：/remindlist 2 1h（第 2 条往后推一小时）。`
       const minutes = Math.max(1, Math.round((span.fireAt - Date.now()) / 60_000))
       const moved = scheduler.snoozeById(items[position - 1].id, minutes)
-      if (moved === undefined) return `没有找到第 ${position} 条提醒。`
+      if (moved === undefined) {
+        return t('error.reminderChangeUnclear', {
+          action: `把第 ${position} 条提醒往后推`,
+          actionEn: `move reminder ${position}`,
+        })
+      }
       const at = new Date(moved.fireAt).toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
       return `已把第 ${position} 条推后 ${minutes} 分钟：${moved.text}（${at}）`
     }
@@ -975,13 +994,18 @@ export function runSessionCommand(lines, conversationId, text, accountId, contex
   }
   if (command.command === 'remindcancel') {
     const scheduler = context?.reminders
-    if (scheduler === undefined) return '当前无法取消提醒（调度器不可用）。'
+    if (scheduler === undefined) {
+      return t('error.reminderServiceUnavailable', { action: '取消提醒', actionEn: 'cancel a reminder' })
+    }
     const removed = scheduler.cancel(command.id)
-    return removed === true ? `已取消提醒 ${command.id}。` : `没有找到编号 ${command.id} 的提醒（/remindlist 可以看现有的）。`
+    if (removed === true) return `已取消提醒 ${command.id}。`
+    return t('error.reminderChangeUnclear', { action: `取消提醒 ${command.id}`, actionEn: `cancel reminder ${command.id}` })
   }
   if (command.command === 'subscribe') {
     const scheduler = context?.subscription
-    if (scheduler === undefined) return '当前无法安排定时消息（调度器不可用）。'
+    if (scheduler === undefined) {
+      return t('error.timedMessageServiceUnavailable', { action: '安排定时消息', actionEn: 'schedule a timed message' })
+    }
     const usage = '用法：/subscribe <时间> <主题>，例如 /subscribe 每天 08:00 早安，问问我睡得怎么样\n时间支持 每天 HH:mm、每周日 HH:mm、裸 HH:mm（等于每天），以及一次性时间（10m、2026-11-01 09:00）'
     const raw = String(command.arg ?? '').trim()
     if (raw === '') return usage
@@ -1018,14 +1042,18 @@ export function runSessionCommand(lines, conversationId, text, accountId, contex
   }
   if (command.command === 'subscribelist') {
     const scheduler = context?.subscription
-    if (scheduler === undefined) return '当前无法查看定时消息（调度器不可用）。'
+    if (scheduler === undefined) {
+      return t('error.timedMessageServiceUnavailable', { action: '查看定时消息', actionEn: 'list timed messages' })
+    }
     const items = scheduler.list(context?.accountId ?? accountId ?? '')
     if (items.length === 0) return '这个账号现在没有定时主动消息。用 /subscribe 安排一个。'
     return ['定时主动消息：', ...items.map((item) => `${item.id} · ${describeSubscription(item)} · ${item.prompt}`)].join('\n')
   }
   if (command.command === 'subscribecancel') {
     const scheduler = context?.subscription
-    if (scheduler === undefined) return '当前无法取消定时消息（调度器不可用）。'
+    if (scheduler === undefined) {
+      return t('error.timedMessageServiceUnavailable', { action: '取消定时消息', actionEn: 'cancel a timed message' })
+    }
     const removed = scheduler.cancel(command.id)
     return removed === true ? `已取消定时消息 ${command.id}。` : `没有找到编号 ${command.id} 的定时消息（/subscribelist 可以看现有的）。`
   }
@@ -1034,9 +1062,9 @@ export function runSessionCommand(lines, conversationId, text, accountId, contex
   }
   const sessionId = lines.use(conversationId, command.index, accountId)
   if (sessionId === undefined) {
-    return `没有第 ${command.index} 条会话。\n\n${lines.render(conversationId, accountId)}`
+    return `没有第 ${command.index} 个话题。\n\n${lines.render(conversationId, accountId)}`
   }
   const line = lines.list(conversationId, accountId).find((candidate) => candidate.sessionId === sessionId)
   const title = line?.title ?? '(尚无对话)'
-  return `已切换到第 ${command.index} 条会话：${title}\n接下来的消息进入这里，这条会话之前的上下文还在。`
+  return `已切换到第 ${command.index} 个话题：${title}\n接下来的消息进入这里，这个 DSH 会话之前的上下文还在。`
 }

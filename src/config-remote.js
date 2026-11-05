@@ -40,51 +40,51 @@ const T = {
  */
 export const FIELDS = [
   {
-    group: "平行会话调度", groupEn: "Parallel Session Dispatcher",
+    group: "远程查看与管理 DSH 会话", groupEn: "View and manage DSH sessions",
     fields: [
       { path: "sessionDispatcherEnabled", type: T.boolean, default: false,
-        label: "启用平行会话调度", labelEn: "Enable session dispatcher",
-        hint: "默认关闭。开启后，下方单独授权的微信发送者可读取下方授权的项目会话并派发任务；不用于隔离不可信用户。保存后，下一条微信消息起生效。",
-        hintEn: "Off by default. Explicitly listed senders can read authorized host sessions and send tasks. Changes take effect on your next WeChat message." },
+        label: CATALOG['config.sessionDispatcherEnabled.label'].zh, labelEn: CATALOG['config.sessionDispatcherEnabled.label'].en,
+        hint: CATALOG['config.sessionDispatcherEnabled.hint'].zh,
+        hintEn: CATALOG['config.sessionDispatcherEnabled.hint'].en },
       { path: "sessionDispatcherSenders", type: T.stringList, default: [], emptyMeansAll: false,
-        label: "调度者发送者 ID", labelEn: "Dispatcher sender IDs",
-        hint: "每行一个，须同时在网关发送者白名单中。空列表拒绝所有调度读取和写入。",
-        hintEn: "One sender ID per line; must also be gateway-allowed. Empty denies all dispatcher access." },
+        label: "可以管理其他会话的人", labelEn: "People who may manage other sessions",
+        hint: "每行一个微信用户 ID。此人还必须能通过微信正常和助理对话（账号可能沿用全局名单，也可能使用自己的名单）；同时，跨会话管理仍要求此人出现在下面「允许与助手对话的人」全局名单中。这里留空时，任何人都不能查看或操作其他会话。",
+        hintEn: "One WeChat user ID per line. The person must also be allowed to chat with the assistant through WeChat, using either the account's own list or the global list it inherits. Cross-session management additionally requires the person to be in the global “People who may chat with the assistant” list below. If this list is empty, nobody can view or manage other sessions." },
       { path: "sessionDispatcherTargets", type: T.stringList, default: [], emptyMeansAll: false,
-        label: "允许访问的目标会话 ID", labelEn: "Allowed target session IDs",
-        hint: "每行一个精确会话 ID。空列表拒绝所有目标，无通配符。上方授权的调度者共享此名单；请只授予同一信任范围的用户。",
-        hintEn: "Exact session IDs, one per line. Empty denies all, no wildcard. All authorized dispatcher senders share this target list." },
+        label: "可被操作的 DSH 会话", labelEn: "DSH sessions that may be managed",
+        hint: "每行填写一个完整的会话 ID，不支持通配符。这里留空时不能操作任何会话；上面列出的所有人共用这份名单，请只加入信任同一批人的会话。",
+        hintEn: "One exact session ID per line; wildcards are not supported. An empty list allows no sessions. Everyone listed above shares this list, so include only sessions you trust those people to access." },
       { path: "protectedSessions", type: T.stringList, default: [],
-        label: "只读会话 ID", labelEn: "Protected session IDs",
-        hint: "每行一个；仍允许读取，但拒绝 followup、steer 和 cancel。",
-        hintEn: "Readable, but followup, steer and cancel are refused." },
+        label: "跨会话管理中只能查看的 DSH 会话", labelEn: "View-only sessions in cross-session management",
+        hint: "每行一个会话 ID。它只限制跨会话管理工具：允许查看，但不能借这项功能发送新任务、补充指令或请求停止。普通微信对话不会因为这里而变成只读。",
+        hintEn: "One session ID per line. This only limits the cross-session management tools: the session can be viewed, but those tools cannot add tasks, inject instructions or request cancellation. Ordinary WeChat chat does not become read-only because of this setting." },
       { path: "readOnlyPaths", type: T.stringList, default: [],
-        label: "只读工作区根目录", labelEn: "Read-only workspace roots",
-        hint: "每行一个绝对路径；包括子目录与符号链接别名。仅约束调度工具，不是文件系统沙箱。",
-        hintEn: "Absolute roots, including descendants and symlink aliases. Dispatcher policy, not a filesystem sandbox." },
+        label: "不要通过跨会话管理操作的工作区", labelEn: "Workspaces excluded from cross-session management",
+        hint: "每行一个绝对路径，子目录和链接到它的路径也一并排除。它只限制“跨会话管理”功能向这些目录中的会话安排或控制任务，不影响普通微信对话，也不是文件权限或系统沙箱。",
+        hintEn: "One absolute path per line; descendants and linked paths are excluded too. This only prevents the cross-session management feature from scheduling or controlling tasks in sessions under these folders. It does not affect ordinary WeChat chat and is not a filesystem sandbox." },
     ],
   },
   {
-    group: "基本与模型路由",
-    groupEn: "Basics & Model Routing",
+    group: "基本设置",
+    groupEn: "Basics",
     fields: [
       {
         path: "enabled",
         type: T.boolean,
         default: true,
-        label: "启用微信网关",
+        label: "启用微信连接",
         labelEn: "Enabled",
-        hint: "关闭后暂停接收新的微信消息；正在处理中的任务仍会完成并回复。",
+        hint: "关闭后不再接收新的微信消息；已经开始的回复仍会完成。",
         hintEn: "Turning this off pauses new WeChat messages; tasks already in progress can still finish and reply.",
       },
       {
         path: "cwd",
         type: T.string,
         default: "",
-        label: "默认工作目录 (cwd)",
+        label: "助理默认在哪个文件夹工作",
         labelEn: "Working directory",
-        hint: "微信会话默认工作的目录（如 D:\\Workspace），自动加载该目录下的 AGENTS.md。",
-        hintEn: "Directory the agent operates in.",
+        hint: "微信对话默认在这里读写文件（例如 D:\\Workspace），并会读取该目录下的 AGENTS.md。",
+        hintEn: "The agent reads and changes files here (for example, D:\\Workspace) and loads AGENTS.md from this folder.",
       },
       {
         path: "workspaceTitle",
@@ -99,56 +99,56 @@ export const FIELDS = [
         path: "chatProvider",
         type: T.string,
         default: "",
-        label: "主对话 Provider",
-        labelEn: "Chat provider",
-        hint: "主对话使用的 Provider（如 magpie）；留空沿用 DSH 默认模型。",
-        hintEn: "Provider for the primary conversation.",
+        label: "主对话使用的服务",
+        labelEn: "Chat service",
+        hint: "日常聊天使用哪个模型服务（例如 magpie）；留空就沿用 DSH 当前的默认设置。",
+        hintEn: "The model service for everyday chat (for example, magpie). Leave empty to use the current DSH default.",
       },
       {
         path: "chatModel",
         type: T.string,
         default: "",
-        label: "主对话 Model",
+        label: "主对话使用的模型",
         labelEn: "Chat model",
-        hint: "主对话的模型 ID（如 auto/gemini-3.8-flash）。",
-        hintEn: "Model ID for the primary conversation.",
+        hint: "日常聊天使用哪个模型（例如 auto/gemini-3.8-flash）。",
+        hintEn: "The model for everyday chat (for example, auto/gemini-3.8-flash).",
       },
       {
         path: "sideProvider",
         type: T.string,
         default: "",
-        label: "后台任务 Provider",
-        labelEn: "Background task provider",
-        hint: "后台任务使用的 Provider（如定时主动消息、群聊摘要）。留空后仍会检查旧版用途路由；若仍无可用后台路由，则使用 DSH 默认模型。",
-        hintEn: "Provider for background tasks such as scheduled messages and group summaries. Empty still allows legacy purpose routes to be checked; if no background route remains, the DSH default model is used.",
+        label: "后台任务使用的服务",
+        labelEn: "Background task service",
+        hint: "定时消息、群聊摘要等后台任务使用哪个模型服务。留空时会继续沿用现有的后台模型选择规则，包括旧版按用途指定的服务；如果仍没有匹配，就使用 DSH 默认模型。",
+        hintEn: "The model service for scheduled messages, group summaries and other background work. Empty keeps the existing background model-selection rules, including legacy per-purpose services, then falls back to the DSH default model if none match.",
       },
       {
         path: "sideModel",
         type: T.string,
         default: "",
-        label: "后台任务 Model",
+        label: "后台任务使用的模型",
         labelEn: "Background task model",
-        hint: "后台任务的模型 ID；需要与上方 Provider 同时填写。",
-        hintEn: "Model ID for background tasks; fill this together with the provider above.",
+        hint: "后台任务使用哪个模型；需要和服务一栏一起填写。",
+        hintEn: "The model for background work; fill this together with the service above.",
       },
     ],
   },
   {
-    group: "消息与传输",
-    groupEn: "Messages & Delivery",
+    group: "消息与回复",
+    groupEn: "Messages & replies",
     fields: [
       {
         path: "busyMessageMode",
         type: T.enum,
         default: "steer",
         options: [
-          { value: "steer", label: "直接补充给当前任务 (steer)", labelEn: "Add to the current task (steer)" },
-          { value: "queue", label: "排队，等当前任务完成后处理 (queue)", labelEn: "Queue until the current task finishes (queue)" },
+          { value: "steer", label: "直接把新消息补进当前任务", labelEn: "Add the new message to the current task" },
+          { value: "queue", label: "等当前任务结束后再处理", labelEn: "Wait until the current task finishes" },
         ],
-        label: "忙碌时新消息处理",
-        labelEn: "When busy",
-        hint: "当前回合尚未结束时收到新微信消息的处理方式。",
-        hintEn: "What happens to a message arriving mid-reply.",
+        label: "助理忙时收到新消息",
+        labelEn: "When the assistant is busy",
+        hint: "「直接补充」不会停止当前任务，只会把新消息送进去，当前结果可能因此改变；「等结束后处理」会等这次回复完成，再处理新消息。想停止当前任务请另发 /cancel。",
+        hintEn: "“Add” does not stop the current task; it inserts the new message and may change the result already in progress. “Wait” handles the message after this reply finishes. To stop the running task, send /cancel separately.",
       },
       {
         path: "markdownMode",
@@ -172,10 +172,10 @@ export const FIELDS = [
         step: 100,
         unit: "字符",
         unitEn: "characters",
-        label: "单条消息分段上限",
+        label: "长回复每条最多多少字",
         labelEn: "Max message length",
-        hint: "超过该长度的长回复会自动分段发送。",
-        hintEn: "Longer replies are split into chunks.",
+        hint: "一条回复太长时会按这个长度拆成多条消息。",
+        hintEn: "Long replies are split into multiple messages at this length.",
       },
       {
         path: "typingIndicator",
@@ -183,42 +183,42 @@ export const FIELDS = [
         default: true,
         label: "显示「正在输入」状态",
         labelEn: "Typing indicator",
-        hint: "处理消息期间在微信顶部显示对方正在输入。",
+        hint: "处理消息期间，在微信顶部显示“正在输入”。",
         hintEn: "Show typing indicator in WeChat while running.",
       },
       {
         path: "autoSendFiles",
         type: T.boolean,
         default: false,
-        label: "自动推送新生成交付物文件",
-        labelEn: "Auto-send produced deliverable files",
-        hint: "默认关闭；开启后也仅限白名单交付物（.pdf/.docx/.xlsx/.png 等），绝不发送 .json/.log。",
-        hintEn: "Off by default; only whitelisted deliverables are ever sent.",
+        label: "自动发送新生成的文件",
+        labelEn: "Automatically send new files",
+        hint: "默认关闭。开启后，只检查工作目录第一层本轮新生成或刚更新的支持文件（如 PDF、Office 文档、图片、CSV、ZIP），最多发送 5 个，不会递归扫描子目录。",
+        hintEn: "Off by default. When enabled, only supported files created or updated during the current turn in the top level of the workspace are sent, up to five. Subdirectories are not scanned.",
       },
     ],
   },
   {
-    group: "权限",
-    groupEn: "Access",
+    group: "谁可以使用",
+    groupEn: "Who may use the assistant",
     fields: [
       {
         path: "allowedSenders",
         type: T.stringList,
         default: [],
-        label: "允许的发送者 ID 白名单",
-        labelEn: "Allowed senders",
-        hint: "每行一个微信用户 ID，仅白名单内的用户可驱动 Agent。",
-        hintEn: "One WeChat user id per line.",
+        label: "允许与助手对话的人",
+        labelEn: "People who may chat with the assistant",
+        hint: "这是全局默认名单，账号级名单可以覆盖它。名单里的人可以让助理读取或修改文件、执行命令；只加入你信任的人。留空时，没有单独名单的账号会从空白开始，新绑定账号会登记实际收到的首位联系人并请你核对；首位联系人不一定是扫码人。",
+        hintEn: "This is the global default; account-level lists can override it. People in this list can ask the assistant to read or change files and run commands. Only add people you trust. If it is empty, an account without its own list starts empty; a newly bound account enrols the first contact it actually receives and asks you to review it. That first contact is not necessarily the person who scanned the code.",
         emptyMeansAll: false,
       },
       {
         path: "allowedChats",
         type: T.stringList,
         default: [],
-        label: "允许的会话 ID",
-        labelEn: "Allowed conversations",
-        hint: "可选；留空表示允许上述白名单发送者的任何私聊会话。",
-        hintEn: "Optional conversation allowlist.",
+        label: "只允许哪些微信会话",
+        labelEn: "Allowed WeChat conversations",
+        hint: "可选。留空表示允许的人可以在任意私聊中使用；群聊不会仅凭这一项开启回复。填写后，只允许每行列出的会话 ID。",
+        hintEn: "Optional. Empty allows approved people in any private chat; group chats are not enabled by this setting alone. Otherwise, list the allowed conversation IDs, one per line.",
         emptyMeansAll: true,
       },
     ],
@@ -272,20 +272,20 @@ function coerce(field, raw, t) {
     const text = String(raw ?? '').trim().toLowerCase()
     if (text === 'true' || text === '1' || text === 'on') return true
     if (text === 'false' || text === '0' || text === 'off' || text === '') return false
-    throw new RemoteError('bad_value', `${t(field.label, field.labelEn)}：需要一个开关值`, {})
+    throw new RemoteError('bad_value', `${t(field.label, field.labelEn)}：${t('请选择“开”或“关”', 'Choose on or off')}`, {})
   }
   if (field.type === T.number) {
     const text = String(raw ?? '').trim()
     if (!text) return undefined // empty means "use the default"
     const value = Number(text)
     if (!Number.isFinite(value)) {
-      throw new RemoteError('bad_value', `${t(field.label, field.labelEn)}：需要一个数字，收到「${text}」`, {})
+      throw new RemoteError('bad_value', `${t(field.label, field.labelEn)}：${t(`请填写数字；收到的是「${text}」`, `Enter a number; received “${text}”`)}`, {})
     }
     if (field.min !== undefined && value < field.min) {
-      throw new RemoteError('bad_value', `${t(field.label, field.labelEn)}：不能小于 ${field.min}`, {})
+      throw new RemoteError('bad_value', `${t(field.label, field.labelEn)}：${t(`请填写不小于 ${field.min} 的数`, `Enter a value of at least ${field.min}`)}`, {})
     }
     if (field.max !== undefined && value > field.max) {
-      throw new RemoteError('bad_value', `${t(field.label, field.labelEn)}：不能大于 ${field.max}`, {})
+      throw new RemoteError('bad_value', `${t(field.label, field.labelEn)}：${t(`请填写不大于 ${field.max} 的数`, `Enter a value no greater than ${field.max}`)}`, {})
     }
     return value
   }
@@ -296,7 +296,7 @@ function coerce(field, raw, t) {
   if (field.type === T.enum) {
     const text = String(raw ?? '').trim()
     if (!field.options.some((option) => option.value === text)) {
-      throw new RemoteError('bad_value', `${t(field.label, field.labelEn)}：不是可选的取值`, {})
+      throw new RemoteError('bad_value', `${t(field.label, field.labelEn)}：${t('请从可选项目中选择', 'Choose one of the available options')}`, {})
     }
     return text
   }
@@ -321,7 +321,7 @@ function coerce(field, raw, t) {
       if (!text || text.startsWith('#')) continue
       const eq = text.indexOf('=')
       if (eq <= 0) {
-        throw new RemoteError('bad_value', `${t(field.label, field.labelEn)}：每行需要是 KEY=VALUE，收到「${text}」`, {})
+        throw new RemoteError('bad_value', `${t(field.label, field.labelEn)}：${t(`每行请按“名称=值”的格式填写；收到「${text}」`, `Use one “name=value” entry per line; received “${text}”`)}`, {})
       }
       result[text.slice(0, eq).trim()] = text.slice(eq + 1)
     }

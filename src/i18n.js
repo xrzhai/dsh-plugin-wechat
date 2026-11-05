@@ -29,21 +29,39 @@ export const CATALOG = Object.freeze({
     'error.processing': { zh: '（处理失败：{reason}）', en: '(Processing failed: {reason})' },
     'error.accountPauseWrite': { zh: '无法保存账号暂停状态；连接状态未改变', en: 'Could not save the account pause state; the connection was left unchanged' },
     'error.accountResumeWrite': { zh: '无法保存账号恢复状态；连接状态未改变', en: 'Could not save the account resume state; the connection was left unchanged' },
-    'error.reminderInvalidTime': { zh: '提醒时间无效', en: 'Invalid reminder time' },
-    'error.reminderStorageReadOnly': { zh: '提醒存储当前只读：{reason}', en: 'Reminder storage is read-only: {reason}' },
-    'error.reminderSequenceExhausted': { zh: '提醒编号已耗尽，无法继续安排', en: 'Reminder IDs are exhausted; no more reminders can be scheduled' },
-    'error.reminderWriteFailed': { zh: '提醒写盘失败，未安排；原提醒文件保持不变', en: 'The reminder could not be saved, so it was not scheduled; the existing reminder file was left unchanged' },
+    'error.reminderInvalidTime': { zh: '这个提醒时间不可用', en: 'That reminder time is not valid' },
+    'error.reminderStorageReadOnly': {
+        zh: '提醒暂时不能保存，为保护原有提醒，本次没有新增；可重启 DSH 后再试，若仍失败，请在日志中搜索“reminders.json”查看具体原因。',
+        en: 'The reminder could not be saved, so it was not scheduled and existing reminders were left unchanged. Restart DSH and try again; if it persists, search the logs for “reminders.json” for details.',
+    },
+    'error.reminderSequenceExhausted': { zh: '提醒编号已经用完，当前版本无法再新建提醒；已有提醒不受影响。', en: 'Reminder IDs are exhausted, so this version cannot create another reminder. Existing reminders are unaffected.' },
+    'error.reminderWriteFailed': { zh: '提醒没有保存成功，本次没有新增；原有提醒保持不变。请重启 DSH 后再试。', en: 'The reminder could not be saved, so it was not scheduled and existing reminders were left unchanged. Restart DSH and try again.' },
+    'error.cancelUnavailable': { zh: '这次没能停止当前回复：当前 DSH 环境没有提供停止功能。请确认 DSH 与插件版本是否匹配。', en: 'The current reply could not be stopped because this DSH environment does not provide cancellation. Check that the DSH and plugin versions are compatible.' },
+    'error.compactUnavailable': { zh: '当前 DSH 环境不能压缩这段会话；请使用支持“压缩会话”的 DSH 版本后再试。', en: 'This DSH environment cannot compact the conversation. Try a DSH version that supports conversation compaction.' },
+    'error.featureUnavailable': { zh: '这个功能现在用不了；请确认 DSH 和插件都已完整加载，再试一次。', en: 'This feature is unavailable right now. Check that DSH and the plugin are fully loaded, then try again.' },
+    'error.reminderServiceUnavailable': {
+        zh: '提醒服务现在没有准备好，暂时没法{action}。可以重启 DSH 后再试；如果仍不行，请检查插件是否完整加载。',
+        en: 'The reminder service is not ready, so I cannot {actionEn}. Try restarting DSH; if it still fails, check that the plugin loaded completely.',
+    },
+    'error.timedMessageServiceUnavailable': {
+        zh: '定时消息服务现在没有准备好，暂时没法{action}。可以重启 DSH 后再试；如果仍不行，请检查插件是否完整加载。',
+        en: 'The scheduled-message service is not ready, so I cannot {actionEn}. Try restarting DSH; if it still fails, check that the plugin loaded completely.',
+    },
+    'error.reminderChangeUnclear': {
+        zh: '这次没能{action}：可能没有找到合适的提醒，也可能刚才的改动没能保存。请用 /remindlist 核对；如果提醒还在，请重启 DSH 后再试。',
+        en: 'Could not {actionEn}: the reminder may no longer exist, or the change may not have been saved. Check /remindlist; if the reminder is still there, restart DSH and try again.',
+    },
     'notice.longRunning': { zh: '（这条消息处理时间较长，先回复别的消息不影响它；结果出来后会直接发到这里）', en: '(This task is taking longer. You can send other messages; its result will arrive here when ready.)' },
     'onboarding.loginPanel': { zh: '打开 DSH → 左侧边栏「大肥鱼」→「微信账号」→「扫码登录微信」', en: 'Open DSH → WeChat in the sidebar → WeChat Account → Scan QR code to log in' },
     // --- command help -------------------------------------------------------
-    'help.header': { zh: '会话指令（发 /help 或 /帮助 可再看一遍）：', en: 'Session commands (send /help to see this again):' },
-    'help.new': { zh: '/new [标题] 开一条新会话（当前这条会保留，之后可以切回来）', en: '/new [title] start a new session (this one is kept, you can switch back)' },
-    'help.list': { zh: '/list 查看这个微信会话下的所有会话', en: '/list list every session under this WeChat conversation' },
-    'help.use': { zh: '/use <序号> 切换到第几条', en: '/use <n> switch to session number n' },
-    'help.clear': { zh: '/clear 清空当前会话并重新开始（当前这条从列表里移除，不再占地方）', en: '/clear clear this session and start over (it is removed from the list)' },
-    'help.cancel': { zh: '/cancel 取消正在跑的那个回合（长任务卡住时用；已经排队的消息仍会继续）', en: '/cancel stop the running turn (for stuck long tasks; queued messages still run)' },
-    'help.compact': { zh: '/compact 立即压缩当前会话历史上下文', en: '/compact compact the current session history immediately' },
-    'help.status': { zh: '/status 查看当前账号和会话的状态（白名单、会话线等）', en: '/status show the account and session state (allowlist, session lines, ...)' },
+    'help.header': { zh: '微信指令（发 /help 或 /帮助 可再看一遍）：', en: 'WeChat commands (send /help to see this again):' },
+    'help.new': { zh: '/new [标题] 在当前微信聊天里新建话题（当前话题会保留，之后可以切回来）', en: '/new [title] start a new topic in this WeChat chat (the current topic is kept, and you can switch back)' },
+    'help.list': { zh: '/list 查看当前微信聊天里的所有话题', en: '/list list every topic in this WeChat chat' },
+    'help.use': { zh: '/use <序号> 切换到当前微信聊天里的第几个话题', en: '/use <n> switch to topic n in this WeChat chat' },
+    'help.clear': { zh: '/clear 从当前微信聊天的话题列表移除所有话题，并新开一个；DSH 里原来的会话历史不会被删除', en: '/clear remove every topic from this WeChat chat’s topic list and start a new one; the original DSH session history is not deleted' },
+    'help.cancel': { zh: '/cancel 停止当前正在生成的回复；已经执行的操作不会撤回，排队中的消息仍会继续处理', en: '/cancel stop the reply currently being generated; actions already run are not undone, and queued messages will still be processed' },
+    'help.compact': { zh: '/compact 立即压缩当前话题在 DSH 中的历史上下文', en: '/compact compact the current topic’s history in DSH immediately' },
+    'help.status': { zh: '/status 查看当前账号和话题的状态（允许名单等）', en: '/status show the current account and topic status (allowlist and more)' },
     'help.remind': { zh: '/remind <时间> <内容> 定时提醒：10m / 2h / 14:30 / 2026-10-19 09:00 / 明天 9:00 / 周五 / 下周三 10点 / 3小时后 / 每天 9:00 / 工作日 8:30 / 每周一 10点', en: '/remind <when> <text> timed reminder: 10m / 2h / 14:30 / 2026-10-19 09:00 / tomorrow 9:00 / Friday / next Wednesday 10:00 / in 3 hours / daily 9:00 / weekdays 8:30 / Mondays 10:00' },
     'help.remindlist': { zh: '/remindlist 查看待发提醒（/remindlist 2 1h 把第 2 条往后推一小时）', en: '/remindlist list pending reminders (/remindlist 2 1h pushes entry 2 back an hour)' },
     'help.remindcancel': { zh: '/remindcancel <编号> 取消一条还没发出的提醒（编号来自 /remindlist）', en: '/remindcancel <n> cancel a pending reminder (number from /remindlist)' },
@@ -81,10 +99,19 @@ export const CATALOG = Object.freeze({
     },
 
     // --- settings card labels -----------------------------------------------
+    'config.sessionDispatcherEnabled.label': { zh: '允许通过微信管理其他会话', en: 'Allow WeChat to manage other sessions' },
+    'config.sessionDispatcherEnabled.hint': {
+        zh: '默认关闭。开启后，下面列出的联系人可以通过微信查看并操作指定的 DSH 会话，保存后从下一条消息起生效。这个功能用于方便操作自己的会话，不是隔离不可信用户的系统沙箱。',
+        en: 'Off by default. Listed contacts can view and manage the selected DSH sessions from WeChat. Changes apply from the next message. This is a convenience control, not a system sandbox for untrusted users.',
+    },
     'config.workspaceTitle.label': { zh: '微信工作区显示名', en: 'Workspace title' },
     'config.workspaceTitle.hint': {
         zh: '留空沿用目录名；保存后重启 DSH 生效，且不会覆盖你在界面里手动改过的标题。',
         en: 'Empty keeps the folder name. Restart DSH to apply; a title you chose in the UI is never overwritten.',
+    },
+    'install.success.settings': {
+        zh: '设置保存在 {path}；重装不会删除已有登录信息和设置。',
+        en: 'Settings are stored in {path}; reinstalling does not remove existing sign-in data or settings.',
     },
 })
 
