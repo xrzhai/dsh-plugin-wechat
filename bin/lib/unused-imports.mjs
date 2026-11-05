@@ -8,6 +8,6 @@ export function unusedImports(source) {
   const ast = parse(source, { ecmaVersion: 'latest', sourceType: 'module', range: true, loc: true })
   const manager = analyze(ast, { ecmaVersion: 2022, sourceType: 'module' })
   return manager.scopes.flatMap(scope => scope.variables
-    .filter(variable => variable.defs.some(def => def.type === 'ImportBinding') && variable.references.length === 0)
+    .filter(variable => variable.defs.some(def => def.type === 'ImportBinding') && !variable.references.some(reference => reference.isRead()))
     .map(variable => ({ name: variable.name, line: variable.identifiers[0].loc.start.line })))
 }

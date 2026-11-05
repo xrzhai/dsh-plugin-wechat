@@ -14,3 +14,7 @@ test('comments, literal mentions and shadowing do not hide unused imports', () =
 const label = 'dead';
 export function run(dead) { return dead + label }`), [{ name: 'dead', line: 1 }])
 })
+
+test('writing an import does not count as using its imported value', () => {
+  assert.deepEqual(unusedImports("import { x } from 'x'; x = 1"), [{ name: 'x', line: 1 }])
+})
