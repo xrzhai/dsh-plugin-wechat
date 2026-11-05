@@ -153,5 +153,36 @@ test('a failed conflict preservation is reported without claiming both copies su
   assert.equal(conflict.preservedPath, null)
   assert.match(conflict.error, /EEXIST|exist/i)
   assert.equal(fs.readFileSync(path.join(aside, recoveryName), 'utf8'), '{"occupied":true}\n')
-  assert.match(warnings.join('\n'), /could not preserve the backup copy .* until backup rotation/)
+  assert.match(warnings.join('\n'), /could not preserve the backup copy .*restore may be partial.*until rotation/)
+})
+
+test('directory restore reports a missing recovery when atomic hard-link publication is unavailable', (t) => {
+  const root = stateRoot(t, 'weixin-restore-hard-link-failure-')
+  const original = '{"seq":9,"items":['
+  const recoveryName = preserveCorruptStore(root, original)
+  const saved = createBackup(root, { now: Date.parse('2026-11-05T01:02:03Z'), warn() {} })
+  const backupRecovery = path.join(backupsDir(root), saved.id, recoveryName)
+  fs.rmSync(path.join(root, recoveryName))
+  t.mock.method(fs, 'linkSync', () => {
+    const error = new Error('hard links are not supported on this filesystem')
+    error.code = 'ENOTSUP'
+    throw error
+  })
+
+  const warnings = []
+  const restored = restoreBackup(root, saved.id, {
+    now: Date.parse('2026-11-05T02:03:04Z'),
+    warn: (message) => warnings.push(message),
+  })
+
+  assert.deepEqual(restored.recoveryFailures, [{
+    name: recoveryName,
+    livePath: path.join(root, recoveryName),
+    backupPath: backupRecovery,
+    error: 'hard links are not supported on this filesystem',
+    code: 'ENOTSUP',
+  }])
+  assert.equal(fs.existsSync(path.join(root, recoveryName)), false)
+  assert.equal(fs.readFileSync(backupRecovery, 'utf8'), original)
+  assert.match(warnings.join('\n'), /restore may be partial.*backup copy remains/)
 })

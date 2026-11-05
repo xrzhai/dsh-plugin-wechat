@@ -13,6 +13,7 @@ import { readReminders } from '../src/message/scheduler.js'
 const REPO_ROOT = path.resolve(import.meta.dirname, '..')
 const CLI = path.join(REPO_ROOT, 'bin', 'backup.mjs')
 const PASSPHRASE = 'instance-check-test-passphrase'
+const SEALED_RECOVERY_NAME = 'reminders.recovery-0123456789abcdef.json'
 
 function fixture(t) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'weixin-backup-cli-'))
@@ -202,6 +203,79 @@ test('open --dry-run does not require instance evidence because it writes nothin
   assert.equal(result.status, 0, result.stderr)
   assert.match(result.stdout, /would write 2 file\(s\)/)
   assert.equal(readMarker(f.root), 'live-state')
+})
+
+test('open --dry-run marks a conflicting sealed recovery as a safe preservation', (t) => {
+  const f = fixture(t)
+  const archiveState = '{"source":"archive","items":[null'
+  const liveRecovery = '{"source":"live recovery"}\n'
+  fs.writeFileSync(path.join(f.root, 'config.json'), '{"source":"archive"}\n')
+  fs.writeFileSync(path.join(f.root, SEALED_RECOVERY_NAME), archiveState)
+  const archive = path.join(f.base, 'state.enc')
+  sealState(f.root, { passphrase: PASSPHRASE, outFile: archive, includeMedia: false })
+  fs.writeFileSync(path.join(f.root, 'config.json'), '{"source":"live"}\n')
+  fs.writeFileSync(path.join(f.root, SEALED_RECOVERY_NAME), liveRecovery)
+
+  const result = runCli(f, ['open', archive, '--dry-run'])
+
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(result.stdout, /would write 2 file\(s\).*1 conflict-safe/)
+  assert.match(result.stdout, /pre-restore paths are estimates; the actual restore uses a new timestamp/)
+  assert.match(result.stdout, /! reminders\.recovery-0123456789abcdef\.json \(keep live; archive copy -> backups[\\/]pre-restore-/)
+  assert.equal(fs.readFileSync(path.join(f.root, 'config.json'), 'utf8'), '{"source":"live"}\n')
+  assert.equal(fs.readFileSync(path.join(f.root, SEALED_RECOVERY_NAME), 'utf8'), liveRecovery)
+  assert.deepEqual(preRestoreDirs(f.root), [])
+})
+
+test('open preserves a conflicting sealed recovery and reports both copies', (t) => {
+  const f = fixture(t)
+  const archiveState = '{"source":"archive","items":[null'
+  const liveRecovery = '{"source":"live recovery"}\n'
+  fs.writeFileSync(path.join(f.root, 'config.json'), '{"source":"archive"}\n')
+  fs.writeFileSync(path.join(f.root, SEALED_RECOVERY_NAME), archiveState)
+  const archive = path.join(f.base, 'state.enc')
+  sealState(f.root, { passphrase: PASSPHRASE, outFile: archive, includeMedia: false })
+  fs.writeFileSync(path.join(f.root, 'config.json'), '{"source":"live"}\n')
+  fs.writeFileSync(path.join(f.root, SEALED_RECOVERY_NAME), liveRecovery)
+
+  const result = runCli(f, ['open', archive, '--yes'])
+
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(fs.readFileSync(path.join(f.root, 'config.json'), 'utf8'), '{"source":"archive"}\n')
+  assert.equal(fs.readFileSync(path.join(f.root, SEALED_RECOVERY_NAME), 'utf8'), liveRecovery)
+  const match = result.stdout.match(/archive copy saved to (.+)\r?\n/)
+  assert.ok(match, result.stdout)
+  assert.equal(fs.readFileSync(match[1].trim(), 'utf8'), archiveState)
+  assert.equal(preRestoreDirs(f.root).length, 1)
+})
+
+test('open exits nonzero before ordinary writes when a sealed recovery cannot be preserved', (t) => {
+  const f = fixture(t)
+  const archiveState = '{"source":"archive","items":[null'
+  const liveConfig = '{"source":"live"}\n'
+  const liveRecovery = '{"source":"live recovery"}\n'
+  fs.writeFileSync(path.join(f.root, 'config.json'), '{"source":"archive"}\n')
+  fs.writeFileSync(path.join(f.root, SEALED_RECOVERY_NAME), archiveState)
+  const archive = path.join(f.base, 'state.enc')
+  sealState(f.root, { passphrase: PASSPHRASE, outFile: archive, includeMedia: false })
+  fs.writeFileSync(path.join(f.root, 'config.json'), liveConfig)
+  fs.writeFileSync(path.join(f.root, SEALED_RECOVERY_NAME), liveRecovery)
+
+  const now = Date.now()
+  for (let offset = -1; offset <= 20; offset += 1) {
+    const aside = path.join(backupsDir(f.root), `pre-restore-${stampFor(now + offset * 1_000)}`)
+    fs.mkdirSync(aside, { recursive: true })
+    fs.writeFileSync(path.join(aside, SEALED_RECOVERY_NAME), '{"occupied":true}\n')
+  }
+
+  const result = runCli(f, ['open', archive, '--yes'])
+
+  assert.equal(result.status, 1, result.stderr)
+  assert.match(result.stderr, /sealed restore aborted: sealed restore may be partial/)
+  assert.match(result.stderr, /source archive was not changed/)
+  assert.ok(result.stderr.includes(`archive remains at ${archive}`), result.stderr)
+  assert.equal(fs.readFileSync(path.join(f.root, 'config.json'), 'utf8'), liveConfig)
+  assert.equal(fs.readFileSync(path.join(f.root, SEALED_RECOVERY_NAME), 'utf8'), liveRecovery)
 })
 
 test('usage says to exit the agent harness before confirming restore with --yes', (t) => {
