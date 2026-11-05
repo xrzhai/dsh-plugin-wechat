@@ -71,7 +71,7 @@ window.__ModuleLoader__.load({
 				"stickerKeepBuiltins": "live", "ttsVoice": "live", "voiceReplies": "live", "voiceReplyMaxChars": "live",
 				"proactiveEnabled": "live", "proactiveMinGapMinutes": "live", "proactiveMaxPerDay": "live", "proactiveWindowStart": "live", "proactiveWindowEnd": "live", "proactiveLearnedWindow": "live",
 				"groupChatEnabled": "live", "groupReplyWhen": "live", "groupBotNames": "live", "groupKeywords": "live", "packsIndexUrl": "live",
-				"groupSummaryEnabled": "live", "groupSummaryEvery": "live", "contactStaleDays": "live", "contactRefreshEnabled": "live", "contactRefreshPerDay": "live",
+				"groupSummaryEnabled": "live", "groupSummaryEvery": "live",
 				"pricePer1kInputYuan": "live", "pricePer1kOutputYuan": "live", "usageAwarenessEnabled": "live",
 				"groupShareMemory": "live", "videoFrames": "live", "richContent": "live", "codeFileThreshold": "live", "locale": "live",
 				"toolNotices": "live", "quietHoursEnabled": "live", "quietHoursStart": "live", "quietHoursEnd": "live", "senderRatePerMinute": "live",
@@ -155,10 +155,10 @@ window.__ModuleLoader__.load({
 				return createElement("div", { style: { ...panelStyle, display: "flex", flexDirection: "column", gap: 12 } },
 					createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" } },
 						createElement("div", { style: { display: "flex", flexDirection: "column", gap: 4 } },
-							createElement("span", { style: panelTitleStyle }, t("Workspace Instructions (AGENTS.md)", "工作区指令 (AGENTS.md)")),
+							createElement("span", { style: panelTitleStyle }, t("Persona (AGENTS.md)", "人设 (AGENTS.md)")),
 							createElement("span", { style: hintStyle },
-								t("Loaded once at session baseline via @deepseek-ai/dsh-agent-instructions (never repeated in every user message).",
-									"由 DSH 原生 agent-instructions 在会话基线单次加载（绝不污染每轮 User Message）；修改保存后下一轮对话自动增量生效。"))),
+								t("Big Fish's long-term persona and standing settings. Loaded once at session baseline via @deepseek-ai/dsh-agent-instructions (never repeated in every user message); a save applies from the next turn.",
+									"大肥鱼的长期人设与基本设定。由 DSH 原生 agent-instructions 在会话基线单次加载（绝不污染每轮 User Message）；保存后下一轮对话自动生效。"))),
 						createElement("div", { style: { display: "flex", gap: 8, alignItems: "center" } },
 							dirty ? createElement("span", { style: pillStyle("warn") }, t("Unsaved changes", "未保存改动")) : null,
 							createElement("button", { onClick: load, disabled: busy, style: buttonStyleFor(busy) },
@@ -789,10 +789,6 @@ window.__ModuleLoader__.load({
 									style: buttonStyleFor(false),
 								}, t("Rename", "改名称")),
 								createElement("button", {
-									onClick: () => editAllowlist(account),
-									style: buttonStyleFor(false),
-								}, t("Allowlist", "白名单")),
-								createElement("button", {
 									onClick: () => setPausedFor(account, !account.paused),
 									disabled: busy,
 									style: buttonStyleFor(busy),
@@ -865,32 +861,6 @@ window.__ModuleLoader__.load({
 				// One row per bound account: identity, liveness, controls.
 				accountRows,
 
-				// Who tried to get in and was turned away — one click to allow.
-				bound ? createElement(StrangerSection, { t }) : null,
-
-				// Who can talk to each account, straight from status(): the
-				// operator asked to see, at a glance under the login state, which
-				// logged-in WeChat ids are allowlisted and which accounts have no
-				// list of their own (the global one rules, or the first-contact
-				// enrolment has not happened yet).
-				bound
-					? createElement("div", { style: { display: "flex", flexDirection: "column", gap: 4 } },
-							accounts.map((account) => {
-								const senders = (account.allowedSenders ?? []).filter((id) => typeof id === "string" && id !== "");
-								return createElement("div", { key: `al-${account.accountId}`, style: { display: "flex", gap: 6, alignItems: "baseline", flexWrap: "wrap" } },
-									createElement("span", { style: { fontSize: 12, color: C.labelSecondary, flex: "none" } },
-										account.label || account.accountId),
-									senders.length > 0
-										? createElement("span", { style: { fontSize: 12, color: C.labelPrimary } },
-												t("allowlisted:", "白名单："),
-												" ",
-												senders.join(", "))
-										: createElement("span", { style: { fontSize: 12, color: C.labelSecondary } },
-												t("no allowlist of its own yet — global list rules, first message enrols its sender",
-													"还没有自己的白名单 — 暂用全局名单，第一条消息的发送者会自动登记")));
-							}))
-					: null,
-
 				accountNotice
 					? createElement("div", { style: noticeStyle },
 							createElement("span", { style: { flex: "0 0 auto" } }, "⚠"),
@@ -909,17 +879,20 @@ window.__ModuleLoader__.load({
 							)))
 					: null,
 
-				state.phase === "idle" || state.phase === "confirmed" || state.phase === "failed"
-					|| state.phase === "blocked"
+				// The scan/relogin button is only for a state the operator must
+				// act on: nothing bound yet, or the saved login expired. A bound,
+				// healthy account shows no primary button — adding a *second*
+				// WeChat account is an advanced, rarely wanted action, so it is
+				// not offered in the single-account UI at all.
+				(state.phase === "idle" || state.phase === "confirmed" || state.phase === "failed"
+					|| state.phase === "blocked") && (!bound || sessionExpired)
 					? createElement("div", { style: { display: "flex", gap: 8, flexWrap: "wrap" } },
 							createElement("button", {
 								onClick: start,
 								disabled: statusState !== "ready",
 								style: primaryButtonStyle,
-							}, bound || sessionExpired
-								? sessionExpired
-									? t("Scan again to log in", "重新扫码登录")
-									: t("Add another WeChat account", "新增账号登录")
+							}, sessionExpired
+								? t("Scan again to log in", "重新扫码登录")
 								: t("Scan QR code to log in", "扫码登录微信")),
 							// Only offered when there is something to forget. A
 							// logout is destructive, so it is never the primary
@@ -1611,22 +1584,35 @@ window.__ModuleLoader__.load({
 							style: { margin: 0, fontSize: 14, lineHeight: "20px", fontWeight: 600, color: C.labelPrimary },
 						}, title),
 						body);
-				const [tab, setTab] = react.useState(0);
+				const [tab, setTab] = react.useState("account");
+				// Beginner surface: only 微信账号 + 人设 are shown. The ops pages
+				// (会话 / 网关配置) live behind 高级 — one click away for whoever
+				// needs them, out of sight for a first-time user.
+				const [advanced, setAdvanced] = react.useState(false);
 				const TABS = [
 					{ id: "account", label: t("WeChat Account", "微信账号"), body: createElement(LoginSection, { ctx, t }) },
-					{ id: "sessions", label: t("Sessions", "会话"), body: createElement(SessionsSection, { ctx, t }) },
-					{ id: "prompt", label: t("Workspace Instructions", "工作区指令"), body: createElement(PromptSection, { ctx, t }) },
-					{ id: "options", label: t("Gateway Options", "网关配置"), body: createElement(ConfigSection, { ctx, t }) },
+					{ id: "prompt", label: t("Persona", "人设"), body: createElement(PromptSection, { ctx, t }) },
+					{ id: "sessions", label: t("Sessions", "会话"), body: createElement(SessionsSection, { ctx, t }), advanced: true },
+					{ id: "options", label: t("Gateway Options", "网关配置"), body: createElement(ConfigSection, { ctx, t }), advanced: true },
 				];
-				// Arrow keys cycle through the four primary sections.
+				const visibleTabs = TABS.filter((entry) => advanced || !entry.advanced);
+				const current = visibleTabs.find((entry) => entry.id === tab) ?? visibleTabs[0];
 				const onTabKey = (event) => {
+					const index = visibleTabs.findIndex((entry) => entry.id === current?.id);
 					if (event.key === "ArrowRight") {
 						event.preventDefault();
-						setTab((tab + 1) % TABS.length);
+						setTab(visibleTabs[(index + 1) % visibleTabs.length].id);
 					} else if (event.key === "ArrowLeft") {
 						event.preventDefault();
-						setTab((tab + TABS.length - 1) % TABS.length);
+						setTab(visibleTabs[(index + visibleTabs.length - 1) % visibleTabs.length].id);
 					}
+				};
+				const toggleAdvanced = () => {
+					setAdvanced((open) => {
+						const next = !open;
+						if (!next && current?.advanced) setTab("account");
+						return next;
+					});
 				};
 				ensureCardStyles();
 				return createElement("div", {
@@ -1644,14 +1630,14 @@ window.__ModuleLoader__.load({
 								overflowX: "auto",
 							},
 						},
-						...TABS.map((entry, index) => {
-							const active = index === tab;
+						...visibleTabs.map((entry) => {
+							const active = entry.id === current?.id;
 							return createElement("button", {
 									key: entry.id,
 									role: "tab",
 									"aria-selected": active,
 									tabIndex: active ? 0 : -1,
-									onClick: () => setTab(index),
+									onClick: () => setTab(entry.id),
 									className: "weixin-tab",
 									style: {
 										appearance: "none",
@@ -1673,13 +1659,31 @@ window.__ModuleLoader__.load({
 								},
 								createElement(TabIcon, { id: entry.id, active }),
 								entry.label);
-						})),
+						}),
+						createElement("button", {
+								type: "button",
+								onClick: toggleAdvanced,
+								"aria-expanded": advanced,
+								style: {
+									appearance: "none",
+									flex: "0 0 auto",
+									marginLeft: "auto",
+									background: "transparent",
+									border: "none",
+									color: C.labelTertiary,
+									fontSize: 12,
+									lineHeight: "20px",
+									padding: "9px 6px",
+									cursor: "pointer",
+									whiteSpace: "nowrap",
+								},
+							}, advanced ? t("Hide advanced ▴", "收起高级 ▴") : t("Advanced ▾", "高级 ▾"))),
 					createElement("div", {
-							key: TABS[tab]?.id,
+							key: current?.id ?? "empty",
 							className: "weixin-card-enter",
 							style: { display: "flex", flexDirection: "column" },
 						},
-						section(TABS[tab]?.label ?? "", TABS[tab]?.body)));
+						section(current?.label ?? "", current?.body)));
 			}
 			return { WeixinSettingsCard };
 		};
