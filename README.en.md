@@ -4,7 +4,7 @@
 
 **Turn your personal WeChat into a production-grade remote engineering control surface for DeepSeek Harness (DSH).**
 
-Send a message from WeChat on your phone to wake and steer DSH Agents running on your workstation — two-way text, images, files, and local ASR voice transcription, ordered multi-turn Subagent delivery, and cross-project parallel session dispatching.
+Send a message from WeChat on your phone to wake and steer DSH Agents running on your workstation — two-way text, images, and files, ordered multi-turn Subagent delivery, and cross-project parallel session dispatching.
 
 ![Node.js >= 22.13.0](https://img.shields.io/badge/node-%3E%3D22.13.0-339933?logo=node.js&logoColor=white)
 ![DSH >= 0.2.2](https://img.shields.io/badge/DSH-0.2.2%2B-4D6BFE)
@@ -25,7 +25,7 @@ Send a message from WeChat on your phone to wake and steer DSH Agents running on
 
 This project is an engineering-focused evolution of **[panqing0313](https://github.com/panqing0313)**'s pioneering open-source plugin [`dsh-plugin-weixin`](https://github.com/panqing0313/dsh-plugin-weixin). **This repository is a self-contained standalone package (bundling the plugin core, UI, installer, and vendored WeChat iLink transport) — you only need this repository and a configured DSH installation, without installing the upstream plugin first.**
 
-We extend our sincere gratitude to **panqing0313** for establishing the non-intrusive WeChat iLink Bot API transport bridge (vendored from Tencent's MIT-licensed `@tencent-weixin/openclaw-weixin`), multi-account polling, local Whisper ASR bridge, and the Settings Card UI.
+We extend our sincere gratitude to **panqing0313** for establishing the non-intrusive WeChat iLink Bot API transport bridge (vendored from Tencent's MIT-licensed `@tencent-weixin/openclaw-weixin`), multi-account polling, and the Settings Card UI.
 
 ### Why This Evolution? (Fork Positioning)
 

@@ -4,7 +4,7 @@
 
 **把你的个人微信，变成 DeepSeek Harness (DSH) 的生产级远程工程控制面。**
 
-在手机微信里发一句话，唤醒并调度你本机正在运行的 DSH Agent —— 文字、图片、文件、语音（本地 ASR）双向互通，异步 Subagent 结果保序回推，支持跨项目平行会话调度。
+在手机微信里发一句话，唤醒并调度你本机正在运行的 DSH Agent —— 文字、图片、文件双向互通，异步 Subagent 结果保序回推，支持跨项目平行会话调度。
 
 ![Node.js >= 22.13.0](https://img.shields.io/badge/node-%3E%3D22.13.0-339933?logo=node.js&logoColor=white)
 ![DSH >= 0.2.2](https://img.shields.io/badge/DSH-0.2.2%2B-4D6BFE)
@@ -25,7 +25,7 @@
 
 本项目基于 **[panqing0313](https://github.com/panqing0313)** 开源的先驱项目 [`dsh-plugin-weixin`](https://github.com/panqing0313/dsh-plugin-weixin) 深度重构与演进。**本仓库为自包含独立安装包（内置插件核心、管理面板、安装器与 vendored 微信 iLink 传输层），新用户只需本仓库与已配置的 DSH 即可直接安装使用，无需预先安装上游插件。**
 
-向原作者 **panqing0313** 致以诚挚感谢：他率先跑通了基于腾讯官方 `iLink Bot API`（`@tencent-weixin/openclaw-weixin`）的免挂纯 Web 扫码通道，并构建了多账号独立长轮询、本地 Whisper 语音转写桥接与设置卡 UI，为 DSH 社区连接个人微信奠定了扎实的工程基石。
+向原作者 **panqing0313** 致以诚挚感谢：他率先跑通了基于腾讯官方 `iLink Bot API`（`@tencent-weixin/openclaw-weixin`）的免挂纯 Web 扫码通道，并构建了多账号独立长轮询与设置卡 UI，为 DSH 社区连接个人微信奠定了扎实的工程基石。
 
 ### 为什么要做这个演进版？（设计哲学的分野）
 
@@ -164,7 +164,7 @@ src/
 ├── outbound.js                  # 出站分片断点续传、代码块处理与产出文件自动投递
 ├── client.js / client.card.js   # 极简四页签 React 管理面板（微信账号/会话/工作区指令/网关配置）
 ├── transport/ilink.js           # 微信 iLink 长轮询、入站先落盘游标推进、8 分钟 Token 刷新与媒体收发
-├── media/                       # 入站媒体解密、ASR 语音转写桥、OCR 与出站路径安全校验
+├── media/                       # 入站图片/文件解密落盘与出站路径安全沙箱校验
 ├── message/                     # inbound-pending 入站恢复、outbox 断点续传、分段、去重与斜杠指令
 └── security/allowlist.js        # 默认拒绝的账号级/全局双层白名单
 bin/                             # install.mjs 安装器、doctor.mjs 体检、onboard.mjs 上手清单、login.js
