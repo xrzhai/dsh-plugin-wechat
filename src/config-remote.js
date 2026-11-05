@@ -46,8 +46,8 @@ export const FIELDS = [
     fields: [
       { path: "sessionDispatcherEnabled", type: T.boolean, default: false,
         label: "启用平行会话调度", labelEn: "Enable session dispatcher",
-        hint: "默认关闭。开启后，下方单独授权的微信发送者可读取下方授权的项目会话并派发任务；不用于隔离不可信用户。下一次微信消息挂载工具。",
-        hintEn: "Off by default. Explicitly listed senders can read host project sessions and send tasks. Tools mount on the next inbound message." },
+        hint: "默认关闭。开启后，下方单独授权的微信发送者可读取下方授权的项目会话并派发任务；不用于隔离不可信用户。保存后，下一条微信消息起生效。",
+        hintEn: "Off by default. Explicitly listed senders can read authorized host sessions and send tasks. Changes take effect on your next WeChat message." },
       { path: "sessionDispatcherSenders", type: T.stringList, default: [], emptyMeansAll: false,
         label: "调度者发送者 ID", labelEn: "Dispatcher sender IDs",
         hint: "每行一个，须同时在网关发送者白名单中。空列表拒绝所有调度读取和写入。",
@@ -76,8 +76,8 @@ export const FIELDS = [
         default: true,
         label: "启用微信网关",
         labelEn: "Enabled",
-        hint: "保存后立即停止或启动长轮询；关闭后拒绝新消息，已开始的回合仍可完成并回复。",
-        hintEn: "Saving starts or stops polling immediately. New messages are refused while off; admitted turns may finish and reply.",
+        hint: "关闭后暂停接收新的微信消息；正在处理中的任务仍会完成并回复。",
+        hintEn: "Turning this off pauses new WeChat messages; tasks already in progress can still finish and reply.",
       },
       {
         path: "cwd",
@@ -110,19 +110,19 @@ export const FIELDS = [
         path: "sideProvider",
         type: T.string,
         default: "",
-        label: "后台/子任务 Provider",
-        labelEn: "Background provider",
-        hint: "后台轻量任务使用的 Provider（如 magpie）。",
-        hintEn: "Provider for background side tasks.",
+        label: "后台任务 Provider",
+        labelEn: "Background task provider",
+        hint: "后台任务使用的 Provider（如定时主动消息、群聊摘要）。留空后仍会检查旧版用途路由；若仍无可用后台路由，则使用 DSH 默认模型。",
+        hintEn: "Provider for background tasks such as scheduled messages and group summaries. Empty still allows legacy purpose routes to be checked; if no background route remains, the DSH default model is used.",
       },
       {
         path: "sideModel",
         type: T.string,
         default: "",
-        label: "后台/子任务 Model",
-        labelEn: "Background model",
-        hint: "后台轻量任务的模型 ID（如 workbuddy/deepseek-v4.1-flash）。",
-        hintEn: "Model ID for background side tasks.",
+        label: "后台任务 Model",
+        labelEn: "Background task model",
+        hint: "后台任务的模型 ID；需要与上方 Provider 同时填写。",
+        hintEn: "Model ID for background tasks; fill this together with the provider above.",
       },
     ],
   },
@@ -135,8 +135,8 @@ export const FIELDS = [
         type: T.enum,
         default: "steer",
         options: [
-          { value: "steer", label: "插入正在进行的回复 (steer)", labelEn: "Steer the running turn" },
-          { value: "queue", label: "排队，作为下一轮 (queue)", labelEn: "Queue as the next turn" },
+          { value: "steer", label: "直接补充给当前任务 (steer)", labelEn: "Add to the current task (steer)" },
+          { value: "queue", label: "排队，等当前任务完成后处理 (queue)", labelEn: "Queue until the current task finishes (queue)" },
         ],
         label: "忙碌时新消息处理",
         labelEn: "When busy",
@@ -390,12 +390,9 @@ export class ConfigController extends TypertRemoteService {
           defaultValue: present(field, field.default),
           source,
           readOnly: READ_ONLY.has(field.path),
-          // Two annotations the card relies on, both derived here so they cannot
-          // disagree with the table the host actually uses: a secret is never
-          // exported, and a ⭐ marks the options that end up in the model prompt
-          // (the 「提示词」 tab is where you see the result).
+          // Secrets are never exported. The former prompt-star annotation was
+          // removed with the prompt tab it pointed to.
           secret: field.secret === true,
-          promptMarked: field.promptMarked === true,
           options: field.options ?? undefined,
           min: field.min,
           max: field.max,

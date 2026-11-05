@@ -17,7 +17,7 @@ test('first-run checklist covers binding, authorization and operational reminder
 
   const checklist = buildOnboardingChecklist()
   assert.deepEqual(checklist.steps.map((entry) => entry.id), ONBOARDING_STEPS)
-  assert.doesNotMatch(JSON.stringify(checklist), /persona|proactive|knowledge/i)
+  assert.doesNotMatch(JSON.stringify(checklist), /personaDefaultMode|proactiveEnabled|knowledgeEnabled/i)
   assert.equal(step(checklist, 'backup').id, 'backup')
   assert.equal(step(checklist, 'verify').state, 'note')
 })
@@ -85,4 +85,10 @@ test('quickstart installs this checkout without an upstream or published-package
   assert.match(lines[0].command, /node bin\/install\.mjs/)
   assert.notEqual(lines[0].command, 'npm install dsh-plugin-wechat && node bin/doctor.mjs')
   assert.match(lines[2].note, /真实收发/)
+})
+
+test('the default login step points to the DSH WeChat panel instead of the CLI', () => {
+  const lines = quickstartLines()
+  assert.match(lines[1].command, /大肥鱼/)
+  assert.doesNotMatch(lines[1].command, /bin\/login\.js/)
 })

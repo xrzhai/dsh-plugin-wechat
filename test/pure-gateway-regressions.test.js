@@ -35,7 +35,7 @@ test('legacy onboarding config does not read removed persona or proactive fields
     status: async () => ({ accounts: [] }),
   })
   assert.ok(Array.isArray(checklist.steps))
-  assert.doesNotMatch(JSON.stringify(checklist), /persona|proactive/i)
+  assert.doesNotMatch(JSON.stringify(checklist), /personaDefaultMode|proactiveEnabled/i)
 })
 
 test('controller RPC descriptor only exposes methods implemented on the prototype', () => {

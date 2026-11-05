@@ -89,7 +89,7 @@ export function buildDiagExport(input) {
   const lines = []
   const sections = []
 
-  lines.push(`# 微信BOT 体检包 · ${new Date(now).toISOString()}`)
+  lines.push(`# 大肥鱼 · 微信连接体检包 · ${new Date(now).toISOString()}`)
   lines.push('# 所有 id 已经换成一串短哈希，地址/凭据/长串数字已经抹掉。请人工看一眼再发出去。')
   lines.push('')
 

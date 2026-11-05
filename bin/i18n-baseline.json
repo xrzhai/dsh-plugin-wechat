@@ -3,7 +3,7 @@
   "files": {
     "src/message/stickers.js": 280,
     "src/client.card.js": 117,
-    "src/index.js": 103,
+    "src/index.js": 102,
     "src/sessions.js": 95,
     "bin/stickers.mjs": 69,
     "src/config-remote.js": 57,

@@ -141,6 +141,6 @@ node bin/install.mjs --profile desktop --uninstall
 
 本项目基于 **[panqing0313](https://github.com/panqing0313)** 开源的 [`dsh-plugin-weixin`](https://github.com/panqing0313/dsh-plugin-weixin) 重构演进，底层微信通道基于腾讯开源的 [`@tencent-weixin/openclaw-weixin`](https://github.com/Tencent/openclaw-weixin)（MIT）。
 
-非常感谢原作者 **panqing0313** 打通微信 iLink 扫码通道与多账号管理基础架构！本分支在此基础上剥离了每轮对话的额外提示词注入，精简为 4 个核心设置页签，并重点强化了异步 Subagent 多回合防吞、长任务凭证续期、出入站断点恢复以及跨会话平行调度能力。
+非常感谢原作者 **panqing0313** 打通微信 iLink 扫码通道与多账号管理基础架构！本分支在此基础上剥离了每轮对话的额外提示词注入，把常用设置精简为「微信账号 + 人设」两个页签，会话与网关配置收在「高级」里，并重点强化了异步 Subagent 多回合防吞、长任务凭证续期、出入站断点恢复以及跨会话平行调度能力。
 
 遵循 [MIT License](LICENSE) 开源。

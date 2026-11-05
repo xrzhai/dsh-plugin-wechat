@@ -32,7 +32,7 @@ Once your Agent finishes installing, **fully quit and reopen DSH**.
 
 ## 2. Bind Your WeChat (Takes 1 Minute)
 
-1. **Scan QR Code**: Open DSH, click **WeChat BOT** in the left sidebar (or go to `Settings → Plugins → WeChat BOT`), and click **Scan QR to Log In**.
+1. **Scan QR Code**: Open DSH, click **WeChat** in the left sidebar (or go to `Settings → Plugins → WeChat`), and click **Scan QR to Log In**.
 2. **Set Default Working Directory (Optional)**: Open the **Gateway Options** tab and set `Working directory (cwd)` to your daily project or notes folder.
 3. **Send Your First Message (Auto Owner Enrolment)**: By default, the plugin ignores everyone for safety. After scanning, **send the first message from your own WeChat** (e.g. `hello` or `/status`) — it will automatically register you as the owner.
 
@@ -69,7 +69,7 @@ pnpm install
 node bin/install.mjs --profile desktop
 npm run doctor -- --offline
 ```
-After running the installer, tell the user to **fully quit and restart DSH**, then open **WeChat BOT** in the left sidebar to scan the QR code.
+After running the installer, tell the user to **fully quit and restart DSH**, then open **WeChat** in the left sidebar to scan the QR code.
 
 ### Upgrade & Uninstall
 ```bash
