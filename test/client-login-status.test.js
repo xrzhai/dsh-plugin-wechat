@@ -5,10 +5,25 @@ import vm from 'node:vm'
 import { setImmediate as tick } from 'node:timers/promises'
 import { FIELDS } from '../src/config-remote.js'
 
+function deferred() {
+  let resolve
+  const promise = new Promise(res => { resolve = res })
+  return { promise, resolve }
+}
+
+async function waitFor(predicate, message) {
+  for (let i = 0; i < 100; i += 1) {
+    if (predicate()) return
+    await new Promise(resolve => setTimeout(resolve, 1))
+  }
+  assert.fail(message)
+}
+
 // Load the shipped browser chunk and exercise the real account component with
 // isolated hook state. No browser, account files, or live RPC is involved.
-function fixture(status, { component = 'LoginSection', configRemote } = {}) {
+function fixture(status, { component = 'LoginSection', configRemote, weixin, timers } = {}) {
   let slots = [], cursor = 0, effects = [], mounted = false
+  const cleanups = []
   const react = {
     useState(initial) {
       const key = cursor++
@@ -25,9 +40,10 @@ function fixture(status, { component = 'LoginSection', configRemote } = {}) {
   let module
   vm.runInNewContext(fs.readFileSync(new URL('../src/client.card.js', import.meta.url), 'utf8'), {
     window: { __ModuleLoader__: { load: entry => { module = entry.factory(() => react) } } },
-    setTimeout, clearTimeout,
+    setTimeout: timers?.setTimeout ?? setTimeout,
+    clearTimeout: timers?.clearTimeout ?? clearTimeout,
   })
-  const ctx = { remote: { weixin: { status }, weixinConfig: configRemote } }
+  const ctx = { remote: { weixin: { status, ...weixin }, weixinConfig: configRemote } }
   const t = (_en, zh) => zh
   const created = []
   const createElement = (type, props, ...children) => {
@@ -52,11 +68,19 @@ function fixture(status, { component = 'LoginSection', configRemote } = {}) {
   const first = render()
   const mount = async () => {
     mounted = true
-    for (const effect of effects) effect()
+    for (const effect of effects) {
+      const cleanup = effect()
+      if (typeof cleanup === 'function') cleanups.push(cleanup)
+    }
     await tick()
     return render()
   }
-  return { first, mount, render }
+  const unmount = async () => {
+    mounted = false
+    for (const cleanup of cleanups.splice(0).reverse()) await cleanup()
+    await tick()
+  }
+  return { first, mount, render, unmount }
 }
 
 function nodes(tree) {
@@ -97,6 +121,168 @@ test('only a successful empty account list is presented as logged out', async ()
   const tree = await f.mount()
   assert.match(text(tree), /未登录/)
   assert.equal(button(tree, '扫码登录微信').props.disabled, false)
+})
+
+test('unmount cancels the live QR session instead of the initial null state', async () => {
+  const polling = new Promise(() => {})
+  const cancelled = []
+  const f = fixture(async () => ({ accounts: [] }), {
+    weixin: {
+      startLogin: async () => ({
+        sessionKey: 'session-live',
+        qrcodeUrl: 'https://example.test/qr',
+        qrDataUrl: null,
+      }),
+      poll: () => polling,
+      cancel: async sessionKey => { cancelled.push(sessionKey) },
+    },
+  })
+  const mounted = await f.mount()
+  await button(mounted, '扫码登录微信').props.onClick()
+  await tick()
+  await f.unmount()
+  assert.deepEqual(cancelled, ['session-live'])
+})
+
+test('a queued poll callback after stopPolling cannot poll a null key', async () => {
+  const queued = []
+  let timerId = 0
+  const polls = []
+  const f = fixture(async () => ({ accounts: [] }), {
+    timers: {
+      setTimeout: callback => {
+        queued.push(callback)
+        return ++timerId
+      },
+      // Simulate a callback the runtime has already queued past cancellation.
+      clearTimeout: () => {},
+    },
+    weixin: {
+      startLogin: async () => ({ sessionKey: 'session-queued', qrcodeUrl: null, qrDataUrl: null }),
+      poll: async sessionKey => { polls.push(sessionKey); return { status: 'wait' } },
+      cancel: async () => {},
+    },
+  })
+  const mounted = await f.mount()
+  await button(mounted, '扫码登录微信').props.onClick()
+  await button(f.render(), '取消').props.onClick()
+
+  for (const callback of queued.splice(0)) callback()
+  await tick()
+  assert.deepEqual(polls, [])
+})
+
+test('a late start result is cancelled when its component has unmounted', async () => {
+  const start = deferred()
+  let startCalls = 0
+  let polls = 0
+  const cancelled = []
+  const f = fixture(async () => ({ accounts: [] }), {
+    weixin: {
+      startLogin: () => {
+        startCalls += 1
+        return start.promise
+      },
+      poll: async () => {
+        polls += 1
+        return { status: 'wait' }
+      },
+      cancel: async sessionKey => { cancelled.push(sessionKey) },
+    },
+  })
+  const mounted = await f.mount()
+  const starting = button(mounted, '扫码登录微信').props.onClick()
+  await waitFor(() => startCalls === 1, 'startLogin was not requested')
+  await f.unmount()
+
+  start.resolve({ sessionKey: 'late-start', qrcodeUrl: null, qrDataUrl: null })
+  await starting
+  await new Promise(resolve => setTimeout(resolve, 5))
+
+  assert.deepEqual(cancelled, ['late-start'])
+  assert.equal(polls, 0)
+})
+
+for (const lateStatus of ['cancelled', 'confirmed']) {
+  test(`a late ${lateStatus} poll cannot stop a newer session`, async () => {
+    const firstPoll = deferred()
+    const secondPoll = deferred()
+    let startCalls = 0
+    let pollCalls = 0
+    const cancelled = []
+    const f = fixture(async () => ({ accounts: [] }), {
+      weixin: {
+        startLogin: async () => {
+          startCalls += 1
+          const sessionKey = `session-${startCalls}`
+          return { sessionKey, qrcodeUrl: `https://example.test/${sessionKey}`, qrDataUrl: null }
+        },
+        poll: () => {
+          pollCalls += 1
+          return pollCalls === 1 ? firstPoll.promise : secondPoll.promise
+        },
+        cancel: async sessionKey => { cancelled.push(sessionKey) },
+      },
+    })
+    const mounted = await f.mount()
+
+    await button(mounted, '扫码登录微信').props.onClick()
+    await waitFor(() => pollCalls === 1, 'first session never started polling')
+    await button(f.render(), '取消').props.onClick()
+    await button(f.render(), '扫码登录微信').props.onClick()
+    await waitFor(() => pollCalls === 2, 'replacement session never started polling')
+
+    firstPoll.resolve(lateStatus === 'confirmed'
+      ? { status: 'confirmed', accountId: 'stale-account' }
+      : { status: 'cancelled' })
+    await tick()
+
+    const current = f.render()
+    assert.ok(button(current, '取消'), 'the replacement session must still be displayed')
+    await button(current, '取消').props.onClick()
+    assert.deepEqual(cancelled, ['session-1', 'session-2'])
+    secondPoll.resolve({ status: 'cancelled' })
+    await tick()
+  })
+}
+
+test('a cancelled poll returns the QR login to idle without scheduling a retry', async () => {
+  let polls = 0
+  const f = fixture(async () => ({ accounts: [] }), {
+    weixin: {
+      startLogin: async () => ({ sessionKey: 'session-cancelled', qrcodeUrl: null, qrDataUrl: null }),
+      poll: async () => {
+        polls += 1
+        return { status: 'cancelled' }
+      },
+      cancel: async () => {},
+    },
+  })
+  const mounted = await f.mount()
+  await button(mounted, '扫码登录微信').props.onClick()
+  await new Promise(resolve => setTimeout(resolve, 5))
+  await tick()
+  assert.equal(polls, 1)
+  assert.equal(button(f.render(), '扫码登录微信')?.props.disabled, false)
+})
+
+test('a start cancelled by a concurrent logout does not enter the QR state', async () => {
+  let polls = 0
+  const f = fixture(async () => ({ accounts: [] }), {
+    weixin: {
+      startLogin: async () => ({ status: 'cancelled' }),
+      poll: async () => {
+        polls += 1
+        return { status: 'wait' }
+      },
+      cancel: async () => {},
+    },
+  })
+  const mounted = await f.mount()
+  await button(mounted, '扫码登录微信').props.onClick()
+  await tick()
+  assert.equal(polls, 0)
+  assert.equal(button(f.render(), '扫码登录微信')?.props.disabled, false)
 })
 
 test('malformed status is an unavailable service, not an empty account list', async () => {

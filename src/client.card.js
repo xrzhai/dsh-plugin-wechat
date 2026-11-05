@@ -322,6 +322,9 @@ window.__ModuleLoader__.load({
 			const [logoutNotice, setLogoutNotice] = react.useState("");
 			const [copied, setCopied] = react.useState(false);
 			const pollRef = react.useRef(null);
+			const mountedRef = react.useRef(false);
+			const startRequestRef = react.useRef(0);
+			const startInFlightRef = react.useRef(null);
 			// The session key lives in a ref as well as in state: the poll loop is
 			// asynchronous, and a closure over the render's `sessionKey` would keep
 			// the null the component started with forever.
@@ -334,6 +337,8 @@ window.__ModuleLoader__.load({
 					pollRef.current = null;
 				}
 			}, []);
+			const isCurrentPoll = key =>
+				mountedRef.current && typeof key === "string" && key !== "" && sessionKeyRef.current === key;
 
 			const refreshStatus = react.useCallback(async () => {
 				const request = ++statusRequestRef.current;
@@ -359,6 +364,7 @@ window.__ModuleLoader__.load({
 			const STATUS_POLL_MS = 15000;
 
 			react.useEffect(() => {
+				mountedRef.current = true;
 				refreshStatus();
 				// The background refresh is a browser affordance: it exists to notice
 				// changes made on another device and it watches the window and the
@@ -413,6 +419,8 @@ window.__ModuleLoader__.load({
 				}
 
 				return () => {
+					mountedRef.current = false;
+					startRequestRef.current += 1;
 					if (watch) {
 						win.removeEventListener("focus", onFocus);
 						doc.removeEventListener("visibilitychange", onVisibility);
@@ -421,86 +429,128 @@ window.__ModuleLoader__.load({
 						clearTimeout(timer);
 						timer = null;
 					}
+					// This effect deliberately does not depend on `sessionKey`: doing so
+					// would tear down and recreate the whole status watcher on every
+					// login transition. The live key is therefore read from its ref.
+					const activeSessionKey = sessionKeyRef.current;
 					stopPolling();
-					if (sessionKey) ctx.remote.weixin.cancel(sessionKey).catch(() => {});
+					if (activeSessionKey) ctx.remote.weixin.cancel(activeSessionKey).catch(() => {});
 				};
 			}, [refreshStatus, stopPolling]);
 
 			const start = async () => {
+				if (startInFlightRef.current) return startInFlightRef.current;
 				setMessage("");
 				setCopied(false);
+				const request = ++startRequestRef.current;
+				const task = (async () => {
+					try {
+						const r = await callRemote(() => ctx.remote.weixin.startLogin());
+						if (!mountedRef.current || request !== startRequestRef.current) {
+							const lateKey = r?.sessionKey;
+							// A shared start can legitimately return the key already selected by a
+							// newer request in this component. Only cancel a key this stale result
+							// alone owns.
+							if (lateKey && lateKey !== sessionKeyRef.current) {
+								await ctx.remote.weixin.cancel(lateKey).catch(() => {});
+							}
+							return;
+						}
+						if (r?.status === "cancelled") {
+							stopPolling();
+							setSessionKey(null);
+							setQrUrl(null);
+							setQrDataUrl(null);
+							setState({ phase: "idle" });
+							return;
+						}
+						setQrUrl(r?.qrcodeUrl ?? null);
+						setQrDataUrl(r?.qrDataUrl ?? null);
+						setSessionKey(r?.sessionKey);
+						setState({ phase: "qr" });
+						stopPolling();
+						sessionKeyRef.current = r?.sessionKey ?? null;
+						// The server holds each status request open for ~30s, so this is a
+						// self-scheduling loop rather than a fixed interval: the next call is
+						// queued only once the previous one has come back. A 1s interval left
+						// ~30 requests in flight at once and swallowed every answer -- which is
+						// where a scan shows up -- so the card could never leave the QR page.
+						const tick = async () => {
+							pollRef.current = null;
+							const key = sessionKeyRef.current;
+							if (!isCurrentPoll(key)) return;
+							let next = false;
+							try {
+								const p = await callRemote(() => ctx.remote.weixin.poll(key));
+								if (!isCurrentPoll(key)) return;
+								if (p.status === "confirmed") {
+									stopPolling();
+									setState({ phase: "confirmed" });
+									setMessage(p.accountId ? `${t("Bound account", "已绑定账号")}: ${p.accountId}` : "");
+									refreshStatus();
+								} else if (p.status === "cancelled") {
+									// cancel()/logout() removed the host-side session while this request
+									// was open. It is terminal; retrying would only produce `no_login`.
+									stopPolling();
+									setSessionKey(null);
+									setState({ phase: "idle" });
+									setMessage("");
+								} else if (p.status === "need_verifycode") {
+									setState({ phase: "needcode" });
+									setMessage(p.message ?? "");
+									next = true;
+								} else if (p.status === "refreshed") {
+									setQrUrl(p.qrcodeUrl ?? null);
+									setQrDataUrl(p.qrDataUrl ?? null);
+									setState({ phase: "qr" });
+									next = true;
+								} else if (p.status === "failed") {
+									stopPolling();
+									setState({ phase: "failed" });
+									setMessage(p.message ?? "");
+									// The host can already hold a credential when a login reports failure,
+									// so re-read the real state instead of trusting the message alone.
+									refreshStatus();
+								} else if (p.status === "alreadyBound") {
+									// The bot is still bound on the server but this host no longer holds
+									// the token, and only the phone can break that link. It is a dead end
+									// until then, so it gets its own state rather than a red caption.
+									stopPolling();
+									setState({ phase: "blocked" });
+									setMessage(p.message ?? "");
+									refreshStatus();
+								} else {
+									next = true;
+								}
+							} catch (err) {
+								if (!isCurrentPoll(key)) return;
+								// A forgotten session is terminal: the host no longer holds this login,
+								// so polling it again can only fail. Anything else is transient.
+								if (err?.code === "no_login") {
+									stopPolling();
+									setState({ phase: "failed" });
+									setMessage(t("This login is no longer active. Scan again to log in.", "本次登录已失效，请重新扫码登录。"));
+									refreshStatus();
+								} else {
+									next = true;
+								}
+							}
+							if (next && isCurrentPoll(key)) {
+								pollRef.current = setTimeout(tick, 1000);
+							}
+						};
+						pollRef.current = setTimeout(tick, 0);
+					} catch (err) {
+						if (!mountedRef.current || request !== startRequestRef.current) return;
+						setState({ phase: "failed" });
+						setMessage(String(err?.message ?? err));
+					}
+				})();
+				startInFlightRef.current = task;
 				try {
-					const r = await callRemote(() => ctx.remote.weixin.startLogin());
-					setQrUrl(r?.qrcodeUrl ?? null);
-					setQrDataUrl(r?.qrDataUrl ?? null);
-					setSessionKey(r?.sessionKey);
-					setState({ phase: "qr" });
-					stopPolling();
-					sessionKeyRef.current = r?.sessionKey ?? null;
-					// The server holds each status request open for ~30s, so this is a
-					// self-scheduling loop rather than a fixed interval: the next call is
-					// queued only once the previous one has come back. A 1s interval left
-					// ~30 requests in flight at once and swallowed every answer -- which is
-					// where a scan shows up -- so the card could never leave the QR page.
-					const tick = async () => {
-						pollRef.current = null;
-						const key = sessionKeyRef.current;
-						if (!key) return;
-						let next = false;
-						try {
-							const p = await callRemote(() => ctx.remote.weixin.poll(key));
-							if (p.status === "confirmed") {
-								stopPolling();
-								setState({ phase: "confirmed" });
-								setMessage(p.accountId ? `${t("Bound account", "已绑定账号")}: ${p.accountId}` : "");
-								refreshStatus();
-							} else if (p.status === "need_verifycode") {
-								setState({ phase: "needcode" });
-								setMessage(p.message ?? "");
-								next = true;
-							} else if (p.status === "refreshed") {
-								setQrUrl(p.qrcodeUrl ?? null);
-								setQrDataUrl(p.qrDataUrl ?? null);
-								setState({ phase: "qr" });
-								next = true;
-							} else if (p.status === "failed") {
-								stopPolling();
-								setState({ phase: "failed" });
-								setMessage(p.message ?? "");
-								// The host can already hold a credential when a login reports failure,
-								// so re-read the real state instead of trusting the message alone.
-								refreshStatus();
-							} else if (p.status === "alreadyBound") {
-								// The bot is still bound on the server but this host no longer holds
-								// the token, and only the phone can break that link. It is a dead end
-								// until then, so it gets its own state rather than a red caption.
-								stopPolling();
-								setState({ phase: "blocked" });
-								setMessage(p.message ?? "");
-								refreshStatus();
-							} else {
-								next = true;
-							}
-						} catch (err) {
-							// A forgotten session is terminal: the host no longer holds this login,
-							// so polling it again can only fail. Anything else is transient.
-							if (err?.code === "no_login") {
-								stopPolling();
-								setState({ phase: "failed" });
-								setMessage(t("This login is no longer active. Scan again to log in.", "本次登录已失效，请重新扫码登录。"));
-								refreshStatus();
-							} else {
-								next = true;
-							}
-						}
-						if (next && sessionKeyRef.current) {
-							pollRef.current = setTimeout(tick, 1000);
-						}
-					};
-					pollRef.current = setTimeout(tick, 0);
-				} catch (err) {
-					setState({ phase: "failed" });
-					setMessage(String(err?.message ?? err));
+					await task;
+				} finally {
+					if (startInFlightRef.current === task) startInFlightRef.current = null;
 				}
 			};
 
