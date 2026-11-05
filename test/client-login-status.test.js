@@ -21,7 +21,7 @@ async function waitFor(predicate, message) {
 
 // Load the shipped browser chunk and exercise the real account component with
 // isolated hook state. No browser, account files, or live RPC is involved.
-function fixture(status, { component = 'LoginSection', configRemote, weixin, timers } = {}) {
+function fixture(status, { component = 'LoginSection', configRemote, weixin, timers, confirm, locale = 'zh' } = {}) {
   let slots = [], cursor = 0, effects = [], mounted = false
   const cleanups = []
   const react = {
@@ -42,9 +42,10 @@ function fixture(status, { component = 'LoginSection', configRemote, weixin, tim
     window: { __ModuleLoader__: { load: entry => { module = entry.factory(() => react) } } },
     setTimeout: timers?.setTimeout ?? setTimeout,
     clearTimeout: timers?.clearTimeout ?? clearTimeout,
+    confirm,
   })
   const ctx = { remote: { weixin: { status, ...weixin }, weixinConfig: configRemote } }
-  const t = (_en, zh) => zh
+  const t = locale === 'en' ? (en, _zh) => en : (_en, zh) => zh
   const created = []
   const createElement = (type, props, ...children) => {
     const node = { type, props: props ?? {}, children: children.flat(Infinity) }
@@ -438,4 +439,100 @@ test('primary tabs are account + persona; advanced reveals sessions + gateway', 
   key('ArrowLeft')
   assert.deepEqual(tabs(f.render()).map(node => node.props['aria-selected']), [true, false])
   assert.equal(prevented, 2)
+})
+
+async function topicDeletePrompt(lines, locale = 'zh') {
+  let prompt
+  const f = fixture(undefined, {
+    component: 'SessionsSection',
+    locale,
+    confirm: message => {
+      prompt = message
+      return false
+    },
+    weixin: {
+      sessions: async () => ({
+        conversations: [{
+          conversationId: 'wechat-chat',
+          accountId: 'account',
+          active: lines.find((line) => line.active)?.sessionId,
+          lines: lines.map(({ active: _active, ...line }) => line),
+        }],
+      }),
+    },
+  })
+  const tree = await f.mount()
+  return { f, tree, prompts: () => prompt }
+}
+
+test('topic deletion confirms that removing the active topic switches to the first remaining topic', async () => {
+  const view = await topicDeletePrompt([
+    { sessionId: 'old', title: '旧话题' },
+    { sessionId: 'current', title: '当前话题', active: true },
+  ])
+  const deletes = nodes(view.tree).filter(node => node.type === 'button' && text(node) === '删除')
+  deletes[1].props.onClick()
+
+  assert.equal(
+    view.prompts(),
+    '确定移除当前话题？侧栏会移除它，后续消息会进入剩余的第一个话题；DSH 里的聊天记录仍会保留，其他话题不受影响。',
+  )
+})
+
+test('deleting an inactive topic leaves the current topic and history intact', async () => {
+  const view = await topicDeletePrompt([
+    { sessionId: 'old', title: '旧话题' },
+    { sessionId: 'current', title: '当前话题', active: true },
+  ])
+  const deletes = nodes(view.tree).filter(node => node.type === 'button' && text(node) === '删除')
+  deletes[0].props.onClick()
+
+  assert.equal(
+    view.prompts(),
+    '确定移除这个话题？侧栏会移除它；DSH 里的聊天记录仍会保留，其他话题和当前使用中的话题都不受影响。',
+  )
+})
+
+test('deleting the last topic explains when the list is recreated', async () => {
+  const view = await topicDeletePrompt([
+    { sessionId: 'only', title: '唯一话题', active: true },
+  ])
+  const del = nodes(view.tree).find(node => node.type === 'button' && text(node) === '删除')
+  del.props.onClick()
+
+  assert.equal(
+    view.prompts(),
+    '确定移除最后一个话题？这个话题列表会暂时清空，但 DSH 里的聊天记录仍会保留；下次在微信发消息时会自动创建新话题。',
+  )
+})
+
+test('topic deletion prompts stay in sync in English', async () => {
+  const active = await topicDeletePrompt([
+    { sessionId: 'old', title: 'Old' },
+    { sessionId: 'current', title: 'Current', active: true },
+  ], 'en')
+  nodes(active.tree).filter(node => node.type === 'button' && text(node) === 'Delete')[1].props.onClick()
+  assert.equal(
+    active.prompts(),
+    'Remove the current topic? It will leave this sidebar, and your next message will go to the first remaining topic. Its DSH chat history is kept, and the other topics are unaffected.',
+  )
+
+  const inactive = await topicDeletePrompt([
+    { sessionId: 'old', title: 'Old' },
+    { sessionId: 'current', title: 'Current', active: true },
+  ], 'en')
+  nodes(inactive.tree).filter(node => node.type === 'button' && text(node) === 'Delete')[0].props.onClick()
+  assert.equal(
+    inactive.prompts(),
+    'Remove this topic? It will leave this sidebar. Its DSH chat history is kept; the other topics and the one currently in use are unaffected.',
+  )
+
+  const last = await topicDeletePrompt([
+    { sessionId: 'only', title: 'Only', active: true },
+  ], 'en')
+  nodes(last.tree).find(node => node.type === 'button' && text(node) === 'Delete').props.onClick()
+  assert.equal(
+    last.prompts(),
+    'Remove the last topic? This topic list will be empty for now, but its DSH chat history is kept. Your next WeChat message will create a new topic.',
+  )
 })

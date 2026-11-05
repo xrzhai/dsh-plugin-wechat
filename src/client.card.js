@@ -47,6 +47,7 @@ window.__ModuleLoader__.load({
 				noticeStyle,
 				useLocaleText,
 			} = deps;
+			const LOGOUT_CONFIRM_PREFIX = "确定退出登录";
 
 			/**
 			 * When a saved option actually takes effect.
@@ -597,7 +598,7 @@ window.__ModuleLoader__.load({
 				const ok = globalThis.confirm?.(
 					t(
 						`Log out ${which || "this account"}? Its saved credentials are deleted and you will have to scan the QR code again.`,
-						`确定退出登录 ${which || "当前账号"}？将删除已保存的登录凭证，需要重新扫码才能再次使用。`,
+						`${LOGOUT_CONFIRM_PREFIX} ${which || "当前账号"}？将删除已保存的登录凭证，需要重新扫码才能再次使用。`,
 					),
 				);
 				if (ok === false) return;
@@ -698,7 +699,7 @@ window.__ModuleLoader__.load({
 				const ok = globalThis.confirm?.(
 					t(
 						`Log out ${account.label || account.accountId}? Its saved credentials are deleted and you will have to scan the QR code again.`,
-						`确定退出登录 ${account.label || account.accountId}？将删除该账号的登录凭证，需要重新扫码才能再次使用。`,
+						`${LOGOUT_CONFIRM_PREFIX} ${account.label || account.accountId}？将删除该账号的登录凭证，需要重新扫码才能再次使用。`,
 					),
 				);
 				if (ok === false) return;
@@ -1031,7 +1032,7 @@ window.__ModuleLoader__.load({
 				}
 			};
 
-			const removeOne = async (conversationId, index, lineCount) => {
+			const removeOne = async (conversationId, index, lineCount, isActive) => {
 				// The card's only destructive session action, so it asks first —
 				// same shape as logout. Deleting the line in use is allowed: the
 				// store falls back to the first surviving line, and deleting the
@@ -1041,11 +1042,15 @@ window.__ModuleLoader__.load({
 				const ok = globalThis.confirm?.(
 					t(
 						last
-							? "Delete this topic? The list will be empty, but its DSH session is kept. Your next WeChat message will add a topic back to the list."
-							: "Delete this topic? It will disappear from this list, but its DSH session is kept; the other topics in this chat are unaffected.",
+							? "Remove the last topic? This topic list will be empty for now, but its DSH chat history is kept. Your next WeChat message will create a new topic."
+							: isActive
+								? "Remove the current topic? It will leave this sidebar, and your next message will go to the first remaining topic. Its DSH chat history is kept, and the other topics are unaffected."
+								: "Remove this topic? It will leave this sidebar. Its DSH chat history is kept; the other topics and the one currently in use are unaffected.",
 						last
-							? "确定删除这个话题？删除后列表会清空，但 DSH 中的会话记录不会被删除。下次在微信发消息时，插件会重新建立列表项。"
-							: "确定删除这个话题？它不会再出现在列表里，但 DSH 中的会话记录不会被删除；这个微信会话的其他话题不受影响。",
+							? "确定移除最后一个话题？这个话题列表会暂时清空，但 DSH 里的聊天记录仍会保留；下次在微信发消息时会自动创建新话题。"
+							: isActive
+								? "确定移除当前话题？侧栏会移除它，后续消息会进入剩余的第一个话题；DSH 里的聊天记录仍会保留，其他话题不受影响。"
+								: "确定移除这个话题？侧栏会移除它；DSH 里的聊天记录仍会保留，其他话题和当前使用中的话题都不受影响。",
 					),
 				);
 				if (ok === false) return;
@@ -1138,7 +1143,7 @@ window.__ModuleLoader__.load({
 								// next message re-creates one), so no confirm can orphan
 								// the conversation.
 								createElement("button", {
-									onClick: () => void removeOne(conversation.conversationId, index, conversation.lines.length),
+									onClick: () => void removeOne(conversation.conversationId, index, conversation.lines.length, isActive),
 									disabled: busy,
 									style: buttonStyleFor(busy),
 								}, t("Delete", "删除")));

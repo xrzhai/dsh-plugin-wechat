@@ -24,6 +24,8 @@ import { readAssistantReply, readSettledTurns, describePending } from './session
 import { SessionDispatcher } from './session-dispatcher.js'
 import { baseSessionIdFor, scopedLineKey, SessionLines, runSessionCommand } from './sessions.js'
 
+const NO_RUNNING_REPLY = '现在没有正在处理的回复，不需要停止。'
+
 /**
  * `@deepseek-ai/dsh-llm` resolves only from inside a DSH profile, so it is
  * imported lazily: the module itself stays loadable (and testable) outside the
@@ -328,13 +330,13 @@ export class AgentBridge {
   #cancelRunningTurn(key, conversationId, accountId) {
     const sessionId = this.conversationTargets.get(key) ?? this.lines.active(conversationId, accountId)
     const record = sessionId === undefined ? undefined : this.sessions.get(sessionId)
-    if (record === undefined) return '当前没有正在跑的回合，不需要取消。'
-    if (record.busy !== true) return '当前没有正在跑的回合，不需要取消。'
+    if (record === undefined) return NO_RUNNING_REPLY
+    if (record.busy !== true) return NO_RUNNING_REPLY
     const agent = record.agent
     if (typeof agent?.cancel !== 'function') {
       // An older host without cancel() would otherwise look like success while
       // the turn keeps running — say so instead of lying.
-      return '这个宿主版本不支持中断回合，只能等它自己跑完。'
+      return '当前 DSH 版本不支持停止正在处理的回复；这次只能等它完成。'
     }
     try {
       // Marked BEFORE the call: the turn's own wait loop polls this flag and
@@ -344,32 +346,42 @@ export class AgentBridge {
     } catch (error) {
       record.cancelled = false
       this.errLog(`cancel failed for ${sessionId}: ${String(error)}`)
-      return `取消失败：${String(error)}`
+      return '没能发出停止请求；当前回复可能仍在继续。详细信息已写入日志。'
     }
-    this.log?.(`cancelled the running turn on ${sessionId} for ${conversationId}`)
-    return '已请求取消当前回合。'
+    this.log?.(`requested cancellation of the running turn on ${sessionId} for ${conversationId}`)
+    return '已发出停止请求；已经开始的操作不会回滚。'
   }
 
   async #compactSession(conversationId, accountId, arg) {
     if (String(arg ?? '').trim() !== '') return '用法：/compact（不带参数）'
     const record = await this.attach(conversationId, accountId)
     if (record.busy) {
-      return '当前会话正在执行任务，请等本轮回复完成后再执行 /compact。'
+      return '当前话题还在处理上一条消息，等它完成后再试 /compact。'
     }
+    let attempted = false
     try {
       const commands = this.ctx.get('commands')
       if (commands && typeof commands.execute === 'function') {
+        attempted = true
         const out = await commands.execute(record.agent, '/compact', [], AbortSignal.timeout(120_000))
         if (out?.result) {
           record.lastDeliveredSeq = this.#lastSeq(record.agent)
-          return out.result.text ?? (out.result.kind === 'success' ? '上下文已压缩。' : '上下文压缩失败。')
+          if (out.result.text !== null && out.result.text !== undefined) return out.result.text
+          if (out.result.kind === 'success') return '已整理当前话题的前文。'
+          this.errLog(`compact command failed for ${conversationId}: compact result kind=${String(out.result.kind ?? 'unknown')}`)
+          return '这次没能整理当前话题的前文；对话仍可继续。详细信息已写入日志。'
         }
       }
     } catch (error) {
       this.errLog(`compact command failed for ${conversationId}: ${String(error)}`)
-      return `上下文压缩失败：${String(error?.message ?? error)}`
+      return '这次没能整理当前话题的前文；对话仍可继续。详细信息已写入日志。'
     }
-    return '当前宿主环境未挂载 commands/compact 服务（已启用 400k 自动压缩）。'
+    if (attempted) {
+      this.errLog(`compact command failed for ${conversationId}: no result`)
+      return '这次没能整理当前话题的前文；对话仍可继续。详细信息已写入日志。'
+    }
+    this.errLog(`compact command unavailable for ${conversationId}: commands service is not mounted`)
+    return '当前环境暂时不能手动整理前文，请稍后再试。'
   }
 
   async #executeHostCommand(conversationId, accountId, raw, name) {
