@@ -37,6 +37,7 @@
  */
 
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -149,9 +150,23 @@ function die(message, hint) {
 	throw error
 }
 
+/**
+ * On Windows, npm and pnpm are .cmd shims which spawnSync cannot execute
+ * directly. Let cmd.exe resolve and run those shims while keeping every other
+ * executable on the normal PATH lookup path.
+ */
+function spawnPortable(command, args, options = {}) {
+	const throughCmd = process.platform === 'win32' && (command === 'npm' || command === 'pnpm')
+	if (!throughCmd) return spawnSync(command, args, { windowsHide: true, ...options })
+	return spawnSync(process.env.ComSpec ?? 'cmd.exe', ['/d', '/s', '/c', `${command}.cmd`, ...args], {
+		windowsHide: true,
+		...options,
+	})
+}
+
 /** Run a command, inheriting stdio, and throw on failure. */
 function run(command, args, options = {}) {
-	const result = spawnSync(command, args, { cwd: ROOT, stdio: 'inherit', ...options })
+	const result = spawnPortable(command, args, { cwd: ROOT, stdio: 'inherit', ...options })
 	if (result.error) throw result.error
 	if (result.status !== 0) throw new Error(`${command} ${args.join(' ')} exited ${result.status}`)
 	return result
@@ -159,8 +174,8 @@ function run(command, args, options = {}) {
 
 /** Run a command and capture its stdout, trimmed. Returns '' on failure. */
 function capture(command, args, options = {}) {
-	const result = spawnSync(command, args, { cwd: ROOT, encoding: 'utf8', ...options })
-	return result.status === 0 ? String(result.stdout).trim() : ''
+	const result = spawnPortable(command, args, { cwd: ROOT, encoding: 'utf8', ...options })
+	return result.status === 0 ? String(result.stdout).replace(/\r\n/g, '\n').trim() : ''
 }
 
 function git(args, options = {}) {
@@ -168,41 +183,38 @@ function git(args, options = {}) {
 }
 
 function has(command) {
-	return capture('sh', ['-c', `command -v ${command}`]) !== ''
+	const result = spawnPortable(command, ['--version'], { cwd: ROOT, stdio: 'ignore' })
+	return result.error === undefined && result.status === 0
 }
 
 /**
- * Which release manifest disagrees with package.json, if any.
+ * Whether pnpm considers the committed lockfile current with package.json.
  *
- * package-lock.json records the package version twice (`version` at the top and
- * `packages[""].version` inside the root package), and neither is rewritten by
- * `npm test`, `npm pack`, or this script's own bump. That is why the lockfile
- * sat at 0.1.1 from the first release all the way through 0.9.2 while
- * package.json said otherwise: nothing ever looked. Preflight turns that into
- * a hard stop.
+ * pnpm-lock.yaml does not duplicate the root package version, so a version-only
+ * bump must leave it untouched. Frozen, lockfile-only, offline mode verifies
+ * that the importers still match package.json without installing packages,
+ * reaching the registry, or rewriting the lockfile.
  *
  * Exported (and the release only runs when this file is the entry point) so a
  * test can point it at fixture manifests without starting a release.
  */
-export function manifestVersionProblems(root = ROOT) {
+export function manifestVersionProblems(root = ROOT, { env = process.env } = {}) {
 	const pkgVersion = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version
-	let lock
-	try {
-		lock = JSON.parse(fs.readFileSync(path.join(root, 'package-lock.json'), 'utf8'))
-	} catch (error) {
-		// An unreadable lockfile cannot be compared, which is not permission to
-		// ship it: report it the same way as a mismatch.
-		return { pkgVersion, problems: [`package-lock.json cannot be read as JSON: ${error.message}`] }
-	}
-	const seen = [
-		['lockfile "version"', lock.version],
-		['lockfile packages[""].version', lock.packages?.['']?.version],
-	]
+	const lockPath = path.join(root, 'pnpm-lock.yaml')
+	if (!fs.existsSync(lockPath)) return { pkgVersion, problems: ['pnpm-lock.yaml is missing'] }
+
+	const result = spawnPortable(
+		'pnpm',
+		['install', '--lockfile-only', '--frozen-lockfile', '--ignore-scripts', '--offline', '--reporter=silent'],
+		{ cwd: root, encoding: 'utf8', env },
+	)
+	if (result.error) return { pkgVersion, problems: [`pnpm-lock.yaml cannot be verified: ${result.error.message}`] }
+	if (result.status === 0) return { pkgVersion, problems: [] }
+
+	const detail = String(result.stderr || result.stdout || '').trim().replace(/\r\n/g, '\n')
 	return {
 		pkgVersion,
-		problems: seen
-			.filter(([, value]) => value !== pkgVersion)
-			.map(([where, value]) => `${where} says ${value ?? '(missing)'}`),
+		problems: [`pnpm-lock.yaml is stale or invalid${detail === '' ? '' : `: ${detail.slice(-1200)}`}`],
 	}
 }
 
@@ -220,25 +232,23 @@ function preflight() {
 		die(`"${version}" is not a plain semver version`, 'expected something like 0.4.0 (no leading v)')
 	}
 
-	for (const tool of ['node', 'npm', 'git']) {
+	for (const tool of ['node', 'npm', 'pnpm', 'git']) {
 		if (!has(tool)) die(`${tool} is not on PATH`)
 	}
-	ok(`node ${process.version}, npm ${capture('npm', ['--version'])}`)
+	ok(`node ${process.version}, npm ${capture('npm', ['--version'])}, pnpm ${capture('pnpm', ['--version'])}`)
 
-	// The lockfile is released alongside package.json: each carries a version,
-	// and a stale one ships a tree that disagrees with itself. Checked before
-	// anything touches git or the registry, so the operator gets told to run
-	// one npm command instead of debugging a diff later.
+	// Checked before anything touches git or the registry, so a stale lockfile
+	// never reaches the release commit or tarball.
 	const manifests = manifestVersionProblems()
 	if (manifests.problems.length === 0) {
-		ok(`package-lock.json matches package.json ${manifests.pkgVersion}`)
+		ok(`pnpm-lock.yaml is current with package.json ${manifests.pkgVersion}`)
 	} else if (allowStaleLockfile) {
-		warn(`package-lock.json disagrees with package.json ${manifests.pkgVersion}: ${manifests.problems.join('; ')}`)
-		warn('continuing because --allow-stale-lockfile was given — this release ships a stale lockfile')
+		warn(`pnpm-lock.yaml cannot be verified against package.json ${manifests.pkgVersion}: ${manifests.problems.join('; ')}`)
+		warn('continuing because --allow-stale-lockfile was given — this release ships an unverified lockfile')
 	} else {
 		die(
-			`package-lock.json disagrees with package.json ${manifests.pkgVersion}`,
-			`${manifests.problems.join('\n')}\nrefresh it with:  npm install --package-lock-only --cache "$PWD/.npmcache"\n(or pass --allow-stale-lockfile to release anyway)`,
+			`pnpm-lock.yaml is not current with package.json ${manifests.pkgVersion}`,
+			`${manifests.problems.join('\n')}\nrefresh it with:  pnpm install --lockfile-only\n(or pass --allow-stale-lockfile to release anyway)`,
 		)
 	}
 
@@ -390,23 +400,9 @@ function bumpVersion(previousVersion) {
 	fs.writeFileSync(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`)
 	ok(`package.json ${previousVersion} → ${version}`)
 
-	// The lockfile names the same version in two places, and preflight refuses
-	// a tree where they disagree. A bump that left them behind would make the
-	// release commit itself the drift it is supposed to prevent.
-	const lockPath = path.join(ROOT, 'package-lock.json')
-	const lock = JSON.parse(fs.readFileSync(lockPath, 'utf8'))
-	if (lock.version !== version || lock.packages?.['']?.version !== version) {
-		// Report the lockfile's OWN old version, not package.json's: a lockfile
-		// that had been stale for releases would otherwise be described as
-		// having moved from a version it never carried.
-		const lockWas = lock.version ?? lock.packages?.['']?.version ?? '(missing)'
-		lock.version = version
-		if (lock.packages?.[''] !== undefined) lock.packages[''].version = version
-		fs.writeFileSync(lockPath, `${JSON.stringify(lock, null, 2)}\n`)
-		ok(`package-lock.json ${lockWas} → ${version}`)
-	} else {
-		ok('package-lock.json already names this version')
-	}
+	// pnpm-lock.yaml records importer dependency specs, not the root package
+	// version. A version-only bump therefore leaves it byte-for-byte unchanged;
+	// preflight has already verified that those importer specs are current.
 
 	// The settings card shows the installed version from a constant it cannot
 	// import out of package.json; the release script is what keeps them in
@@ -486,8 +482,10 @@ function smokeTestBridge(extractDir) {
 	if (!fs.existsSync(bridge)) {
 		die('the tarball does not contain bin/asr-bridge.py', 'check the "files" field and bin/ contents')
 	}
+	// Windows does not expose POSIX execute bits. The bridge is always launched
+	// through Python, so the Unix executable-bit assertion is irrelevant there.
 	const mode = fs.statSync(bridge).mode
-	if ((mode & 0o111) === 0) die('bin/asr-bridge.py lost its executable bit in the tarball')
+	if (process.platform !== 'win32' && (mode & 0o111) === 0) die('bin/asr-bridge.py lost its executable bit in the tarball')
 
 	// Python with a whisper engine is what a user needs; without one the bridge
 	// still must answer the protocol, which is all this asserts.
@@ -623,7 +621,7 @@ function publish(tarball) {
 		return false
 	}
 
-	const result = spawnSync('npm', ['publish'], { cwd: ROOT, stdio: 'inherit' })
+	const result = spawnPortable('npm', ['publish'], { cwd: ROOT, stdio: 'inherit' })
 	if (result.status !== 0) {
 		die(
 			'npm publish failed',
@@ -654,7 +652,7 @@ function awaitRegistry({ timeoutMs = 180_000 } = {}) {
 			return false
 		}
 		say('.')
-		spawnSync('sleep', ['4'])
+		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 4_000)
 	}
 	say('\n')
 	ok(`the registry now serves ${version}`)
@@ -677,7 +675,10 @@ function verifyPublished(tarball) {
 		return
 	}
 
-	const localSha1 = tarball !== undefined && fs.existsSync(tarball) ? capture('shasum', [tarball]).split(' ')[0] : ''
+	const localSha1 =
+		tarball !== undefined && fs.existsSync(tarball)
+			? createHash('sha1').update(fs.readFileSync(tarball)).digest('hex')
+			: ''
 	const remoteSha1 = parsed?.dist?.shasum ?? ''
 	if (localSha1 === '') {
 		note(`no local tarball to compare against — registry sha1 is ${remoteSha1}`)
@@ -788,11 +789,9 @@ function confirm(previousVersion) {
 		return
 	}
 	process.stdout.write(`\nRelease ${previousVersion} → ${C.bold}${version}${C.off} and publish to npm? [y/N] `)
-	const answer = spawnSync(
-		'sh',
-		['-c', 'read -r line </dev/tty || exit 1; printf %s "$line"'],
-		{ stdio: ['inherit', 'pipe', 'inherit'], encoding: 'utf8' },
-	).stdout ?? ''
+	const input = Buffer.alloc(256)
+	const length = fs.readSync(process.stdin.fd, input, 0, input.length, null)
+	const answer = input.subarray(0, length).toString('utf8')
 	if (!/^\s*y(es)?\s*$/i.test(answer)) die('aborted (answer "y" to release)')
 	ok('confirmed')
 }
@@ -921,7 +920,7 @@ function main() {
  * forgot `src/client.js`, so a dry run reported "tree unchanged" while leaving
  * the card's PLUGIN_VERSION bumped.
  */
-export const VERSION_FILES = ['package.json', 'package-lock.json', 'src/client.js', 'README.md', 'README.en.md', 'CHANGELOG.md']
+export const VERSION_FILES = ['package.json', 'src/client.js', 'README.md', 'README.en.md', 'CHANGELOG.md']
 
 /** Read the files the version bump rewrites, so a dry run can put them back. */
 export function snapshotTextFiles(root = ROOT) {
