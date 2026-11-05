@@ -5,13 +5,15 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { backupsDir, createBackup } from '../src/backup.js'
+import { backupsDir, createBackup, stampFor } from '../src/backup.js'
 import { sealState } from '../src/backup-crypto.js'
 import { lockFile } from '../src/instance-lock.js'
+import { readReminders } from '../src/message/scheduler.js'
 
 const REPO_ROOT = path.resolve(import.meta.dirname, '..')
 const CLI = path.join(REPO_ROOT, 'bin', 'backup.mjs')
 const PASSPHRASE = 'instance-check-test-passphrase'
+const SEALED_RECOVERY_NAME = 'reminders.recovery-0123456789abcdef.json'
 
 function fixture(t) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'weixin-backup-cli-'))
@@ -109,6 +111,51 @@ test('restore proceeds from an OS-confirmed stale lock and says why', (t) => {
   assert.equal(readMarker(f.root), 'from-backup')
 })
 
+test('restore CLI reports where it preserved a conflicting backup recovery copy', (t) => {
+  const f = fixture(t)
+  const original = '{"seq":1,"items":['
+  fs.writeFileSync(path.join(f.root, 'reminders.json'), original)
+  readReminders(f.root, () => {})
+  const recoveryName = fs.readdirSync(f.root).find((name) => /^reminders\.recovery-[0-9a-f]+\.json$/.test(name))
+  assert.ok(recoveryName)
+  const saved = createBackup(f.root, { now: Date.parse('2026-11-05T01:02:03Z'), warn() {} })
+  fs.writeFileSync(path.join(f.root, recoveryName), '{"user":"different recovery copy"}\n')
+
+  const result = runCli(f, ['restore', saved.id, '--yes'])
+
+  assert.equal(result.status, 0, result.stderr)
+  const match = result.stdout.match(/backup copy saved to (.+)\r?\n/)
+  assert.ok(match, result.stdout)
+  assert.equal(fs.readFileSync(match[1].trim(), 'utf8'), original)
+  assert.match(result.stdout, new RegExp(`kept live recovery ${recoveryName.replaceAll('.', '\\.')}`))
+})
+
+test('restore CLI exits nonzero when a conflict copy cannot leave backup rotation', (t) => {
+  const f = fixture(t)
+  const original = '{"seq":2,"items":['
+  fs.writeFileSync(path.join(f.root, 'reminders.json'), original)
+  readReminders(f.root, () => {})
+  const recoveryName = fs.readdirSync(f.root).find((name) => /^reminders\.recovery-[0-9a-f]+\.json$/.test(name))
+  assert.ok(recoveryName)
+  const saved = createBackup(f.root, { now: Date.parse('2026-11-05T01:02:03Z'), warn() {} })
+  fs.writeFileSync(path.join(f.root, recoveryName), '{"user":"different recovery copy"}\n')
+
+  // The stamp has one-second precision. Pre-occupy the plausible restore
+  // destinations so the no-overwrite safety copy deterministically fails.
+  const now = Date.now()
+  for (let offset = -1; offset <= 20; offset += 1) {
+    const aside = path.join(backupsDir(f.root), `pre-restore-${stampFor(now + offset * 1_000)}`)
+    fs.mkdirSync(aside, { recursive: true })
+    fs.writeFileSync(path.join(aside, recoveryName), '{"occupied":true}\n')
+  }
+
+  const result = runCli(f, ['restore', saved.id, '--yes'])
+
+  assert.equal(result.status, 1, result.stderr)
+  assert.match(result.stderr, /but its backup copy was not preserved outside rotation/)
+  assert.match(result.stderr, /preservation error: EEXIST|preservation error: .*exist/i)
+})
+
 test('restore does not treat a missing lock as proof that DSH is stopped', (t) => {
   const f = fixture(t)
   const saved = backup(f)
@@ -156,6 +203,79 @@ test('open --dry-run does not require instance evidence because it writes nothin
   assert.equal(result.status, 0, result.stderr)
   assert.match(result.stdout, /would write 2 file\(s\)/)
   assert.equal(readMarker(f.root), 'live-state')
+})
+
+test('open --dry-run marks a conflicting sealed recovery as a safe preservation', (t) => {
+  const f = fixture(t)
+  const archiveState = '{"source":"archive","items":[null'
+  const liveRecovery = '{"source":"live recovery"}\n'
+  fs.writeFileSync(path.join(f.root, 'config.json'), '{"source":"archive"}\n')
+  fs.writeFileSync(path.join(f.root, SEALED_RECOVERY_NAME), archiveState)
+  const archive = path.join(f.base, 'state.enc')
+  sealState(f.root, { passphrase: PASSPHRASE, outFile: archive, includeMedia: false })
+  fs.writeFileSync(path.join(f.root, 'config.json'), '{"source":"live"}\n')
+  fs.writeFileSync(path.join(f.root, SEALED_RECOVERY_NAME), liveRecovery)
+
+  const result = runCli(f, ['open', archive, '--dry-run'])
+
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(result.stdout, /would write 2 file\(s\).*1 conflict-safe/)
+  assert.match(result.stdout, /pre-restore paths are estimates; the actual restore uses a new timestamp/)
+  assert.match(result.stdout, /! reminders\.recovery-0123456789abcdef\.json \(keep live; archive copy -> backups[\\/]pre-restore-/)
+  assert.equal(fs.readFileSync(path.join(f.root, 'config.json'), 'utf8'), '{"source":"live"}\n')
+  assert.equal(fs.readFileSync(path.join(f.root, SEALED_RECOVERY_NAME), 'utf8'), liveRecovery)
+  assert.deepEqual(preRestoreDirs(f.root), [])
+})
+
+test('open preserves a conflicting sealed recovery and reports both copies', (t) => {
+  const f = fixture(t)
+  const archiveState = '{"source":"archive","items":[null'
+  const liveRecovery = '{"source":"live recovery"}\n'
+  fs.writeFileSync(path.join(f.root, 'config.json'), '{"source":"archive"}\n')
+  fs.writeFileSync(path.join(f.root, SEALED_RECOVERY_NAME), archiveState)
+  const archive = path.join(f.base, 'state.enc')
+  sealState(f.root, { passphrase: PASSPHRASE, outFile: archive, includeMedia: false })
+  fs.writeFileSync(path.join(f.root, 'config.json'), '{"source":"live"}\n')
+  fs.writeFileSync(path.join(f.root, SEALED_RECOVERY_NAME), liveRecovery)
+
+  const result = runCli(f, ['open', archive, '--yes'])
+
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(fs.readFileSync(path.join(f.root, 'config.json'), 'utf8'), '{"source":"archive"}\n')
+  assert.equal(fs.readFileSync(path.join(f.root, SEALED_RECOVERY_NAME), 'utf8'), liveRecovery)
+  const match = result.stdout.match(/archive copy saved to (.+)\r?\n/)
+  assert.ok(match, result.stdout)
+  assert.equal(fs.readFileSync(match[1].trim(), 'utf8'), archiveState)
+  assert.equal(preRestoreDirs(f.root).length, 1)
+})
+
+test('open exits nonzero before ordinary writes when a sealed recovery cannot be preserved', (t) => {
+  const f = fixture(t)
+  const archiveState = '{"source":"archive","items":[null'
+  const liveConfig = '{"source":"live"}\n'
+  const liveRecovery = '{"source":"live recovery"}\n'
+  fs.writeFileSync(path.join(f.root, 'config.json'), '{"source":"archive"}\n')
+  fs.writeFileSync(path.join(f.root, SEALED_RECOVERY_NAME), archiveState)
+  const archive = path.join(f.base, 'state.enc')
+  sealState(f.root, { passphrase: PASSPHRASE, outFile: archive, includeMedia: false })
+  fs.writeFileSync(path.join(f.root, 'config.json'), liveConfig)
+  fs.writeFileSync(path.join(f.root, SEALED_RECOVERY_NAME), liveRecovery)
+
+  const now = Date.now()
+  for (let offset = -1; offset <= 20; offset += 1) {
+    const aside = path.join(backupsDir(f.root), `pre-restore-${stampFor(now + offset * 1_000)}`)
+    fs.mkdirSync(aside, { recursive: true })
+    fs.writeFileSync(path.join(aside, SEALED_RECOVERY_NAME), '{"occupied":true}\n')
+  }
+
+  const result = runCli(f, ['open', archive, '--yes'])
+
+  assert.equal(result.status, 1, result.stderr)
+  assert.match(result.stderr, /sealed restore aborted: sealed restore may be partial/)
+  assert.match(result.stderr, /source archive was not changed/)
+  assert.ok(result.stderr.includes(`archive remains at ${archive}`), result.stderr)
+  assert.equal(fs.readFileSync(path.join(f.root, 'config.json'), 'utf8'), liveConfig)
+  assert.equal(fs.readFileSync(path.join(f.root, SEALED_RECOVERY_NAME), 'utf8'), liveRecovery)
 })
 
 test('usage says to exit the agent harness before confirming restore with --yes', (t) => {

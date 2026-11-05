@@ -16,6 +16,7 @@
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
+import { backupsDir, isReminderRecoveryFile, stampFor, writeFileExclusive } from './backup.js'
 
 export const SEALED_MAGIC = 'DSHWX1'
 export const SEALED_VERSION = 1
@@ -132,30 +133,117 @@ export function openState(file, { passphrase }) {
   return { version: payload.version, sealedAt: payload.sealedAt, files }
 }
 
+function sameBufferAsFile(file, buffer) {
+  try {
+    return fs.readFileSync(file).equals(buffer)
+  } catch {
+    return false
+  }
+}
+
 /**
- * 把 {@link openState} 的结果写回状态目录。**先全量校验，再写一个字节**：
- * 口令错了不会留下半套状态。
+ * Build the sealed-restore plan without writing. Ordinary files retain the
+ * existing overwrite behavior; only root reminder recovery files are protected.
  *
  * @param {string} stateRoot
  * @param {Map<string, Buffer>} files
- * @param {{ warn?: (line: string) => void }} [options]
- * @returns {{ restored: number }}
+ * @param {{ now?: number }} [options]
  */
-export function restoreSealed(stateRoot, files, { warn } = {}) {
-  const planned = []
+export function planSealedRestore(stateRoot, files, { now = Date.now() } = {}) {
+  const root = path.resolve(stateRoot)
+  const preservedRoot = path.join(backupsDir(root), `pre-restore-${stampFor(now)}`)
+  const entries = []
+  const recoveryConflicts = []
   for (const [rel, buffer] of files) {
-    const target = path.resolve(stateRoot, rel)
-    if (!target.startsWith(path.resolve(stateRoot) + path.sep)) {
+    const target = path.resolve(root, rel)
+    if (!target.startsWith(root + path.sep)) {
       throw new Error(`refusing to write outside the state root: ${rel}`)
     }
-    planned.push([target, buffer])
+
+    const exists = fs.existsSync(target)
+    let action = exists ? 'overwrite' : 'new'
+    const entry = { rel, target, buffer, action }
+    if (isReminderRecoveryFile(rel)) {
+      if (!exists) action = 'new'
+      else if (sameBufferAsFile(target, buffer)) action = 'same'
+      else action = 'conflict'
+      entry.action = action
+      if (action === 'conflict') {
+        entry.preservedPath = path.join(preservedRoot, rel)
+        recoveryConflicts.push(entry)
+      }
+    }
+    entries.push(entry)
   }
-  for (const [target, buffer] of planned) {
-    fs.mkdirSync(path.dirname(target), { recursive: true })
-    const temp = `${target}.restoring`
-    fs.writeFileSync(temp, buffer)
-    fs.renameSync(temp, target)
+  return { entries, recoveryConflicts, preservedRoot }
+}
+
+/**
+ * 把 {@link openState} 的结果写回状态目录。所有路径先校验；口令错误会在
+ * `openState` 阶段提前失败。通过校验后的磁盘 I/O 若中途失败，错误会报告已
+ * 完成的写入可能造成的部分恢复，源归档本身不会被修改。
+ *
+ * @param {string} stateRoot
+ * @param {Map<string, Buffer>} files
+ * @param {{ warn?: (line: string) => void, now?: number }} [options]
+ */
+export function restoreSealed(stateRoot, files, { warn, now = Date.now() } = {}) {
+  const plan = planSealedRestore(stateRoot, files, { now })
+  const conflicts = []
+  let restored = 0
+
+  const preserveArchiveCopy = (entry, preservedPath) => {
+    try {
+      writeFileExclusive(preservedPath, entry.buffer)
+      warn?.(`kept existing reminder recovery ${entry.rel}; saved the archive copy to ${preservedPath}`)
+    } catch (error) {
+      if (error.code !== 'EEXIST' || !sameBufferAsFile(preservedPath, entry.buffer)) {
+        throw new Error(
+          `could not preserve archive recovery ${entry.rel} at ${preservedPath}: ${String(error?.message ?? error)}`,
+        )
+      }
+      warn?.(`kept existing reminder recovery ${entry.rel}; the archive copy is already preserved at ${preservedPath}`)
+    }
+    conflicts.push({ name: entry.rel, livePath: entry.target, preservedPath })
   }
-  warn?.(`restored ${planned.length} file(s)`)
-  return { restored: planned.length }
+
+  try {
+    // Preserve all known conflicts before touching live archive files.
+    for (const entry of plan.recoveryConflicts) preserveArchiveCopy(entry, entry.preservedPath)
+
+    for (const entry of plan.entries) {
+      if (!isReminderRecoveryFile(entry.rel) || entry.action !== 'new') continue
+      try {
+        writeFileExclusive(entry.target, entry.buffer)
+        restored += 1
+      } catch (error) {
+        if (error.code !== 'EEXIST') throw error
+        if (sameBufferAsFile(entry.target, entry.buffer)) continue
+        preserveArchiveCopy(entry, path.join(plan.preservedRoot, entry.rel))
+      }
+    }
+
+    for (const entry of plan.entries) {
+      if (isReminderRecoveryFile(entry.rel)) continue
+      fs.mkdirSync(path.dirname(entry.target), { recursive: true })
+      const temp = `${entry.target}.restoring`
+      fs.writeFileSync(temp, entry.buffer)
+      fs.renameSync(temp, entry.target)
+      restored += 1
+    }
+  } catch (error) {
+    const wrapped = new Error(
+      `sealed restore may be partial: ${restored} live file(s) restored and ` +
+        `${conflicts.length} recovery safety copy/copies preserved before failure; ` +
+        `the source archive was not changed: ${String(error?.message ?? error)}`,
+    )
+    wrapped.cause = error
+    wrapped.partial = true
+    wrapped.restored = restored
+    wrapped.recoveryConflicts = conflicts
+    throw wrapped
+  }
+
+  warn?.(`restored ${restored} file(s)`)
+  return { restored, recoveryConflicts: conflicts }
 }

@@ -15,10 +15,9 @@
  * happen when the plugin is not running — or when running it is exactly what you
  * do not want to do.
  */
-import fs from 'node:fs'
 import path from 'node:path'
 import { createBackup, listBackups, restoreBackup, verifyBackup, backupsDir } from '../src/backup.js'
-import { openState, restoreSealed, sealState } from '../src/backup-crypto.js'
+import { openState, planSealedRestore, restoreSealed, sealState } from '../src/backup-crypto.js'
 import { inspectInstanceLock } from '../src/instance-lock.js'
 import { stateDir } from '../src/state.js'
 
@@ -144,8 +143,26 @@ switch (command) {
       break
     }
     const result = restoreBackup(root, id, { warn })
-    console.log(`✓ restored ${result.restoredFiles} file(s) from ${id}`)
+    const incomplete = result.recoveryFailures.length > 0 ||
+      result.recoveryConflicts.some((conflict) => !conflict.preserved)
+    console.log(`${incomplete ? '!' : '✓'} restored ${result.restoredFiles} file(s) from ${id}`)
     console.log(`  previous state moved to ${path.relative(root, result.aside)} (delete it once you are happy)`)
+    for (const conflict of result.recoveryConflicts) {
+      if (conflict.preserved) {
+        console.log(`  kept live recovery ${conflict.name}; backup copy saved to ${conflict.preservedPath}`)
+      } else {
+        console.error(`✗ restore may be partial: kept live recovery ${conflict.name}, but its backup copy was not preserved outside rotation`)
+        console.error(`  backup copy: ${conflict.backupPath}`)
+        console.error(`  preservation error: ${conflict.error}`)
+        process.exitCode = 1
+      }
+    }
+    for (const failure of result.recoveryFailures) {
+      console.error(`✗ restore may be partial: could not add reminder recovery ${failure.name}`)
+      console.error(`  backup copy: ${failure.backupPath}`)
+      console.error(`  error: ${failure.error}`)
+      process.exitCode = 1
+    }
     console.log(`  restart DSH to load the restored state`)
     break
   }
@@ -199,18 +216,25 @@ switch (command) {
       break
     }
     if (flags.has('--dry-run')) {
-      // Same plan the settings card shows: what would be overwritten, what is
-      // new. Nothing is written, which is the whole point of a dry run.
-      let bytes = 0
-      let replaces = 0
+      const plan = planSealedRestore(root, opened.files)
+      const writes = plan.entries.filter((entry) => entry.action !== 'same')
+      const bytes = writes.reduce((total, entry) => total + entry.buffer.length, 0)
+      const replaces = writes.filter((entry) => entry.action === 'overwrite').length
+      const conflicts = writes.filter((entry) => entry.action === 'conflict').length
+      const created = writes.length - replaces - conflicts
       const rows = []
-      for (const [rel, buffer] of opened.files) {
-        bytes += buffer.length
-        const exists = fs.existsSync(path.join(root, rel))
-        if (exists) replaces += 1
-        rows.push(`${exists ? '\u21ba' : '+'} ${rel}`)
+      for (const entry of plan.entries) {
+        if (entry.action === 'conflict') {
+          rows.push(`! ${entry.rel} (keep live; archive copy -> ${path.relative(root, entry.preservedPath)}; estimated path)`)
+        } else if (entry.action === 'same') {
+          rows.push(`= ${entry.rel} (already preserved)`)
+        } else {
+          rows.push(`${entry.action === 'overwrite' ? '\u21ba' : '+'} ${entry.rel}`)
+        }
       }
-      console.log(`would write ${opened.files.size} file(s), ${human(bytes)}: ${replaces} overwrite, ${opened.files.size - replaces} new`)
+      const conflictSummary = conflicts === 0 ? '' : `, ${conflicts} conflict-safe`
+      console.log(`would write ${writes.length} file(s), ${human(bytes)}: ${replaces} overwrite, ${created} new${conflictSummary}`)
+      if (conflicts > 0) console.log('  pre-restore paths are estimates; the actual restore uses a new timestamp')
       for (const row of rows.slice(0, 40)) console.log(`  ${row}`)
       if (rows.length > 40) console.log(`  …and ${rows.length - 40} more`)
       break
@@ -219,8 +243,19 @@ switch (command) {
       process.exitCode = 1
       break
     }
-    const result = restoreSealed(root, opened.files, { warn })
+    let result
+    try {
+      result = restoreSealed(root, opened.files, { warn })
+    } catch (error) {
+      console.error(`✗ sealed restore aborted: ${error.message}`)
+      console.error(`  archive remains at ${file}`)
+      process.exitCode = 1
+      break
+    }
     console.log(`✓ restored ${result.restored} file(s) from ${file}`)
+    for (const conflict of result.recoveryConflicts) {
+      console.log(`  kept live recovery ${conflict.name}; archive copy saved to ${conflict.preservedPath}`)
+    }
     console.log('  restart DSH to load the restored state')
     break
   }
