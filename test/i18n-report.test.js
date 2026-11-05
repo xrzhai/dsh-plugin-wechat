@@ -6,7 +6,8 @@ import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { report, baselineProblems, countCjkStrings } from '../bin/i18n-report.mjs'
-import { CATALOG, translate } from '../src/i18n.js'
+import { CATALOG, createTranslator, translate } from '../src/i18n.js'
+import { buildCommandsHelp } from '../src/sessions.js'
 
 test('i18n baseline rejects added strings per file and does not count translated catalogue', t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-i18n-'))
@@ -40,6 +41,20 @@ test('catalogue entries have both locales and interpolate newly migrated failure
   assert.equal(translate('error.processing', { reason: 'offline' }, 'en'), '(Processing failed: offline)')
   assert.equal(translate('error.processing', { reason: 'offline' }, 'unknown'), '（处理失败：offline）')
   assert.match(translate('notice.longRunning', {}, 'en'), /result/)
+})
+
+test('live command help includes English /compact and omits retired commands', () => {
+  const help = buildCommandsHelp(createTranslator('en').t)
+  assert.match(help, /^\/compact compact the current session history immediately$/m)
+  for (const key of [
+    'help.mode', 'help.remember', 'help.forget', 'help.memory', 'help.undo', 'help.import',
+    'help.recall', 'help.summary', 'help.bad', 'help.good', 'help.style', 'help.digest',
+  ]) {
+    assert.equal(Object.hasOwn(CATALOG, key), false, `${key} should not remain in the command catalogue`)
+  }
+  assert.doesNotMatch(CATALOG['help.diag'].en, /\bproactive\b|conversation mode/i)
+  assert.doesNotMatch(CATALOG['help.quiet'].en, /proactive/i)
+  assert.doesNotMatch(CATALOG['help.usage'].en, /proactive/i)
 })
 
 

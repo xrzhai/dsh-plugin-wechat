@@ -129,3 +129,80 @@ test('doctor does not let a registry-only allowlist authorize a missing credenti
   assert.match(result.output, /allowed senders\s+no signed-in account/)
   assert.doesNotMatch(result.output, /allowed senders\s+authorized/)
 })
+
+test('doctor reads nested and persisted ASR model directories and identifies legacy keys', (t) => {
+  const fixture = tempState(t)
+  writeCredential(fixture.state, 'synthetic-account')
+  writeJson(path.join(fixture.state, 'accounts-registry.json'), {
+    schemaVersion: 1,
+    'synthetic-account': { allowedSenders: ['synthetic-owner'] },
+  })
+  const configured = path.join(fixture.root, 'configured-models')
+  const persisted = path.join(fixture.root, 'persisted-models')
+  const legacy = path.join(fixture.root, 'legacy-models')
+  for (const dir of [configured, persisted, legacy]) fs.mkdirSync(dir)
+
+  writeJson(path.join(fixture.state, 'config.json'), {
+    asr: { enabled: true, command: 'synthetic-asr', modelDir: configured },
+  })
+  writeJson(path.join(fixture.state, 'asr-config.json'), { modelDir: persisted })
+  const configuredResult = run('bin/doctor.mjs', fixture, ['--offline'])
+  assert.equal(configuredResult.status, 0, configuredResult.output)
+  assert.match(configuredResult.output, new RegExp(`voice transcription\\s+${configured.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`))
+
+  writeJson(path.join(fixture.state, 'config.json'), {
+    asr: { enabled: true, command: 'synthetic-asr' },
+  })
+  const persistedResult = run('bin/doctor.mjs', fixture, ['--offline'])
+  assert.equal(persistedResult.status, 0, persistedResult.output)
+  assert.match(persistedResult.output, new RegExp(`voice transcription\\s+${persisted.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`))
+
+  writeJson(path.join(fixture.state, 'config.json'), { asrEnabled: true, asrModelDir: legacy })
+  const legacyResult = run('bin/doctor.mjs', fixture, ['--offline'])
+  assert.equal(legacyResult.status, 0, legacyResult.output)
+  assert.match(legacyResult.output, /voice transcription \(legacy\).*nested asr\.command/)
+
+  writeJson(path.join(fixture.state, 'config.json'), {
+    asr: { enabled: true, command: '', modelDir: configured },
+  })
+  const disabledResult = run('bin/doctor.mjs', fixture, ['--offline'])
+  assert.equal(disabledResult.status, 0, disabledResult.output)
+  assert.doesNotMatch(disabledResult.output, /voice transcription/)
+})
+
+test('doctor dry-run and fix create active directories without creating or replacing legacy data', (t) => {
+  const fixture = tempState(t)
+  writeCredential(fixture.state, 'synthetic-account')
+  writeJson(path.join(fixture.state, 'accounts-registry.json'), {
+    schemaVersion: 1,
+    'synthetic-account': { allowedSenders: ['synthetic-owner'] },
+  })
+
+  const dryRun = run('bin/doctor.mjs', fixture, ['--offline', '--dry-run'])
+  assert.equal(dryRun.status, 0, dryRun.output)
+  assert.match(dryRun.output, /created sessions\//)
+  assert.match(dryRun.output, /created knowledge\//)
+  assert.equal(fs.existsSync(path.join(fixture.state, 'sessions')), false)
+  assert.equal(fs.existsSync(path.join(fixture.state, 'knowledge')), false)
+  assert.equal(fs.existsSync(path.join(fixture.state, 'memory')), false)
+
+  const fixed = run('bin/doctor.mjs', fixture, ['--offline', '--fix'])
+  assert.equal(fixed.status, 0, fixed.output)
+  assert.equal(fs.statSync(path.join(fixture.state, 'sessions')).isDirectory(), true)
+  assert.equal(fs.statSync(path.join(fixture.state, 'knowledge')).isDirectory(), true)
+  assert.equal(fs.existsSync(path.join(fixture.state, 'memory')), false)
+
+  const persona = path.join(fixture.state, 'sessions', 'AGENTS.md')
+  const memory = path.join(fixture.state, 'sessions', 'memory.md')
+  const legacy = path.join(fixture.state, 'memory', 'legacy.json')
+  fs.writeFileSync(persona, 'CUSTOM PERSONA')
+  fs.writeFileSync(memory, 'CUSTOM MEMORY')
+  fs.mkdirSync(path.dirname(legacy), { recursive: true })
+  fs.writeFileSync(legacy, '{"keep":true}\n')
+
+  const repeated = run('bin/doctor.mjs', fixture, ['--offline', '--fix'])
+  assert.equal(repeated.status, 0, repeated.output)
+  assert.equal(fs.readFileSync(persona, 'utf8'), 'CUSTOM PERSONA')
+  assert.equal(fs.readFileSync(memory, 'utf8'), 'CUSTOM MEMORY')
+  assert.equal(fs.readFileSync(legacy, 'utf8'), '{"keep":true}\n')
+})

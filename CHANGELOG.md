@@ -15,6 +15,7 @@
   - 精简新手 UI：侧栏改为「大肥鱼」+🐳；设置卡只留「微信账号 / 人设」，会话与网关配置收进「高级」；账号页隐藏白名单管理与被拒陌生人面板（安全逻辑保留，首条消息仍自动认主）。
   - 记忆收敛到单个 `memory.md`：首次运行在插件工作区种下 starter 人设 `AGENTS.md` 与 `memory.md`（都只在缺失时写入、绝不覆盖已有文件）；人设提示按需读取/维护 `memory.md`。旧的结构化记忆保持默认关闭（`memoryEnabled` 默认 false），不再为新用户开启。删除群成员名片（`contacts` / `contact-refresh`）与后台记忆摘要器（`memory-summarizer`）及其配置；「人设」页改为编辑实际加载的 `AGENTS.md`（跟随配置的 cwd，不再写死 sessions 路径）。
   - **收敛为纯网关**：整层删除记忆引擎与拟人功能——`memory.js`、`persona.js`、`packs.js`/`pack-presets.js`、`proactive*`、`life-state`、`affinity-history`、`human-pace`、`style-feedback`、`digest`/`reports`/`promotions`、`memory-*`/`fact-dedupe`、`dates`（事件提醒）；对应删除 `/mode /remember /forget /memory /undo /import /digest /summary /recall` 命令、`/bad /good /style` 反馈、模板包（pack）CLI 与全部 remote 声明、相关 config 字段与后台调度器。保留：账号扫码、消息收发（文本/图片/文件/语音）、会话命令、提醒/订阅、待办/稍后读、白名单、媒体、日志/备份/指标/诊断，以及 `AGENTS.md` + `memory.md`（按需读写）。`src/index.js` 由 ~3400 行降到 ~2460 行，净删一个数量级的拟人复杂度。
+  - 修复 #11：清理纯网关已删除命令的帮助词条并补齐英文 `/compact`；doctor 按嵌套 ASR 配置、持久化模型目录和 legacy 扁平键给出准确状态，`--fix` 创建 `sessions/` 与现有的 `knowledge/`，不再创建废弃的 `memory/`。legacy 备份清单、模型路由和用户数据保持不变。
 
 - **1.6.2（待本机 DSH / 微信验证）** —— **平行会话通知不再把长代码转附件丢正文（#31）**：
   - `onDispatchReply` 固定以 `richContent: false` 发送调度结果，长 fenced code block 始终走纯文本分段，不再生成 snippet 附件；即使媒体上传失败也不会丢掉代码正文。普通回复的富内容设置不受影响。
