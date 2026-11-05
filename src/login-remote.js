@@ -64,8 +64,8 @@ function getLocalTokenList() {
     return out;
 }
 
-async function fetchQrCode(botType) {
-    const raw = await apiPostFetch({
+async function fetchQrCode(botType, request = apiPostFetch) {
+    const raw = await request({
         baseUrl: FIXED_BASE_URL,
         endpoint: `ilink/bot/get_bot_qrcode?bot_type=${encodeURIComponent(botType)}`,
         body: JSON.stringify({ local_token_list: getLocalTokenList() }),
@@ -78,9 +78,9 @@ async function fetchQrCode(botType) {
     return data;
 }
 
-async function pollQrStatus(baseUrl, qrcode, verifyCode) {
+async function pollQrStatus(baseUrl, qrcode, verifyCode, request = apiGetFetch) {
     try {
-        const raw = await apiGetFetch({
+        const raw = await request({
             baseUrl,
             endpoint:
                 `ilink/bot/get_qrcode_status?qrcode=${encodeURIComponent(qrcode)}` +
@@ -102,6 +102,13 @@ export class WeixinLoginController extends TypertRemoteService {
         super(ctx, "weixinLoginController", { namespace: "weixin" });
         this.botType = options.botType ?? DEFAULT_BOT_TYPE;
         this.getWorkspaceDirectory = options.getWorkspaceDirectory;
+        // Network and rendering seams used by tests to hold individual calls
+        // open. Production always uses the vendored fetch helpers.
+        this.apiGetFetch = options.apiGetFetch ?? apiGetFetch;
+        this.apiPostFetch = options.apiPostFetch ?? apiPostFetch;
+        this.makeQrDataUrl = options.makeQrDataUrl ?? qrDataUrl;
+        this.startingLogin = undefined;
+        this.loginRevision = 0;
         /**
          * Called after a login writes a new credential, so the host can start
          * (or restart) the inbound loop without waiting for a reload. Assigned
@@ -136,11 +143,28 @@ export class WeixinLoginController extends TypertRemoteService {
                 status: "wait",
             };
         }
-        const data = await fetchQrCode(this.botType);
+        // A double-click or two connected clients can reach this method before
+        // the first QR request has inserted anything into `logins`. Share that
+        // request so one controller never creates two live confirmation paths.
+        if (this.startingLogin) return this.startingLogin;
+        const revision = this.loginRevision;
+        const pending = this.issueLogin(revision);
+        this.startingLogin = pending;
+        try {
+            return await pending;
+        } finally {
+            if (this.startingLogin === pending) this.startingLogin = undefined;
+        }
+    }
+
+    async issueLogin(revision) {
+        const data = await fetchQrCode(this.botType, this.apiPostFetch);
+        if (revision !== this.loginRevision) return { status: "cancelled" };
         const sessionKey = randomUUID();
         const link = data.qrcode_img_content;
         // Best-effort QR image; the clickable link is always a usable fallback.
-        const qrDataUrlValue = await qrDataUrl(link).catch(() => undefined);
+        const qrDataUrlValue = await this.makeQrDataUrl(link).catch(() => undefined);
+        if (revision !== this.loginRevision) return { status: "cancelled" };
         logins.set(sessionKey, {
             sessionKey,
             qrcode: data.qrcode,
@@ -165,7 +189,12 @@ export class WeixinLoginController extends TypertRemoteService {
     async poll(sessionKey) {
         const login = logins.get(sessionKey);
         if (!login) throw new RemoteError("no_login", "没有进行中的登录，请重新扫码", {});
-        const status = await pollQrStatus(login.baseUrl, login.qrcode, login.pendingVerifyCode);
+        const status = await pollQrStatus(login.baseUrl, login.qrcode, login.pendingVerifyCode, this.apiGetFetch);
+        // cancel()/logout() remove this exact record while the request is open.
+        // A later response belongs to a dead login and must have no side effects.
+        // The identity check also makes concurrent polls safe: after the first
+        // confirmed result removes the record, later duplicates stop here.
+        if (logins.get(sessionKey) !== login) return { status: "cancelled" };
         // The login flow used to leave no trace at all, which made a scan that
         // went nowhere impossible to diagnose after the fact.
         logger.debug(
@@ -193,10 +222,13 @@ export class WeixinLoginController extends TypertRemoteService {
                     logins.delete(sessionKey);
                     return { status: "failed", message: "二维码多次失效，请重新开始登录" };
                 }
-                const fresh = await fetchQrCode(this.botType);
+                const fresh = await fetchQrCode(this.botType, this.apiPostFetch);
+                if (logins.get(sessionKey) !== login) return { status: "cancelled" };
+                const freshQrDataUrl = await this.makeQrDataUrl(fresh.qrcode_img_content).catch(() => undefined);
+                if (logins.get(sessionKey) !== login) return { status: "cancelled" };
                 login.qrcode = fresh.qrcode;
                 login.qrcodeUrl = fresh.qrcode_img_content;
-                login.qrDataUrl = await qrDataUrl(fresh.qrcode_img_content).catch(() => undefined);
+                login.qrDataUrl = freshQrDataUrl;
                 login.startedAt = Date.now();
                 return { status: "refreshed", qrcodeUrl: login.qrcodeUrl, qrDataUrl: login.qrDataUrl };
             }
@@ -294,6 +326,10 @@ export class WeixinLoginController extends TypertRemoteService {
      * a logout takes full effect on the next reload; the card says so.
      */
     async logout(accountId) {
+        // Invalidate QR issuance that had not reached `logins` yet, then drop
+        // every poll that did. Logout must win even when no old account remains.
+        this.loginRevision += 1;
+        logins.clear();
         const wanted = String(accountId ?? "").trim();
         const ids = wanted ? [wanted] : listIndexedWeixinAccountIds();
         if (ids.length === 0) {
@@ -309,8 +345,6 @@ export class WeixinLoginController extends TypertRemoteService {
             unregisterWeixinAccountId(id);
             removed.push(id);
         }
-        // Any in-flight QR session belongs to the account that just went away.
-        logins.clear();
         this.sessionExpired = false;
         return { removed, reloadRequired: removed.length > 0 };
     }
