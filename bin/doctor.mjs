@@ -86,7 +86,7 @@ function checkPackage(pkg = pkgJson()) {
   if (pkg.__error !== undefined) return bad('package.json', pkg.__error)
   ok(`installed version ${pkg.version}`)
   const deps = Object.keys(pkg.dependencies ?? {})
-  if (deps.length <= 2) ok(`dependencies: ${deps.join(', ') || 'none'}`)
+  if (deps.length <= 3) ok(`dependencies: ${deps.join(', ') || 'none'}`)
   else note(`dependencies: ${deps.join(', ')}`, 'this plugin is meant to stay near-zero-dependency')
 }
 
