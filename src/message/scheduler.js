@@ -26,6 +26,7 @@ export const MAX_PENDING_PER_ACCOUNT = 50
 /** Far-future cap: a reminder more than 366 days out is almost surely a typo. */
 export const MAX_DELAY_MS = 366 * 24 * 60 * 60 * 1000
 const MAX_DELAY_REASON = '定得太远：最多支持一年以内'
+const INVALID_HHMM_REASON = '时间格式应为 HH:mm，例如 09:30'
 
 /**
  * Parse a `/remind` time spec. Supported forms, in the order they are tried:
@@ -59,6 +60,7 @@ export function parseWhen(spec, now = new Date()) {
   const absolute = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})$/.exec(trimmed)
   if (absolute !== null) {
     const [y, mo, d, h, mi] = absolute.slice(1).map(Number)
+    if (h > 23 || mi > 59) return { ok: false, reason: INVALID_HHMM_REASON, invalidClock: true }
     const target = new Date(y, mo - 1, d, h, mi)
     if (Number.isNaN(target.getTime()) || target.getDate() !== d || target.getMonth() !== mo - 1) {
       return { ok: false, reason: '日期或时间不存在，请检查' }
@@ -73,7 +75,7 @@ export function parseWhen(spec, now = new Date()) {
   if (timeOfDay !== null) {
     const h = Number(timeOfDay[1])
     const mi = Number(timeOfDay[2])
-    if (h > 23 || mi > 59) return { ok: false, reason: '时间格式应为 HH:mm，例如 09:30' }
+    if (h > 23 || mi > 59) return { ok: false, reason: INVALID_HHMM_REASON, invalidClock: true }
     const target = new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, mi)
     if (target.getTime() <= now.getTime()) target.setDate(target.getDate() + 1)
     return { ok: true, fireAt: target.getTime(), label: formatLabel(target) }
@@ -153,7 +155,7 @@ function parseNaturalWhen(spec, now) {
 
   let hour = Number(clock[1])
   const minute = clock[3] === '半' ? 30 : Number(clock[2] ?? 0)
-  if (hour > 23 || minute > 59) return { ok: false, reason: '时间格式应为 9:00 或 9点半' }
+  if (hour > 23 || minute > 59) return { ok: false, reason: '时间格式应为 9:00 或 9点半', invalidClock: true }
   if (CN_PERIOD_PM.has(period) && hour < 12) hour += 12
   if (period === '中午' && hour < 11) hour += 12
   if (period === '凌晨' && hour === 12) hour = 0
@@ -226,7 +228,7 @@ export function parseRecurrence(spec, now = new Date()) {
   if (clock === null) return { ok: false, reason: `「${head[3].trim()}」不是钟点（例如 9:00、9点、9点半）` }
   const hour = Number(clock[1])
   const minute = clock[3] === '半' ? 30 : Number(clock[2] ?? 0)
-  if (hour > 23 || minute > 59) return { ok: false, reason: '钟点超出范围（0–23 点，0–59 分）' }
+  if (hour > 23 || minute > 59) return { ok: false, reason: '钟点超出范围（0–23 点，0–59 分）', invalidClock: true }
   const kind = head[1].startsWith('每周') ? 'weekly' : (head[1].includes('工作日') ? 'weekdays' : 'daily')
   const recurrence = kind === 'weekly' ? { kind, weekday: CN_WEEKDAY[head[2]] } : { kind }
   return {

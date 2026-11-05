@@ -45,7 +45,7 @@ export function parseSubscriptionWhen(spec, now = new Date()) {
 function hhmm(h, mi, extra) {
     const hour = Number(h)
     const minute = Number(mi)
-    if (hour > 23 || minute > 59) return { ok: false, reason: '时间格式应为 HH:mm，例如 08:00' }
+    if (hour > 23 || minute > 59) return { ok: false, reason: '时间格式应为 HH:mm，例如 08:00', invalidClock: true }
     return { ok: true, ...extra, time: `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}` }
 }
 
