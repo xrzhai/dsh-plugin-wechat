@@ -19,7 +19,6 @@ import os from 'node:os'
 import path from 'node:path'
 import { appendJournal, readJournal } from '../src/message/journal.js'
 import { createOutbox } from '../src/message/outbox.js'
-import { addGlobalFact, readGlobalMemory, buildMemoryBlock } from '../src/memory.js'
 import { sweepRetention, directoryUsage } from '../src/message/retention.js'
 import { createBackup, restoreBackup, verifyBackup } from '../src/backup.js'
 
@@ -96,12 +95,6 @@ async function main() {
       delivered += 1
     }
     if (tick % 20 === 0) await outbox.flush({ force: true })
-    if (tick % 200 === 0) {
-      addGlobalFact(stateRoot, accountId, `soak fact ${tick}`, { warn: () => {} })
-      const global = readGlobalMemory(stateRoot, accountId, { warn: () => {} })
-      const block = buildMemoryBlock({ global, conv: { facts: [], summary: '', bond: undefined }, recent: [], now: Date.now() })
-      if (typeof block !== 'string') fail('memory block was not a string')
-    }
     if (tick % 100 === 0) {
       const sampleRss = process.memoryUsage().rss
       rssPeak = Math.max(rssPeak, sampleRss)

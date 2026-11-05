@@ -608,15 +608,11 @@ const COMMANDS = [
   { id: 'diag', pattern: /^\/diag(?:\s+([\S\s]+))?$/i, build: (match) => ({ arg: match[1]?.trim() ?? '' }), helpRank: 22, helpKey: 'help.diag' },
   { id: 'outbox', pattern: /^\/outbox(?:\s+([\s\S]+))?$/, build: (m) => ({ arg: m[1] ?? '' }), helpRank: 23, helpKey: 'help.outbox' },
   { id: 'quiet', pattern: /^\/quiet(?:\s+([\s\S]+))?$/, build: (m) => ({ arg: m[1] ?? '' }), helpRank: 24, helpKey: 'help.quiet' },
-  { id: 'bad', pattern: /^\/bad(?:\s+([\s\S]+))?$/i, build: (m) => ({ arg: m[1] ?? '' }), helpRank: 29, helpKey: 'help.bad' },
-  { id: 'good', pattern: /^\/good(?:\s+([\s\S]+))?$/i, build: (m) => ({ arg: m[1] ?? '' }), helpRank: 30, helpKey: 'help.good' },
   { id: 'say', pattern: /^\/say(?:\s+([\s\S]+))?$/, build: (m) => ({ arg: m[1] ?? '' }), helpRank: 32, helpKey: 'help.say' },
-  { id: 'style', pattern: /^\/style(?:\s+([\s\S]+))?$/i, build: (m) => ({ arg: m[1] ?? '' }), helpRank: 31, helpKey: 'help.style' },
   { id: 'draft', pattern: /^\/draft(?:\s+([\s\S]+))?$/i, build: (m) => ({ arg: m[1] ?? '' }), helpRank: 32, helpKey: 'help.draft' },
   { id: 'snooze', pattern: /^\/snooze(?:\s+(\S+))?$/, build: (m) => ({ arg: m[1] ?? '' }), helpRank: 25, helpKey: 'help.snooze' },
   { id: 'habit', pattern: /^\/habit(?:\s+([\s\S]+))?$/i, build: (m) => ({ arg: m[1] ?? '' }), helpRank: 26, helpKey: 'help.habit' },
   { id: 'media', pattern: /^\/media(?:\s+([\s\S]+))?$/i, build: (m) => ({ arg: m[1] ?? '' }), helpRank: 27, helpKey: 'help.media' },
-  { id: 'digest', pattern: /^\/digest$/i, build: identity, helpRank: 28, helpKey: 'help.digest' },
   { id: 'usage', pattern: /^\/usage$/i, build: identity, helpRank: 26, helpKey: 'help.usage' },
   // `/remind 明天 9:00 内容`：时间本身可能带空格（`明天 9:00`、`下周一 10点`），
   // 所以整段交给执行分支按前缀尝试解析，第一个能解析的前缀是时间，其余是内容。
@@ -650,10 +646,7 @@ const COMMANDS = [
     pattern: /^\/(?:subscribe|订阅)$/i,
     build: () => ({ when: '', text: '' }),
   },
-  { id: 'summary', pattern: /^\/(?:summary|总结)$/i, build: identity, helpRank: 11, helpKey: 'help.summary' },
-  {
-    id: 'export',
-    pattern: /^\/(?:export|导出)(?:\s+(\d{1,3}))?$/i,
+  { id: 'export', pattern: /^\/(?:export|导出)(?:\s+(\d{1,3}))?$/i,
     build: (match) => ({ days: match[1] === undefined ? undefined : Number(match[1]) }),
     helpRank: 12,
     helpKey: 'help.export',
@@ -666,26 +659,15 @@ const COMMANDS = [
     helpRank: 21,
     helpKey: 'help.subscribecancel',
   },
-  // Persona + memory commands (personalization round). Parsing stays pure:
-  // each one is ANSWERED by a handler the inbound handler provides under
-  // context.persona, because the store and the mode table live with the
-  // plugin's state root, not in this module.
-  { id: 'mode', pattern: /^\/(?:mode|模式)(?:\s+([\S\s]+))?$/i, build: (match) => ({ arg: match[1]?.trim() }), helpRank: 6, helpKey: 'help.mode' },
-  { id: 'remember', pattern: /^\/(?:remember|记住)(?:\s+([\S\s]+))?$/i, build: (match) => ({ arg: match[1]?.trim() ?? '' }), helpRank: 7, helpKey: 'help.remember' },
-  { id: 'forget', pattern: /^\/(?:forget|忘记)(?:\s+([\S\s]+))?$/i, build: (match) => ({ arg: match[1]?.trim() }), helpRank: 8, helpKey: 'help.forget' },
-  { id: 'memory', pattern: /^\/(?:memory|记忆)(?:\s+([\S\s]+))?$/i, build: (match) => ({ arg: match[1]?.trim() ?? '' }), helpRank: 9, helpKey: 'help.memory' },
-  { id: 'undo', pattern: /^\/(?:undo|撤销)(?:\s+([\S\s]+))?$/i, build: (match) => ({ arg: match[1]?.trim() ?? '' }), helpRank: 9, helpKey: 'help.undo' },
   { id: 'config', pattern: /^\/config$/i, build: identity, helpRank: 26, helpKey: 'help.config' },
   { id: 'keyword', pattern: /^\/(?:keyword|关键词)(?:\s+([\S\s]+))?$/i, build: (match) => ({ arg: match[1]?.trim() ?? '' }), helpRank: 22, helpKey: 'help.keyword' },
-  { id: 'import', pattern: /^\/(?:import|导入)(?:\s+([\S\s]+))?$/i, build: (match) => ({ arg: match[1]?.trim() ?? '' }), helpRank: 9, helpKey: 'help.import' },
-  { id: 'recall', pattern: /^\/(?:recall|回忆|翻记录)(?:\s+([\S\s]+))?$/i, build: (match) => ({ arg: match[1]?.trim() ?? '' }), helpRank: 10, helpKey: 'help.recall' },
   { id: 'todo', pattern: /^\/(?:todo|待办)(?:\s+([\S\s]+))?$/i, build: (match) => ({ arg: match[1]?.trim() ?? '' }), helpRank: 11, helpKey: 'help.todo' },
   { id: 'later', pattern: /^\/(?:later|稍后读|稍后)(?:\s+([\S\s]+))?$/i, build: (match) => ({ arg: match[1]?.trim() ?? '' }), helpRank: 12, helpKey: 'help.later' },
   { id: 'send', pattern: /^\/send(?:\s+([\S\s]+))?$/i, build: (match) => ({ arg: match[1]?.trim() ?? '' }), helpRank: 13, helpKey: 'help.send' },
 ]
 
 /** Commands answered by the inbound handler's persona bundle (state root lives there). */
-const PERSONA_COMMANDS = new Set(['mode', 'remember', 'forget', 'memory', 'undo', 'import', 'keyword', 'summary', 'export', 'recall', 'away', 'back', 'todo', 'later', 'send', 'diag', 'outbox', 'quiet', 'usage', 'habit', 'media', 'digest', 'config', 'bad', 'good', 'style', 'draft',
+const PERSONA_COMMANDS = new Set(['keyword', 'export', 'away', 'back', 'todo', 'later', 'send', 'diag', 'outbox', 'quiet', 'usage', 'habit', 'media', 'config', 'draft',
   'say',
 ])
 
@@ -756,7 +738,6 @@ function runStatus({ lines, conversationId, accountId, context }) {
     parts.push(`账号：${context.accountLabel ? `${context.accountLabel}（${context.accountId}）` : context.accountId}`)
     if (typeof context.paused === 'boolean') parts.push(`状态：${context.paused ? '已暂停（不收发消息）' : '正常收发'}`)
     if (context.lastSeenAt) parts.push(`最近收发：${context.lastSeenAt}`)
-    if (typeof context.bondLine === 'string' && context.bondLine !== '') parts.push(context.bondLine)
     if (context.allowlist) {
       const source = context.allowlist.source === 'account' ? '本账号专属名单' : '全局名单'
       parts.push(`发信人白名单：${context.allowlist.senders.length} 人（${source}）`)

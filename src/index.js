@@ -20,7 +20,6 @@
 import z from '@deepseek-ai/schemastery'
 import { fileURLToPath } from 'node:url'
 import fs from 'node:fs'
-import { randomBytes } from 'node:crypto'
 import { dirname, join, basename, resolve as resolvePath } from 'node:path'
 import { configureWeixinStateDir, accountsDir, configFile, readSavedConfig, ensureSessionsDir, sessionsDir, inboxDir, stateDir, withSavedConfig } from './state.js'
 import { quietDelay } from './message/quiet-hours.js'
@@ -44,11 +43,10 @@ import { describeConfigEffect } from './config-effect.js'
 const PLUGIN_VERSION = createRequire(import.meta.url)('../package.json').version
 import { DEFAULT_RETENTION, SWEEP_INTERVAL_MS, describeSweep, sweepRetention } from './message/retention.js'
 import { DEFAULT_KEEP, createBackup } from './backup.js'
-import { DEFAULT_DIGEST_WHEN, DEFAULT_REVIEW_WHEN, ReportScheduler, buildReviewPrompt, describeReport, pickConversation } from './message/reports.js'
 import { HEARTBEAT_MS, acquireInstanceLock, heartbeatInstanceLock, releaseInstanceLock } from './instance-lock.js'
 import { createOutbox, formatOutbox, CONTEXT_TOKEN_TTL_MS } from './message/outbox.js'
 import { createGatewayControl } from './gateway-control.js'
-import { configureOutbound, sendChunked, sendProducedFiles, sleep } from './outbound.js'
+import { configureOutbound, sendChunked, sendProducedFiles } from './outbound.js'
 import { channelFor } from './channel.js'
 import { HOOK_POINTS, createHooks } from './hooks.js'
 import { createMetrics, writeMetricsSnapshot } from './metrics.js'
@@ -59,9 +57,6 @@ import { readScope, scopedConfig } from './config-scope.js'
 import { DEFAULT_MAX_QUEUE, DEFAULT_PER_MINUTE, createSenderLimiter } from './message/sender-limit.js'
 import { createSenderDailyLimiter } from './message/sender-daily.js'
 import { recordStranger } from './message/strangers.js'
-import { parseMemoryJson, renderMemoryJson, renderMemoryMarkdown, writeMemoryExport } from './message/memory-export.js'
-import { buildSimilarityPrompt, findDuplicateFacts, formatDuplicateHint, mergeFacts, parseSimilarityAnswer } from './message/fact-dedupe.js'
-import { resolveAllowedPath } from './media/outbound.js'
 import { keywordGate, keywordStats, parseKeywordRules } from './message/keyword-reply.js'
 import { isAllowedSender, denialReason } from './security/allowlist.js'
 import { ILinkTransport } from './transport/ilink.js'
@@ -94,19 +89,14 @@ import './message/markdown.js'
 import { extractUrls, fetchLinkText, describeLinkResults } from './message/links.js'
 import { ReminderScheduler, parseWhen } from './message/scheduler.js'
 import { createAwayCommands, readAway, noteMissed, buildAwayReply, awaySummary, clearAway } from './message/away.js'
-import { buildDateReminderText, dateReminderDue, markDateReminderSent, upcomingDates } from './message/dates.js'
-import { buildDraft, composeReminder, createDraftCommands, readDraft, saveDraft } from './message/drafts.js'
+import { createDraftCommands, readDraft } from './message/drafts.js'
 import { createWebhookSender } from './webhook.js'
 import { backgroundBudget, recordBackgroundCall } from './budget.js'
 import { createListCommands } from './message/lists.js'
 import { createHabitCommands } from './message/habits.js'
 import { createMediaCommands, humanTime } from './message/media-archive.js'
-import { composeDigest } from './message/digest.js'
 import { startAccounts } from './startup.js'
 import { createReadingCommands } from './message/reading.js'
-import { formatStaleReport, staleFacts } from './message/memory-stale.js'
-import { IMPORT_CONFIRM_TTL_MS, applyMemoryImport, formatImportPreview, normalizeImportPolicy, parseMemoryMarkdown, planMemoryImport } from './message/memory-import.js'
-import { MemoryConflictQueue, conflictReply, findMemoryConflict, parseConflictAnswer } from './message/memory-conflict.js'
 import { createSendCommands } from './message/send-file.js'
 import { SubscriptionScheduler, formatStamp } from './message/subscriptions.js'
 import { allowedMediaDirs, deliverOutboundMedia, DEFAULT_MAX_MEDIA_BYTES } from './media/outbound.js'
@@ -121,57 +111,23 @@ import { mapWithConcurrency } from './concurrency.js'
 // `/cancel` is the one message the transport must be able to deliver while a
 // turn is still running; the predicate lives beside the parser so the two
 // cannot drift apart.
-import { isInterruptCommand } from './sessions.js'
-// Persona modes + conversation memory: the prompt seam and the /mode,
-// /remember, /forget, /memory handlers both need the same store.
-import {
-  buildPersonaBlock,
-  readPersonaStore,
-  resolveMode,
-  activeModeFor,
-  setActiveMode,
-  DEFAULT_MODE_ID,
-} from './persona.js'
-import {
-  buildMemoryBlock,
-  readGlobalMemory,
-  readConvMemory,
-  readRecentWindow,
-  addGlobalFact,
-  formatFactLines,
-  undoLastMemoryChange,
-  removeGlobalFact,
-  bondLine,
-  formatEvents,
-  formatProfile,
-  listConvMemories,
-  openThreadLines,
-  writeGlobalMemory,
-} from './memory.js'
-import { queryRecall, formatRecallHits } from './message/recall.js'
+import { isInterruptCommand, readLines, conversationSlug } from './sessions.js'
 
 import { startKnowledgeRefresh } from './message/knowledge-refresh.js'
-import { buildHumanStyleBlock, isCompanionMode } from './message/human-pace.js'
 import { groupReplyPolicy, isGroupMessage } from './message/groups.js'
 import { classifyToolCall, noticeText } from './message/tool-guard.js'
 import { createTranslator, resolveLocale } from './i18n.js'
 import { routeFor, sideRouteFor } from './model-route.js'
-import { readOrInferLifeState, lifeBlock } from './message/life-state.js'
 import { readJournalRange, renderChatMarkdown, writeChatExport } from './message/chat-export.js'
 import { createNotifyServer, DEFAULT_NOTIFY_PORT, ensureNotifyToken } from './notify.js'
-import { describeAffinity, readAffinityHistory } from './message/affinity-history.js'
 import './message/dry-run.js'
 import { describeUnknownItems, firstSighting } from './message/unknown-items.js'
 import { statePaths } from './state-layout.js'
-import { ProactiveScheduler, readProactiveState } from './message/proactive.js'
-import { describeLearnedHours, learnActiveHours } from './message/proactive-timing.js'
 import { createGroupSummaries, groupSummaryPrompt } from './message/group-summary.js'
 import { recordPromptComposition } from './message/prompt-composition.js'
 import { recordUsage } from './message/usage-ledger.js'
 
-import { MAX_STICKERS_PER_REPLY, stickerPath, takeStickers } from './message/stickers.js'
 import { cleanSpeechText, synthesizeVoiceFile, ttsPlatformSupported } from './media/tts.js'
-import { buildStyleFeedbackBlock, createStyleCommands, readStyleRules } from './message/style-feedback.js'
 // The vendored logger is the only channel guaranteed to land on disk at INFO:
 // ctx.logger can drop levels depending on the host's exporter config, and a
 // refusal that leaves no trace turns an allowlist mismatch into "the bot just
@@ -187,6 +143,26 @@ import {
 } from './media/inbound.js'
 
 export const name = 'dsh-weixin'
+
+/**
+ * Conversation ids recorded for one account in the session-line store.
+ *
+ * The notify bridge needs one conversation to push a sentence to; with the
+ * memory engine gone, the session-line index is the durable list of
+ * conversations that have actually had a turn.
+ *
+ * @param {string} accountId
+ * @returns {string[]}
+ */
+function conversationIdsForAccount(accountId) {
+  const store = readLines()
+  const prefix = `${conversationSlug(accountId)}:`
+  const ids = []
+  for (const key of Object.keys(store)) {
+    if (key.startsWith(prefix)) ids.push(key.slice(prefix.length))
+  }
+  return ids
+}
 
 /**
  * Directory this file was loaded from — the plugin package root (one level
@@ -246,19 +222,6 @@ export const Config = z.object({
     'Send audio attachments (wav, mp3, m4a, ogg, flac, silk, ...) as Weixin voice messages instead of file attachments. wav and silk are transcoded in-process; the rest need ffmpeg on PATH. A voice send that FAILS falls back to the plain file path — but the iLink server currently ACCEPTS a bot voice_item (ret=0) without ever delivering it (measured 2026-06 and again 2026-10-26 with a fresh token; upload and send both succeed), so with this on an audio attachment can silently vanish. Off by default until the server actually delivers bot voice.',
   ),
   messageJournal: z.boolean().default(true).description('Record recent inbound and outbound messages (message journal, shown on the settings card).'),
-  personaDefaultMode: z.string().default(DEFAULT_MODE_ID).description(
-    'The conversation style used when a Weixin chat has not picked one with /mode. Built-in modes: default (plain assistant), girlfriend 女友, boyfriend 男友, friend 朋友; custom modes are edited on the settings card\'s 个性化 tab. An unknown id here quietly falls back to default.',
-  ),
-  memoryEnabled: z.boolean().default(false).description(
-    'Inject a <weixin_memory> block into every prompt: global facts saved with /remember, the conversation\'s rolling summary (refreshed automatically every memorySummaryTurns turns), and the last few messages of this chat. /memory shows what is stored, /forget deletes. Turning this off stops the injection AND the /remember /forget commands.',
-  ),
-  memorySummaryTurns: z.number().min(1).default(10).description(
-    'How often (in agent turns per conversation) the background summarizer rewrites the conversation summary. The summarizer runs as a hidden side turn after a real turn finishes; it never sends anything to WeChat. 1 disables nothing — set memoryEnabled false for that.',
-  ),
-  memoryStaleDays: z.number().min(7).max(3650).default(90).description('How many days a fact may go unconfirmed before /memory stale and the daily digest flag it. Rewriting a fact (a correction) counts as confirming it.'),
-  memoryGlobalMaxFacts: z.number().min(1).default(30).description('How many global /remember facts to keep per account. Full refuses new facts instead of silently dropping the oldest — delete some with /forget.'),
-  memoryConvMaxChars: z.number().min(1).default(1200).description('Character budget for the conversation summary in the injected memory block.'),
-  memoryGlobalMaxTokens: z.number().min(0).default(0).description('Optional cap on the long-term memory block measured in estimated tokens (0 = count characters only). One Chinese character is about one token, four latin characters about one; set this when routing to a model with a tight window.'),
   // C20: the conversation gets the good model; background work (summaries,
   // proactive lines, subscription fires) can be pointed at a cheaper route
   // without touching the chat. Empty means "whatever the session uses".
@@ -272,54 +235,13 @@ export const Config = z.object({
   ocrTimeoutMs: z.number().default(20000).description('Kill the OCR command after this many milliseconds.'),
   ocrMaxChars: z.number().default(2000).description('Keep at most this many characters of OCR text per image.'),
   documentTextChars: z.number().min(200).max(20000).default(4000).description('How many characters of an inbound document to put into the prompt; the rest is cut with a note.'),
-  proactiveProvider: z.string().default('').description('主动开口 provider：只给「主动开口」用，留空回落到后台任务路由。'),
-  proactiveModel: z.string().default('').description('主动开口 model：和 proactiveProvider 一起填才生效。'),
-  reportProvider: z.string().default('').description('日报/记忆核对 provider：只给定时报告用，留空回落到后台任务路由。'),
-  reportModel: z.string().default('').description('日报/记忆核对 model：和 reportProvider 一起填才生效。'),
-  memoryProvider: z.string().default('').description('Provider for the memory model (summaries, fact extraction and consolidation). Empty follows the conversation model — the summaries then cost exactly what a normal turn costs.'),
-  memoryModel: z.string().default('').description('Model id for the memory model. Only used together with memoryProvider; a cheaper model here keeps background memory work off the expensive route.'),
-  memoryRecentTurns: z.number().min(0).default(0).description(
-    'How many recent user/assistant messages, at most, the memory block repeats back to the model. Only used when a conversation line is COLD (a brand new session: first message, /new, /mode switch, or a line whose session no longer holds the history) — a resumed line already carries those messages in its own history, so repeating them every turn would spend tokens on nothing. 0 turns the window off entirely.',
-  ),
-  memoryRecall: z.boolean().default(false).description(
-    'Search the local message journal for the current message and inject the matching original lines as a <weixin_recall> block. Only fires when the message looks like it refers back to something (上次/之前/那天…) or scores high enough — small talk matches nothing and costs zero tokens. /recall queries by hand without spending any.',
-  ),
-  memoryRecallDays: z.number().min(7).max(3650).default(180).description('How many days back the local recall index reaches. Older day files leave the index (the journal itself is still on disk).'),
-  memoryRecallHits: z.number().min(1).max(8).default(3).description('How many matching original messages to inject at most, each truncated to 140 characters.'),
   knowledgeEnabled: z.boolean().default(false).description(
     '知识库：把文件放进 <state>/knowledge/<账号>/ 目录，聊天里问到相关内容时自动检索，并说清答案出自哪份文件。不需要任何命令。',
   ),
   knowledgeHits: z.number().min(1).max(8).default(3).description('一次最多注入几段知识库原文。'),
-  humanPacing: z.boolean().default(false).description(
-    '陪聊节奏：角色模式（女友/男友/朋友/贾维斯/小游戏等）回复时先停顿一下再发，并把一段话拆成两三条气泡；「默认助手」模式永远不受影响。',
-  ),
-  replyDelayMaxMs: z.number().min(0).max(10000).default(2400).description('角色模式回复前最多停顿多久（毫秒），0 表示不停顿；实际停顿按回复长度抖动，累了会更慢。'),
-  bubbleSplitMax: z.number().min(1).max(5).default(3).description('角色模式一条回复最多拆成几条气泡；1 表示不拆。'),
-  bubbleGapMs: z.number().min(0).max(5000).default(700).description('角色模式两条气泡之间的停顿（毫秒），实际值会在 0.7–1.3 倍之间抖动。'),
-  lifeState: z.boolean().default(false).description(
-    '生活状态：按时间、距上次聊天多久、今天聊了多少，自动推断角色此刻的心情/在做什么/精力，注入到提示词里；「默认助手」模式不注入。',
-  ),
-  stickerEnabled: z.boolean().default(false).description(
-    '表情图片：角色模式下模型可以在回复里写 [表情:开心]，插件发一张对应的表情图（图片气泡）。微信协议没有贴纸消息类型，所以只能是图片，不是可点开的原生表情包；关掉则连这个标记也不教给模型。',
-  ),
-  stickerKeepBuiltins: z.boolean().default(false).description(
-    '内置表情图：默认关闭——只要 <数据目录>/stickers/ 里放了你自己的图片，模型能用的就只有那些，内置那 68 张不再出现在可用名单里（也不会被解析）。打开则两边都在，你自己的名字优先。',
-  ),
   ttsVoice: z.string().default('').description(
     '本地语音合成用的系统音色：macOS `say -v` 的名字（例如 Tingting、Meijia；`say -v ?` 可以列出来）。留空用系统默认音色。',
   ),
-  voiceReplies: z.boolean().default(false).description(
-    '陪聊模式下，短回复额外再发一条语音（用本机 `say` 合成，不需要联网、不花钱）。默认关闭：一是只有 macOS 能合成，二是 iLink 目前会收下机器人的语音气泡却不投递（实测两次），所以发出去的是音频文件而不是语音条；打开前请先用 /say 试一条。',
-  ),
-  voiceReplyMaxChars: z.number().min(1).max(300).default(60).description('多长的回复才值得再念一遍（`voiceReplies` 打开时生效，超长的回复只发文字）。'),
-  proactiveEnabled: z.boolean().default(false).description(
-    '主动开口：角色模式下，对方一段时间没说话时由它先发一条消息（只在设定的时段内、每条之间有最短间隔、没被回应会退避、每天有上限）。默认关闭——一个工具不该自己找你；「默认助手」模式永远不主动。',
-  ),
-  proactiveMinGapMinutes: z.number().min(10).max(2880).default(180).description('主动消息的最短间隔（分钟）：距对方最后一条消息至少这么久才会开口，也是没被回应时退避的基数。'),
-  proactiveMaxPerDay: z.number().min(1).max(24).default(3).description('每个账号每天最多主动发几条。'),
-  proactiveWindowStart: z.string().default('09:00').description('主动消息的时间窗开始，HH:mm；窗外（含夜里）一律不发。'),
-  proactiveWindowEnd: z.string().default('23:00').description('主动消息的时间窗结束，HH:mm；必须晚于开始时间。'),
-  proactiveLearnedWindow: z.boolean().default(true).description('从消息流水里学「对方通常几点在线」，把主动消息的时间窗收窄到那段（只收窄，不放宽；样本不够时不启用）。'),
   groupChatEnabled: z.boolean().default(false).description('参加群聊：开启后才会在群里回话。默认关闭——一个对每条群消息都答的机器人，在真群里就是刷屏。私聊不受影响。'),
   groupSummaryEnabled: z.boolean().default(false).description('群聊上下文摘要：群里攒够 groupSummaryEvery 条消息后，用一次后台调用把最近聊的压成几行，下次被叫到时折进提示词。默认关闭——它每次都要花一次调用。'),
   groupSummaryEvery: z.number().min(4).max(100).default(12).description('攒多少条群消息做一次摘要（默认 12）。'),
@@ -329,8 +251,6 @@ export const Config = z.object({
   groupReplyWhen: z.string().default('mention').description('群里什么时候回：mention 只答被叫到的时候，all 每条都答。iLink 不给 @ 列表，因此按首行里的机器人名字匹配。'),
   groupBotNames: z.string().default('').description('群里额外的称呼，用逗号分隔。iLink 不提供机器人的群昵称，想让「@小助手」生效就得在这里写上它。'),
   groupKeywords: z.string().default('').description('群关键词自动回复，每行一条：正则 => 回复。例如「^打卡$ => 打卡成功」。只在群里、只对白名单内的人生效；同一群同一条规则 60 秒内最多应一次；免打扰时段沉默。回复是模板，不走模型。'),
-  packsIndexUrl: z.string().default('').description('模板包索引地址（https 的 JSON：{"packs":[{"name","url","description"}]}）。设置卡「个性化」页会列出索引里的模板包，一键安装。留空 = 不显示。'),
-  groupShareMemory: z.boolean().default(false).description('把长期记忆、回忆片段和亲密度行也注入群回复。默认关闭：那些块里是主人自己的私事。'),
   videoFrames: z.boolean().default(true).description('收到视频时用本机 ffmpeg 抽几帧静图交给模型（模型读不了视频，但能看图）。需要的机器上装了 ffmpeg；抽帧失败只影响那一条视频的内容理解，文件照常保存。'),
   richContent: z.boolean().default(true).description('富内容：长代码块作为文件附件发出、Markdown 表格转成对齐文本。微信只有纯文本气泡，这两处是 Markdown 里最容易在纯文本里变形的东西。'),
   codeFileThreshold: z.number().min(200).max(20000).default(1200).description('代码块超过多少字就改成发文件；更短的留在气泡里（两行代码读起来比附件顺）。'),
@@ -364,15 +284,8 @@ export const Config = z.object({
   webhookSecret: z.string().default('').description('出站 webhook 的 HMAC 密钥；填了就带 X-Weixin-Signature: sha256=<hex>，对原始 body 签名。'),
   webhookTimeoutMs: z.number().default(5000).description('出站 webhook 的超时毫秒数；失败只记日志，不影响回复。'),
   awayAutoReply: z.string().default('').description('离开模式的自动回复；留空用「我现在不在，看到会回你～（大概 HH:mm 回来）」。'),
-  dateReminderEnabled: z.boolean().default(false).description('重要日子的当天提醒：记忆里的生日/纪念日、以及写死日期的待办，到点发一条短消息，不跑模型。'),
-  dateReminderWhen: z.string().default('09:00').description('当天提醒的发送时间（HH:MM，本地时区）。'),
   mediaMaxBytes: z.number().min(0).default(0).description('入站媒体的总容量上限（字节）；超过就从最旧的开始删。0 表示不限。'),
-  dateReminderLeadDays: z.number().min(0).max(30).default(0).description('提前几天提醒：0 只在当天说；3 就会在三天前先说一声。'),
-  digestEnabled: z.boolean().default(false).description('每天到点发一条当天简报（聊了什么、还有哪些待办）；时间由 digestWhen 决定。'),
-  backgroundDailyLimit: z.number().default(0).description('每天允许的后台模型调用次数上限（记忆折叠、日报、核对、订阅、主动开口都算）；0 表示不限。主对话不受影响。'),
-  digestWhen: z.string().default(DEFAULT_DIGEST_WHEN).description('日报时间，形如「每天 21:00」或「每周五 18:30」。'),
-  memoryReviewEnabled: z.boolean().default(false).description('每周到点发一条记忆核对：「我记住的这些还准吗」，你回 /remember 或 /forget 纠正。'),
-  memoryReviewWhen: z.string().default(DEFAULT_REVIEW_WHEN).description('记忆核对时间，形如「每周日 20:00」。'),
+  backgroundDailyLimit: z.number().default(0).description('每天允许的后台模型调用次数上限（订阅等后台任务都算）；0 表示不限。主对话不受影响。'),
   toolAudit: z.boolean().default(true).description(
     'Append one JSONL line per tool the agent runs (tool name, truncated arguments, which Weixin account/conversation/sender caused it, and whether the result carried an error) under <state>/audit/. Off by default nothing would ever answer "who ran that destructive tool yesterday"; a missing directory or a full disk only warns, it never fails a turn.',
   ),
@@ -394,7 +307,6 @@ export const Config = z.object({
   // `z` here is a minimal schema helper (string/number/boolean), so enumerations
   // are validated where they are read, not in the declaration — same as
   // `groupReplyWhen` above.
-  memorySimilarityRoute: z.string().default('off').description('让记忆模型判断「两条记忆是不是一件事」（花一次后台调用）；off = 只用规则判，永远不花钱。'),
   typingIndicator: z.boolean().default(true).description('Show a typing indicator while the agent works, when a typing ticket is available.'),
   mediaEnabled: z.boolean().default(true).description('Send local files the agent references in its reply as Weixin images/videos/file attachments.'),
   autoSendFiles: z.boolean().default(false).description('Also deliver files the agent wrote into its working directory during a turn, even when the reply text never references them.'),
@@ -634,12 +546,9 @@ export function apply(ctx, config) {
     let cwd
     let reminderScheduler
     let subscriptionScheduler
-    let proactiveScheduler
     let retentionTimer
-    let reportScheduler
     let notifyBridge
     let awayTimer
-    let dateTimer
     /** @type {Array<() => void>} */
     const offWebhook = []
     const backupTimers = []
@@ -936,58 +845,6 @@ export function apply(ctx, config) {
       retentionTimer = setInterval(sweep, SWEEP_INTERVAL_MS)
       retentionTimer.unref?.()
 
-      // 日报与记忆核对: one clock, two kinds of report. Both write through a side
-      // session so they cost the cheap route, and both send exactly one message —
-      // a report that spams three bubbles at 21:00 is worse than none.
-      reportScheduler = new ReportScheduler({
-        config: () => withSavedConfig(config),
-        warn,
-        fire: async (kind) => {
-          const live = withSavedConfig(config)
-          const accountId = [...transports.keys()].find((id) => pickConversation(listConvMemories(stateRoot, id)) !== undefined)
-          if (accountId === undefined) {
-            warn(`${kind} report skipped: no conversation has ever been spoken in`)
-            return
-          }
-          const transport = transports.get(accountId)
-          const conversationId = pickConversation(listConvMemories(stateRoot, accountId))
-          if (transport === undefined || conversationId === undefined) return
-          const now = Date.now()
-          const day = formatStamp(now)
-
-          let prompt
-          if (kind === 'review') {
-            const global = readGlobalMemory(stateRoot, accountId, { warn })
-            prompt = buildReviewPrompt({ day, facts: global.facts, profile: global.profile, digest: global.digest })
-          } else {
-            // Same builder the manual `/digest` uses: one definition of "what
-            // today looked like", so the scheduled and on-demand reports can
-            // never drift apart.
-            prompt = composeDigest({
-              stateRoot,
-              accountId,
-              conversationId,
-              now,
-              warn,
-              day,
-              staleDays: Number(effectiveConfig.current.memoryStaleDays ?? 90),
-              // The scheduled digest in memory mode: a statement that turned up
-              // in several conversations gets one question, never a silent write.
-              promote: kind === 'digest' && live.memoryEnabled !== false,
-            }).prompt
-          }
-
-          const result = await bridge.summarize({ conversationId, accountId, prompt, sessionPrefix: kind === 'review' ? 'wx-rev-' : 'wx-dig-', route: sideRoute('report') })
-          const text = typeof result?.text === 'string' ? result.text.trim() : ''
-          if (text === '' || text === '（已取消）') {
-            log(`${kind} report produced nothing to send`)
-            return
-          }
-          await sendChunked(transport, live, { conversationId, text })
-          log(`${describeReport(kind, now)} delivered to ${conversationId}`)
-        },
-      }).start()
-
       reminderScheduler = new ReminderScheduler({
         stateRoot,
         warn,
@@ -1036,26 +893,12 @@ export function apply(ctx, config) {
           subscriptionBusy.add(item.conversationId)
           try {
             const now = Date.now()
-            const personaBlock = buildPersonaBlock(resolveMode(
-              readPersonaStore(stateRoot, { warn }),
-              activeModeFor(stateRoot, item.accountId, item.conversationId, config.personaDefaultMode, { warn }),
-            ))
-            const memoryBlock = config.memoryEnabled === true
-              ? buildMemoryBlock({
-                  global: readGlobalMemory(stateRoot, item.accountId, { warn }),
-                  conv: readConvMemory(stateRoot, item.accountId, item.conversationId, { warn }),
-                  recent: readRecentWindow(stateRoot, item.accountId, item.conversationId, {}),
-                  now,
-                })
-              : ''
             const prompt = [
-              personaBlock,
-              memoryBlock,
               `<weixin_subscription>`,
               `现在是 ${formatStamp(now)}。你之前和对方约定：到这个时间点，就由你主动给对方发一条消息，主题是「${item.prompt}」。`,
               `直接输出这条消息的正文，就像你在微信里自己发起的一条消息。不要复述或解释这个约定本身。`,
               `</weixin_subscription>`,
-            ].filter((part) => part !== '').join('\n\n')
+            ].join('\n')
             const result = await bridge.summarize({ conversationId: item.conversationId, accountId: item.accountId, prompt, sessionPrefix: 'wx-sub-', route: sideRoute('report') })
             const text = typeof result?.text === 'string' ? result.text.trim() : ''
             if (text === '' || text === '（已取消）') {
@@ -1070,137 +913,6 @@ export function apply(ctx, config) {
         },
       })
 
-      // 主动开口: the bot starts a conversation instead of only answering one.
-      // Off by default and companion-only; every gate (time window, minimum
-      // gap, backoff after silence, daily cap, per-tick chance) lives in
-      // planProactive so the rules are testable without a clock or a disk.
-      // Test hook: the e2e suite cannot wait five minutes for the first tick,
-      // and a wall-clock schedule plus an idle roll is not something a test can
-      // assert on. Only a test run sets this, and then the chance gate is wide
-      // open so a single tick always decides.
-      const proactiveTestTickMs = Number(process.env.DSH_WEIXIN_PROACTIVE_TICK_MS ?? '')
-      const proactiveTestMode = Number.isFinite(proactiveTestTickMs) && proactiveTestTickMs > 0
-      proactiveScheduler = new ProactiveScheduler({
-        stateRoot,
-        warn,
-        ...(proactiveTestMode ? { tickMs: Math.max(10, proactiveTestTickMs), tickChance: 1 } : {}),
-        config: () => withSavedConfig(config),
-        candidates: () => {
-          const live = withSavedConfig(config)
-          const modes = readPersonaStore(stateRoot, { warn })
-          const out = []
-          // 作息只跟账号有关，不跟会话有关：一个 tick 里每个账号算一次。
-          const learnedByAccount = new Map()
-          for (const accountId of transports.keys()) {
-            // 临时静默期间不参与候选：连判断都不做，自然不花 token。
-            if (tempQuietDelay(Date.now(), stateRoot, accountId, { warn }) > 0) continue
-            for (const conv of listConvMemories(stateRoot, accountId)) {
-              if (typeof conv.conversationId !== 'string' || conv.conversationId === '') continue
-              const mode = resolveMode(
-                modes,
-                activeModeFor(stateRoot, accountId, conv.conversationId, live.personaDefaultMode ?? DEFAULT_MODE_ID, { warn }),
-              )
-              if (!isCompanionMode(mode)) continue
-              if (!learnedByAccount.has(accountId)) {
-                // 从已有的日流水里现算，不落盘：删掉流水它就忘掉。
-                const at = Date.now()
-                learnedByAccount.set(accountId, learnActiveHours(readJournalRange(stateRoot, { accountId, days: 14, now: at }), { now: at }))
-              }
-              out.push({
-                accountId,
-                conversationId: conv.conversationId,
-                mode,
-                lastInboundAt: Number(conv.bond?.lastMessageAt ?? 0),
-                learned: learnedByAccount.get(accountId),
-              })
-            }
-          }
-          // Most recently active conversation first: that is the one a person
-          // would reach for first.
-          return out.sort((a, b) => b.lastInboundAt - a.lastInboundAt)
-        },
-        fire: async (candidate, { now }) => {
-          const transport = transports.get(candidate.accountId)
-          if (transport === undefined) return ''
-          const live = withSavedConfig(config)
-          const convMemory = readConvMemory(stateRoot, candidate.accountId, candidate.conversationId, { warn })
-          const life = live.lifeState !== false
-            ? readOrInferLifeState(stateRoot, candidate.accountId, { now, bond: convMemory.bond, warn })
-            : null
-          const personaBlock = buildPersonaBlock(candidate.mode)
-          const styleBlock = buildHumanStyleBlock({ stickers: live.stickerEnabled !== false, modeId: candidate.mode?.id, stateRoot, keepBuiltins: live.stickerKeepBuiltins === true })
-          // 对方亲口提过的偏好（`/bad`、`/good`）：它跟模式走，主动开口时也一样认。
-          const feedbackBlock = buildStyleFeedbackBlock(
-            readStyleRules(stateRoot, candidate.accountId, { modeId: candidate.mode?.id, warn }),
-          )
-          const lifeBlockText = life === null ? '' : lifeBlock(life)
-          const globalMemory = readGlobalMemory(stateRoot, candidate.accountId, { warn })
-          const memoryBlock = live.memoryEnabled === true
-            ? buildMemoryBlock({
-                global: globalMemory,
-                maxTokens: Number(live.memoryGlobalMaxTokens ?? 0),
-                conv: convMemory,
-                recent: readRecentWindow(stateRoot, candidate.accountId, candidate.conversationId, { turns: 3 }),
-                now,
-              })
-            : ''
-          const state = proactiveScheduler?.status(candidate.accountId)
-          const lastOwn = Array.isArray(state?.recent) && state.recent.length > 0
-            ? state.recent[state.recent.length - 1]
-            : ''
-          const sinceHours = candidate.lastInboundAt > 0
-            ? Math.max(1, Math.round(((now - candidate.lastInboundAt) / 3_600_000) * 10) / 10)
-            : null
-          const prompt = [
-            personaBlock,
-            styleBlock,
-            feedbackBlock,
-            lifeBlockText,
-            memoryBlock,
-            '<weixin_proactive>',
-            `现在是 ${formatStamp(now)}。${sinceHours === null ? '对方有一阵子没说话了。' : `对方已经 ${sinceHours} 小时没说话了。`}`,
-            '你想主动给对方发一条消息——就像你在微信里随手发的一条：可以说说你此刻在做什么，问问对方怎么样了，或者提起之前聊过的一件事。',
-            ...openThreadLines(globalMemory, convMemory, now),
-            '一两句话，口语，别一次问好几个问题，也别追问对方去哪儿了。',
-            '不要说「我主动来找你」「打扰了」这类话，也不要解释你为什么发这条消息。',
-            ...(lastOwn === '' ? [] : [`你上一次主动发的是：「${lastOwn}」，这次别重复。`]),
-            '</weixin_proactive>',
-          ].filter((part) => part !== '').join('\n\n')
-          const result = await bridge.summarize({
-            conversationId: candidate.conversationId,
-            accountId: candidate.accountId,
-            prompt,
-            sessionPrefix: 'wx-pro-',
-            route: sideRoute('proactive'),
-          })
-          const text = typeof result?.text === 'string' ? result.text.trim() : ''
-          if (text === '' || text === '（已取消）') return ''
-          const plan = live.stickerEnabled !== false
-            ? takeStickers(text, { modeId: candidate.mode?.id, stateRoot, warn, keepBuiltins: live.stickerKeepBuiltins === true })
-            : { text, stickers: [] }
-          if (live.typingIndicator === true) {
-            await transport.setTyping(true, candidate.conversationId).catch(() => {})
-            await sleep(1200)
-          }
-          try {
-            await sendChunked(transport, config, { conversationId: candidate.conversationId, text: plan.text })
-            for (const stickerId of plan.stickers.slice(0, MAX_STICKERS_PER_REPLY)) {
-              await channelFor(transport).sendMedia({
-                filePath: stickerPath(stickerId, stateRoot),
-                conversationId: candidate.conversationId,
-                cdnBaseUrl: transport.cdnBaseUrl,
-              }).catch((error) => warn(`proactive sticker ${stickerId} failed: ${String(error)}`))
-            }
-          } finally {
-            if (live.typingIndicator === true) await transport.setTyping(false, candidate.conversationId).catch(() => {})
-          }
-          log(`proactive message sent to ${candidate.conversationId} (${candidate.mode.name})`)
-          fileLog.info(`proactive message sent to ${candidate.conversationId}: ${plan.text.slice(0, 120)}`)
-          return plan.text
-        },
-      })
-      proactiveScheduler.start()
-
       // 本地通知桥: a loopback endpoint so a build, backup or cron job can push
       // one sentence to WeChat without a model turn. Off by default; the token
       // is generated once, stored 0600 under the state root, never logged.
@@ -1212,9 +924,9 @@ export function apply(ctx, config) {
             port: Number(withSavedConfig(config).notifyPort ?? DEFAULT_NOTIFY_PORT),
             warn,
             send: async (text) => {
-              const accountId = [...transports.keys()].find((id) => pickConversation(listConvMemories(stateRoot, id)) !== undefined)
+              const accountId = [...transports.keys()].find((id) => conversationIdsForAccount(id).length > 0)
               if (accountId === undefined) throw new Error('no conversation has ever been spoken in')
-              const conversationId = pickConversation(listConvMemories(stateRoot, accountId))
+              const conversationId = conversationIdsForAccount(accountId)[0]
               const transport = transports.get(accountId)
               if (transport === undefined || conversationId === undefined) throw new Error('the Weixin transport is not up yet')
               await sendChunked(transport, withSavedConfig(config), { conversationId, text })
@@ -1259,45 +971,6 @@ export function apply(ctx, config) {
         }
       }, 60_000)
       awayTimer.unref?.()
-
-      // 重要日子的当天提醒：每天到点后检查一次，命中才发；不跑模型。
-      // 和 away 一样用分钟级定时器，不依赖文件 mtime，也不写 journal。
-      dateTimer = setInterval(() => {
-        for (const [id, t] of transports) {
-          const live = withSavedConfig(config)
-          if (!dateReminderDue(stateRoot, id, { now: Date.now(), at: live.dateReminderWhen, enabled: live.dateReminderEnabled, warn })) continue
-          let items = []
-          let memory
-          try {
-            memory = readGlobalMemory(stateRoot, id, { warn })
-            items = upcomingDates(memory, new Date(), {
-              leadDays: Number(live.dateReminderLeadDays ?? 0),
-            })
-          } catch (error) {
-            warn(`date reminder read failed for ${id}: ${String(error)}`)
-            continue
-          }
-          if (items.length === 0) continue
-          const conversationId = pickConversation(listConvMemories(stateRoot, id))
-          if (conversationId === undefined) continue
-          // The reminder says what day it is; the draft saves you the typing. It is
-          // never sent on its own — a wrong greeting reads worse than none.
-          const named = typeof memory?.profile?.name === 'string' ? memory.profile.name.trim() : ''
-          const draft = saveDraft(stateRoot, id, {
-            text: buildDraft(items[0], { who: named === '' ? undefined : named }),
-            item: items[0],
-            conversationId,
-            warn,
-          })
-          sendChunked(t, live, { conversationId, text: composeReminder(buildDateReminderText(items), draft) })
-            .then(() => {
-              markDateReminderSent(stateRoot, id, { warn })
-              fileLog.info(`date reminder sent to ${conversationId}`)
-            })
-            .catch((error) => warn(`date reminder failed for ${conversationId}: ${String(error)}`))
-        }
-      }, 60_000)
-      dateTimer.unref?.()
 
     })()
     // A disabled gateway has no startLoop awaiting setup, but setup failures
@@ -1459,7 +1132,6 @@ export function apply(ctx, config) {
         agentCwd: cwd,
         reminderScheduler,
         subscriptionScheduler,
-        proactiveScheduler,
         journalInbound: (entry) => appendJournal(stateRoot, { dir: 'in', ...entry }, { warn }),
         senderGate: (senderId) => senderLimiter.check(`${account.accountId}|${senderId}`),
         // 每日配额在账号维度上另算：同一个人在不同账号下各有自己的额度。
@@ -1565,13 +1237,10 @@ export function apply(ctx, config) {
       cancelled = true
       await gateway.sync()
       await setup.catch(() => {})
-      reportScheduler?.stop()
       reminderScheduler?.stop()
       subscriptionScheduler?.stop()
-      proactiveScheduler?.stop()
       await notifyBridge?.stop()
       if (awayTimer !== undefined) clearInterval(awayTimer)
-      if (dateTimer !== undefined) clearInterval(dateTimer)
       for (const off of offWebhook.splice(0)) off()
       if (retentionTimer !== undefined) clearInterval(retentionTimer)
       for (const timer of backupTimers) clearTimeout(timer)
@@ -1799,8 +1468,7 @@ export function weixinSourceBlock(message) {
   return `<weixin_source ${fields.join(' ')} />`
 }
 
-function createInboundHandler({ config, accountId, transport, bridge, asrBridge, seen, log, warn, fileLog, stateRoot, mediaDirs, agentCwd, reminderScheduler, subscriptionScheduler, proactiveScheduler, journalInbound, senderGate, senderDailyGate, sideRoute, quietGate }) {
-  const injectedPersonaBySession = new Map()
+function createInboundHandler({ config, accountId, transport, bridge, asrBridge, seen, log, warn, fileLog, stateRoot, mediaDirs, agentCwd, reminderScheduler, subscriptionScheduler, journalInbound, senderGate, senderDailyGate, sideRoute, quietGate }) {
   // The effective allowlist is per account: an account-level override in the
   // registry narrows (or replaces) the global list.
   // `accountId` is always set here (bringUpAccount passes it), but the
@@ -1826,37 +1494,11 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
   const applyScope = (conversationId) => {
     effectiveConfig.current = scopedConfig(resolveAccountConfig(), readScope(stateRoot, accountId, conversationId, { warn }))
   }
-  // Persona + memory command handlers (/mode /remember /forget /memory), one
-  // bundle per conversation. Every call re-reads its store: the settings card
-  // can edit the mode table or the operator can /forget between two messages,
-  // and answering from a cached snapshot would quietly lie. Memory commands
-  // honour memoryEnabled being off; /mode does not — the mode table and the
-  // memory store are separate features.
-  // ② A 「把 X 改成 Y 吗」 question lives in memory only: an unanswered one must
-  // expire with the process instead of firing a week later.
-  const conflictQueue = new MemoryConflictQueue()
-  // ④ A parsed-but-unconfirmed import lives here until the user answers. Same
-  // rule as the conflict queue: nobody's pending question survives a restart.
-  let pendingImport
-  // ④ Shared by /import and the 「是」 that follows it: one place decides what a
-  // written import reports, so the preview and the outcome cannot disagree.
   // ⑦ `/diag export`：体检包要能发出去。所有 id 换别名、地址与凭据整段抹掉，
   // 然后写成 stateRoot 下的一个文件 —— 命令回复会走一遍出站附件管线，文件
   // 跟着文字一起发到当前会话，用户手边就有一份能直接转发的。
-  // 体检包是「账号现在什么样」，不是「这个会话什么样」：它没有 conversationId
-  // 可用（导出是在 bundle 外跑的），所以模式一栏取账号的默认模式，不取会话覆盖。
   const exportDiag = () => {
     const live = effectiveConfig.current
-    const store = readPersonaStore(stateRoot, { warn })
-    const currentId = live.personaDefaultMode ?? DEFAULT_MODE_ID
-    const current = resolveMode(store, currentId)
-    let proactive
-    try {
-      const state = readProactiveState(stateRoot, accountId, { warn })
-      proactive = state === undefined ? undefined : { count: state.count, lastAt: state.lastAt, misses: state.misses }
-    } catch {
-      proactive = undefined
-    }
     // 只带失败的审计行：成功的那些对「为什么出问题」没有解释力，只会占篇幅。
     let recentErrors = []
     try {
@@ -1874,14 +1516,10 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
       accountId,
       accountLabel: effectiveConfig.current.accountLabel ?? undefined,
       transportUp: transport !== undefined,
-      modeName: current?.name ?? currentId,
-      companion: isCompanionMode(current),
       config: live,
       reminders: reminderScheduler?.list(accountId)?.length ?? 0,
       subscriptions: subscriptionScheduler?.list?.(accountId)?.length ?? 0,
-      proactive,
       journalToday: readJournalRange(stateRoot, { accountId, days: 1 }).length,
-      conversations: listConvMemories(stateRoot, accountId).length,
       allowlist: Array.isArray(live.allowedSenders) ? live.allowedSenders.length : 0,
       quietDelayMs: quietDelay(Date.now(), live),
       recentErrors,
@@ -1899,46 +1537,7 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
     return `已导出体检包（${bundle.sections.length} 节，id 已换成短哈希、地址与凭据已抹掉）：\n${file}\n转发出去之前建议自己扫一眼。`
   }
 
-  const applyImport = (plan, policy = 'fill') => {
-    const written = applyMemoryImport({
-      stateRoot,
-      accountId,
-      plan,
-      policy,
-      warn,
-      // `modeConfig` is defined inside the bundle below; this helper sits above it
-      // so it reads the live config directly.
-      maxFacts: Number(effectiveConfig.current.memoryGlobalMaxFacts ?? 30),
-    })
-    const parts = []
-    if (written.facts > 0) parts.push(`${written.facts} 条长期记忆`)
-    if (written.events > 0) parts.push(`${written.events} 条事件与待办`)
-    if (written.profile > 0) parts.push(`档案 ${written.profile} 项`)
-    if (written.digest === true) parts.push('人物小传')
-    if (written.conversations > 0) parts.push(`${written.conversations} 段会话记忆`)
-    if (parts.length === 0) {
-      return `这次没有写进去任何东西${written.failures.length > 0 ? `（${written.failures.slice(0, 3).join('；')}）` : ''}。`
-    }
-    const tail = written.failures.length === 0
-      ? ''
-      : `\n（${written.failures.length} 项没成功：${written.failures.slice(0, 3).join('；')}）`
-    return `导入完成：${parts.join('、')}。${tail}\n（/memory 看现状，记错了 /undo 撤销最近一条）`
-  }
   const personaCommands = (conversationId) => {
-    const memoryOn = () => effectiveConfig.current.memoryEnabled !== false
-    const modeConfig = () => effectiveConfig.current
-    // "Is this line a companion?" — the same resolution the prompt build uses,
-    // so /status and /memory tell the same story the reply does. The stock
-    // assistant gets no affinity line: it has no feelings to report.
-    const companionHere = () => {
-      const modes = readPersonaStore(stateRoot, { warn })
-      const active = resolveMode(modes, activeModeFor(stateRoot, accountId, conversationId, effectiveConfig.current.personaDefaultMode ?? DEFAULT_MODE_ID, { warn }))
-      return isCompanionMode(active)
-    }
-    const activeModeHere = () => {
-      const modes = readPersonaStore(stateRoot, { warn })
-      return resolveMode(modes, activeModeFor(stateRoot, accountId, conversationId, effectiveConfig.current.personaDefaultMode ?? DEFAULT_MODE_ID, { warn }))
-    }
     return {
       // `/usage`：今天花了什么。不调模型，数字全部来自已有状态文件。
       usage: () => {
@@ -1951,15 +1550,9 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
         } catch {
           backgroundUsed = 0
         }
-        const proactiveState = readProactiveState(stateRoot, accountId, { warn })
-        const proactiveLimit = Number(live.proactiveMaxPerDay ?? 3)
         return buildUsageReport({
           backgroundUsed,
           backgroundLimit: Number(live.backgroundDailyLimit ?? 0),
-          proactiveCount: proactiveState?.count ?? 0,
-          proactiveLimit: Number.isFinite(proactiveLimit) ? proactiveLimit : 3,
-          proactiveLastAt: proactiveState?.lastAt ?? 0,
-          proactiveMisses: proactiveState?.misses ?? 0,
           outboxPending: typeof outbox?.pending === 'function' ? outbox.pending().length : 0,
           reminders: reminderScheduler?.list(accountId)?.length ?? 0,
           subscriptions: subscriptionScheduler?.list?.(accountId)?.length ?? 0,
@@ -1973,7 +1566,7 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
         const raw = String(arg ?? '').trim()
         if (raw === '') return describeTempQuiet(readTempQuiet(stateRoot, accountId, { warn }))
         if (/^(?:off|取消|关|恢复)$/i.test(raw)) {
-          return clearTempQuiet(stateRoot, accountId, { warn }) ? '已恢复：主动开口、自动回复和提醒都回来了。' : '本来就没有临时静默。'
+          return clearTempQuiet(stateRoot, accountId, { warn }) ? '已恢复：自动回复和提醒都回来了。' : '本来就没有临时静默。'
         }
         const plan = parseWhen(raw)
         if (plan.ok !== true) return `没听懂「${raw}」。用法：/quiet 2h、/quiet 30m、/quiet off。`
@@ -2002,117 +1595,17 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
         const action = String(arg ?? '').trim()
         if (/^(export|导出|打包)$/i.test(action)) return exportDiag()
         const live = effectiveConfig.current
-        const store = readPersonaStore(stateRoot, { warn })
-        const currentId = activeModeFor(stateRoot, accountId, conversationId, live.personaDefaultMode ?? DEFAULT_MODE_ID, { warn })
-        const current = resolveMode(store, currentId)
-        let proactive
-        try {
-          const state = readProactiveState(stateRoot, accountId, { warn })
-          proactive = state === undefined ? undefined : { count: state.count, lastAt: state.lastAt, misses: state.misses }
-        } catch {
-          proactive = undefined
-        }
         return buildDiagReport({
           version: PLUGIN_VERSION,
           accountId,
           transportUp: transport !== undefined,
-          proactiveWindow: describeLearnedHours(learnActiveHours(readJournalRange(stateRoot, { accountId, days: 14 }), {})),
-          modeName: current?.name ?? currentId,
-          companion: isCompanionMode(current),
           config: live,
           reminders: reminderScheduler?.list(accountId)?.length ?? 0,
           subscriptions: subscriptionScheduler?.list?.(accountId)?.length ?? 0,
-          proactive,
           journalToday: readJournalRange(stateRoot, { accountId, days: 1 }).length,
-          conversations: listConvMemories(stateRoot, accountId).length,
           allowlist: Array.isArray(live.allowedSenders) ? live.allowedSenders.length : 0,
           quietDelayMs: quietDelay(Date.now(), live),
         })
-      },
-      mode: (arg) => {
-        const store = readPersonaStore(stateRoot, { warn })
-        const currentId = activeModeFor(stateRoot, accountId, conversationId, effectiveConfig.current.personaDefaultMode ?? DEFAULT_MODE_ID, { warn })
-        if (arg === undefined || arg === '') {
-          const current = resolveMode(store, currentId)
-          const render = (m) => `${m.id === currentId ? '→' : '　'}${m.id === DEFAULT_MODE_ID ? '默认助手（不扮演角色）' : m.name} — /mode ${m.name === '' ? m.id : m.name}`
-          const roles = store.filter((m) => m.game !== true)
-          const games = store.filter((m) => m.game === true)
-          return [
-            `当前对话模式：${current?.name ?? currentId}。`,
-            ...roles.map(render),
-            // Games are modes too (a fresh conversation line is a fresh board),
-            // but they read better as their own section.
-            ...(games.length > 0 ? ['—— 小游戏（玩完 /mode 默认 就退出）——', ...games.map(render)] : []),
-          ].join('\n')
-        }
-        // Users type the display name (女友), not the id (girlfriend) — match
-        // either, case-insensitively. The default mode additionally answers to
-        // the bare 「默认」, which is what a user says when they mean "no
-        // persona" (its display name 默认助手 is clunky to type).
-        const wanted = arg.trim().toLowerCase()
-        const matches = (m) => m.id.toLowerCase() === wanted
-          || m.name.toLowerCase() === wanted
-          || (m.id === DEFAULT_MODE_ID && wanted === '默认')
-        const match = store.find(matches)
-        if (match === undefined) {
-          return `没有叫「${arg}」的模式。可用：${store.map((m) => (m.id === DEFAULT_MODE_ID ? '默认' : m.name)).join('、')}`
-        }
-        if (match.id === currentId) return `已经是「${match.name}」模式了，没有变化。`
-        // Pin even `default`: the global default may be a persona, and "this
-        // conversation back to the plain assistant" is exactly what /mode 默认
-        // should mean here.
-        setActiveMode(stateRoot, accountId, conversationId, match.id, { warn })
-        // A mode switch opens a fresh session line (the approved behaviour):
-        // the previous persona is already in the old transcript, and starting
-        // clean is what makes the switch feel real. Same mechanics as /new.
-        bridge.lines.create(conversationId, accountId)
-        return `${match.id === DEFAULT_MODE_ID ? '已切回默认助手' : `已切换到「${match.name}」`}模式，并开启了一条新会话线。\n（之前的会话保留，/list 可以切回）`
-      },
-      // /digest: the 21:00 report, on demand. Same builder and same cheap
-      // route as the scheduler, but it sends nothing to WeChat by itself — the
-      // reply is the report, so asking twice does not spam the chat history.
-      digest: async () => {
-        const now = Date.now()
-        const day = formatStamp(now)
-        const { prompt, total } = composeDigest({
-          stateRoot,
-          accountId,
-          conversationId,
-          now,
-          warn,
-          day,
-          staleDays: Number(effectiveConfig.current.memoryStaleDays ?? 90),
-        })
-        if (total.all === 0) return '今天还没有消息流水，日报没什么可写的。'
-        const result = await bridge.summarize({ conversationId, accountId, prompt, sessionPrefix: 'wx-dig-', route: sideRoute?.('report') })
-        if (result === undefined) return '当前有对话在跑，等这轮结束再试 /digest。'
-        const text = String(result.text ?? '').trim()
-        return text === '' ? '日报没有生成出来（侧会话没返回内容），过一会儿再试。' : text
-      },
-      // /summary: an on-demand look at where the conversation stands. Unlike
-      // the background summarizer it replies to the user and never writes the
-      // conv file — 「看一眼」 and 「记住」 stay separate concerns.
-      summary: async () => {
-        const prior = readConvMemory(stateRoot, accountId, conversationId, { warn })
-        const recent = readRecentWindow(stateRoot, accountId, conversationId, { turns: 20, textChars: 200 })
-        const transcript = recent
-          .map((entry) => `${entry.dir === 'in' ? '用户' : '助手'}：${entry.text}`)
-          .join('\n')
-        if (transcript === '') return '这段会话还没有可总结的消息（消息流水里是空的）。'
-        const prompt = [
-          '以下是这段微信会话最近的对话记录。',
-          ...(String(prior.summary ?? '') !== '' ? [`【已有摘要】\n${prior.summary}`] : []),
-          `【最近对话】\n${transcript}`,
-          '请总结我们聊到哪了：正在讨论的话题、已经决定的事、还没做完的待办、彼此的约定。',
-          '不超过 300 字，直接输出总结本身，不要任何解释或前缀。',
-        ].join('\n')
-        // C20: the background route is threaded in from setup() — this handler
-        // is module-level and cannot see the setup closure.
-        const result = await bridge.summarize({ conversationId, accountId, prompt, sessionPrefix: 'wx-sum-', route: sideRoute?.() })
-        if (result === undefined) return '当前有对话在跑，等这轮结束再试 /summary。'
-        const text = String(result.text ?? '').trim()
-        if (text === '' || text === '（已取消）') return '这次没总结出来（侧会话没有返回内容），稍后再试。'
-        return text
       },
       // /export: render this conversation's journal as Markdown. Short
       // exports ride the normal reply; long ones land in
@@ -2126,92 +1619,6 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
         if (markdown.length <= 3000) return markdown
         const file = writeChatExport(stateRoot, accountId, conversationId, markdown)
         return `聊天记录比较长（${entries.length} 条，${markdown.length} 字），已导出成文件：\n${file}\n完整内容也可以在设置卡「消息流水」页签里一键导出。`
-      },
-      recall: (arg) => {
-        const keyword = String(arg ?? '').trim()
-        if (keyword === '') return '用法：/recall <关键词>，例如 /recall 报错。会在本地消息流水里翻原文，不经过模型、不花 token。'
-        const days = Number(modeConfig().memoryRecallDays ?? 180)
-        const limit = 5
-        // 先在这段会话里找（最相关），找不到再扩大到整个账号——
-        // 用户问「上次说的那个」时，往往记不清是在哪个对话里说的。
-        const inConversation = queryRecall(stateRoot, keyword, { accountId, conversationId, days, limit, warn })
-        if (inConversation.length > 0) return formatRecallHits(inConversation, { query: keyword })
-        const anywhere = queryRecall(stateRoot, keyword, { accountId, days, limit, warn })
-        if (anywhere.length === 0) {
-          return `本地流水（最近 ${days} 天）里没有找到和「${keyword}」相关的消息。`
-        }
-        return `这个会话里没有，但账号下其他对话里有：\n${formatRecallHits(anywhere, { query: keyword })}`
-      },
-      // `/是`、`/不用`：only routed here while a question is pending (see the
-      // router); otherwise the message stays ordinary chat.
-      answer: (arg) => {
-        if (memoryOn() === false) return undefined
-        const decision = parseConflictAnswer(arg)
-        // ④ An unconfirmed import is answered with the same two short words. It is
-        // checked first: "是" right after /import must never be read as a fact.
-        if (pendingImport !== undefined) {
-          const { plan, at, policy: importPolicy = 'fill' } = pendingImport
-          const staleImport = Date.now() - at > IMPORT_CONFIRM_TTL_MS
-          if (decision === 'yes' && staleImport === false) {
-            pendingImport = undefined
-            return applyImport(plan, importPolicy)
-          }
-          pendingImport = undefined
-          if (decision === 'no') return '好，什么都没改。'
-          if (staleImport && decision === 'yes') return '这个预览已经超过十分钟了，为了安全没有导入。再发一次 /import 我重新读一遍。'
-        }
-        const pending = conflictQueue.take(accountId)
-        if (pending === undefined) return undefined
-        const answer = parseConflictAnswer(arg)
-        if (answer === undefined) return undefined
-        if (answer === 'no') return conflictReply(pending, 'no')
-        const applied = addGlobalFact(stateRoot, accountId, pending.text, {
-          warn,
-          maxFacts: modeConfig().memoryGlobalMaxFacts,
-          supersedes: pending.supersedes,
-          origin: '/remember',
-        })
-        if (applied.added === true) return conflictReply(pending, 'yes')
-        if (applied.reason === 'duplicate') return '这条已经记过了，不用再记一遍。'
-        if (applied.reason === 'cap') return `长期记忆已经存满（${modeConfig().memoryGlobalMaxFacts} 条）。用 /forget 先删掉一些再记。`
-        return '没存上，写入记忆文件失败了（详见日志）。'
-      },
-      remember: (arg) => {
-        if (memoryOn() === false) return '记忆功能当前是关闭的（设置里的「会话记忆」），先打开再用 /remember。'
-        if (arg === undefined || String(arg).trim() === '') {
-          return '用法：/remember <要记住的内容>，例如 /remember 我对花生过敏\n改口用箭头：/remember 我搬到杭州了 → 我住在杭州'
-        }
-        // ② A new fact supersedes any outstanding question: the user moved on.
-        conflictQueue.clear(accountId)
-        // Explicit correction (C18): `旧 → 新` replaces the old fact instead of
-        // leaving both for the model to choose from.
-        const arrow = String(arg).match(/^(.+?)\s*(?:→|->|=>)\s*(.+)$/)
-        const text = arrow === null ? String(arg).trim() : arrow[2].trim()
-        const supersedes = arrow === null ? [] : [arrow[1].trim()]
-        // ② Same slot, different value ("我住在杭州" vs "我住在上海"): ask before
-        // letting two contradictory facts sit side by side and confuse the model.
-        if (supersedes.length === 0) {
-          const conflict = findMemoryConflict(text, readGlobalMemory(stateRoot, accountId, { warn }).facts)
-          if (conflict !== undefined) {
-            conflictQueue.ask(accountId, { text, supersedes: [conflict.text] })
-            return conflictReply({ text, supersedes: [conflict.text] })
-          }
-        }
-        const result = addGlobalFact(stateRoot, accountId, text, {
-          warn,
-          maxFacts: modeConfig().memoryGlobalMaxFacts,
-          supersedes,
-          origin: '/remember',
-        })
-        if (result.added === true) {
-          const replaced = Array.isArray(result.superseded) && result.superseded.length > 0
-            ? `\n（原来的「${result.superseded.join('」「')}」已作废）`
-            : ''
-          return `已记住：${text}${replaced}\n（/memory 可以查看全部，/forget <编号> 可以删除，记错了 /undo 撤销）`
-        }
-        if (result.reason === 'duplicate') return '这条已经记过了，不用再记一遍。'
-        if (result.reason === 'cap') return `长期记忆已经存满（${modeConfig().memoryGlobalMaxFacts} 条）。用 /forget 先删掉一些再记。`
-        return '没存上，写入记忆文件失败了（详见日志）。'
       },
       // ⑥ 群关键词规则配在设置卡里，命中是静默的模板回复 —— 用户看不出哪条
       //    规则在干活、哪条写错了正则永远不响。这个命令把规则和计数一起摊开。
@@ -2250,265 +1657,6 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
         if (stats.every((entry) => entry.triggered === 0)) lines.push('（这些规则一次都没命中过：检查正则大小写、^$ 锚点，以及是不是只在群里生效）')
         return lines.join('\n')
       },
-      import: async (arg) => {
-        if (memoryOn() === false) return '记忆功能当前是关闭的（设置里的「会话记忆」）。'
-        const text = String(arg ?? '')
-        if (text.trim() === '') {
-          return [
-            '用法：',
-            '1. /memory export json —— 拿到一段 JSON（或者 /memory export 的 Markdown）',
-            '2. /import <粘贴内容> [append|merge|replace]',
-            '3. 我先把要写的东西念一遍，你回「是」才真的写进去。',
-            '',
-            '策略：append/补缺（默认，只补缺）· merge/合并（档案补空字段）· replace/覆盖（档案以包为准）。',
-            '写文件也行：/import <文件路径> merge —— 只读 mediaDirs 里的文件。',
-          ].join('\n')
-        }
-
-        // The policy may be written at either end: `/import merge <text>` (easy to
-        // type) or `/import <text> merge` (what you get when pasting first). Both
-        // are recognised, and a bare `/import merge` with no payload explains the
-        // usage rather than importing nothing.
-        let rest = text
-        let policy = 'fill'
-        const leading = /^([A-Za-z]+)\s+/.exec(rest)
-        if (leading !== null) {
-          const word = normalizeImportPolicy(leading[1])
-          if (word !== undefined) {
-            policy = word
-            rest = rest.slice(leading[0].length)
-          }
-        }
-        const trailing = /\s+([A-Za-z]+)\s*$/.exec(rest)
-        if (trailing !== null) {
-          const word = normalizeImportPolicy(trailing[1])
-          if (word !== undefined) {
-            policy = word
-            rest = rest.slice(0, trailing.index)
-          }
-        }
-        if (rest.trim() === '') {
-          return `策略是 ${policy}，但没看到要导入的内容。用法：/import merge <粘贴的内容>`
-        }
-
-        // A path is what people reach for when moving machines: `migrate-payload.json`
-        // dropped somewhere allowed. It goes through the same allowlist as /send,
-        // so a path outside mediaDirs is refused with the reason, not opened.
-        let payload = rest
-        let source = '粘贴的内容'
-        const looksLikePath = /^[~/]/.test(rest.trim()) || /\.(json|md|markdown|txt)$/i.test(rest.trim().split('\n')[0].trim())
-        if (looksLikePath) {
-          const resolved = await resolveAllowedPath(rest.trim(), mediaDirs)
-          if (resolved.ok === true && resolved.existed === true) {
-            try {
-              payload = fs.readFileSync(resolved.path, 'utf8')
-              source = `文件 ${resolved.path}`
-            } catch (error) {
-              return `读不了这个文件：${String(error?.message ?? error)}`
-            }
-          } else if (resolved.ok === false && resolved.existed === false) {
-            return `找不到文件：${rest.trim()}`
-          } else {
-            return `这个路径不在允许的目录里（工作目录、状态目录、设置里的 mediaDirs）。`
-          }
-        }
-
-        const trimmed = payload.trimStart()
-        const isJson = trimmed.startsWith('{') || trimmed.startsWith('[') || /\.json$/i.test(source)
-        let parsed
-        if (isJson) {
-          const decoded = parseMemoryJson(payload)
-          if (decoded.ok === false) return decoded.reason
-          parsed = decoded.parsed
-        } else {
-          parsed = parseMemoryMarkdown(payload)
-        }
-
-        // Conversations already on this machine, so the plan can tell "new" from
-        // "already remembered" instead of overwriting either way.
-        const existingConversations = {}
-        for (const conv of listConvMemories(stateRoot, accountId)) {
-          existingConversations[conv.conversationId] = conv
-        }
-        const plan = planMemoryImport(
-          parsed,
-          { ...readGlobalMemory(stateRoot, accountId, { warn }), conversations: existingConversations },
-          { maxFacts: modeConfig().memoryGlobalMaxFacts },
-        )
-        if (plan.nothingToDo) {
-          pendingImport = undefined
-          return formatImportPreview(plan, { source, policy })
-        }
-        pendingImport = { plan, at: Date.now(), policy }
-        return formatImportPreview(plan, { source, policy })
-      },
-      undo: (arg) => {
-        if (memoryOn() === false) return '记忆功能当前是关闭的。'
-        const times = arg === '' ? 1 : Number(arg)
-        if (Number.isInteger(times) === false || times < 1 || times > 5) return '用法：/undo 或 /undo 2（一次最多撤销 5 步）。'
-        const done = []
-        for (let step = 0; step < times; step += 1) {
-          // Only recent writes: a /undo typed a week later must not quietly
-          // delete a fact the user still means ("the undo button has no memory").
-          const result = undoLastMemoryChange(stateRoot, accountId, { warn, within: 30 * 60_000 })
-          if (result.ok === true) {
-            done.push(result.restored > 0 ? `恢复「${result.text}」` : `撤销「${result.text}」`)
-            continue
-          }
-          if (result.reason === 'too-old') {
-            done.push('最近一次记忆改动是 30 分钟以前的，为了安全没有撤销 —— 用 /forget <编号> 手动删')
-            break
-          }
-          if (result.reason === 'empty') break
-          done.push('没撤销成功，写入记忆文件失败了（详见日志）')
-          break
-        }
-        if (done.length === 0) return '没有可撤销的记忆改动。'
-        return [...done.map((line, index) => `${index + 1}. ${line}`), '（/memory 看当前内容）'].join('\n')
-      },
-      forget: (arg) => {
-        if (memoryOn() === false) return '记忆功能当前是关闭的。'
-        const facts = readGlobalMemory(stateRoot, accountId, { warn }).facts
-        if (facts.length === 0) return '长期记忆还是空的，没有可忘掉的。'
-        if (arg === undefined || String(arg).trim() === '') {
-          return ['长期记忆（/forget <编号> 删除某一条）：', ...facts.map((f, i) => `${i + 1}. ${f.text}`)].join('\n')
-        }
-        const asIndex = Number(arg)
-        if (Number.isInteger(asIndex) === true) {
-          const removed = removeGlobalFact(stateRoot, accountId, asIndex, { warn })
-          return removed.removed === true ? `已忘掉：${removed.text}` : `没有第 ${asIndex} 条（现在共 ${facts.length} 条）。`
-        }
-        const keyword = String(arg).toLowerCase()
-        const hits = facts.map((f, i) => ({ index: i + 1, text: f.text })).filter((f) => f.text.toLowerCase().includes(keyword))
-        if (hits.length === 0) return `没有找到含「${arg}」的记忆。`
-        if (hits.length === 1) {
-          const removed = removeGlobalFact(stateRoot, accountId, hits[0].index, { warn })
-          return removed.removed === true ? `已忘掉：${removed.text}` : '没删掉，写入记忆文件失败了（详见日志）。'
-        }
-        return ['好几个都带这个词，用编号指明删哪条：', ...hits.map((h) => `${h.index}. ${h.text}`)].join('\n')
-      },
-      memory: async (arg) => {
-        if (memoryOn() === false) return '记忆功能当前是关闭的。'
-        const sub = String(arg ?? '').trim()
-        const store = readGlobalMemory(stateRoot, accountId, { warn })
-        // /memory export json: the machine-readable twin of `export`. It carries
-        // the same three layers, one fact carrying its own confirmation time and
-        // source, so an import can rank and dedupe them instead of guessing.
-        if (/^(export\s+json|json\s+export|json|导出\s*json)$/i.test(sub)) {
-          const payload = renderMemoryJson({
-            store,
-            conversations: listConvMemories(stateRoot, accountId),
-            dates: upcomingDates(store, new Date(), { leadDays: Number(modeConfig().dateReminderLeadDays ?? 0) })
-              .map((item) => ({ label: item.label, date: item.on })),
-            conversationId,
-            affinity: readAffinityHistory(stateRoot, accountId, conversationId, { warn }),
-          })
-          const text = JSON.stringify(payload, null, 2)
-          if (text.length <= 3000) return ['```json', text, '```', '', '拿到别处用 /import <粘贴> 就能读回来；文件版看 /memory export。'].join('\n')
-          const file = writeMemoryExport(stateRoot, accountId, conversationId, text, { extension: 'json' })
-          return `记忆已导出成 JSON 文件：\n${file}\n在新机器上 /import ${file} 即可（或在设置卡「维护」页签用迁移包）。`
-        }
-        // /memory export (导出): the operator's right to carry what it knows.
-        // Same shape as /memory, rendered as a document; a long one lands in
-        // exports/ and rides the attachment path like /export does.
-        // /memory stale (过期 / 核对): which facts have not been reconfirmed in
-        // a long while. Read-only — corrections still go through /remember and
-        // /forget, the two places memory is allowed to change.
-        // /memory merge <编号...>: fold statements that say the same thing into the
-        // most recently confirmed one. It is a human action on purpose — the hint
-        // below only ever asks, never rewrites on its own.
-        const mergeMatch = /^(?:merge|合并)\s+([\d\s,，]+)$/i.exec(sub)
-        if (mergeMatch !== null) {
-            const indexes = mergeMatch[1].split(/[\s,，]+/).filter((part) => part !== '').map(Number)
-            const merged = mergeFacts(store, indexes, { now: Date.now() })
-            if (merged.ok === false) {
-                return merged.reason === 'need-two'
-                    ? `要合并至少两条，用编号指出来：/memory merge 1 3（现在是 ${store.facts.length} 条）`
-                    : '用法：/memory merge <编号> <编号> …'
-            }
-            const failed = writeGlobalMemory(stateRoot, accountId, store, { warn })
-            if (failed !== true) return '合并失败，写入记忆文件出错了（详见日志）。'
-            return [
-                `已合并成：${merged.kept}`,
-                `并进「改过的说法」：${merged.dropped.join('；')}`,
-                '（合错了就 /undo，这次合并可以整步撤回）',
-            ].join('\n')
-        }
-        if (/^(stale|过期|核对)$/i.test(sub)) {
-          const report = staleFacts(store.facts, {
-            now: Date.now(),
-            staleDays: Number(modeConfig().memoryStaleDays ?? 90),
-          })
-          return formatStaleReport(report, { total: store.facts.length })
-        }
-        if (/^(export|导出)$/i.test(sub)) {
-          const markdown = renderMemoryMarkdown({
-            store,
-            conversations: listConvMemories(stateRoot, accountId),
-            dates: upcomingDates(store, new Date(), { leadDays: Number(modeConfig().dateReminderLeadDays ?? 0) })
-              .map((item) => ({ label: item.label, date: item.on })),
-            accountId,
-            conversationId,
-            formatProfile,
-            formatEvents,
-            bondLine,
-            describeAffinity,
-            affinity: readAffinityHistory(stateRoot, accountId, conversationId, { warn }),
-          })
-          if (markdown.length <= 3000) return markdown
-          const file = writeMemoryExport(stateRoot, accountId, conversationId, markdown)
-          return `记忆已导出成文件：\n${file}\n同一份内容也可以在设置卡「消息流水」页签导出聊天记录。`
-        }
-        const conv = readConvMemory(stateRoot, accountId, conversationId, { warn })
-        const recent = readRecentWindow(stateRoot, accountId, conversationId, { warn })
-        const parts = []
-        const bond = companionHere() ? bondLine(conv.bond) : ''
-        if (bond !== '') parts.push(bond)
-        if (store.digest !== '') parts.push(`人物小传：${store.digest}`)
-        const profileLines = formatProfile(store.profile)
-        if (profileLines.length > 0) parts.push(['关于你的档案：', ...profileLines].join('\n'))
-        if (store.events.length > 0) parts.push(['事件与待办：', ...formatEvents(store.events)].join('\n'))
-        parts.push(store.facts.length === 0
-          ? '长期记忆：还没有，用 /remember 教我。'
-          : ['长期记忆（括号里是最后一次确认的时间与来源）：', ...formatFactLines(store.facts, { now: Date.now() })].join('\n'))
-        const affinity = describeAffinity(readAffinityHistory(stateRoot, accountId, conversationId, { warn }))
-        if (affinity !== '') parts.push(['最近的关系曲线：', affinity].join('\n'))
-        if (store.superseded.length > 0) {
-          parts.push(['改过的说法：', ...store.superseded.slice(-5).map((entry) => `- ${entry.text} → ${entry.by}`)].join('\n'))
-        }
-        parts.push(conv.summary !== '' ? `本会话记忆：${conv.summary}` : '本会话记忆：还没有摘要（会自动按回合记一次）。')
-        parts.push(`最近消息窗口：${recent.length} 条`)
-        // Not part of `parts` above: the hint is a question, and it must be the
-        // last thing said so it is the thing that gets answered.
-        // Only "substantive" repeats are asked about: sharing one common word is
-        // not the same statement, and a wrong merge costs a real fact. With
-        // `memorySimilarityRoute` on, a group the rules are unsure about goes to
-        // the memory model for a yes/no — that costs one background call, which
-        // is why it is off by default and subject to the daily background budget.
-        let duplicates = findDuplicateFacts(store.facts, { narrow: true })
-        if (duplicates.length > 0 && effectiveConfig.current.memorySimilarityRoute === 'memory') {
-            const judged = []
-            for (const group of duplicates) {
-                const sentinel = randomBytes(4).toString('hex')
-                const result = await bridge.summarize({
-                    conversationId,
-                    accountId,
-                    prompt: buildSimilarityPrompt(sentinel, group.texts),
-                    sessionPrefix: 'wx-ded-',
-                    route: sideRoute?.('memory'),
-                })
-                const verdict = parseSimilarityAnswer(result?.text ?? '', group.texts.length)
-                // No answer, or an unparseable one, leaves the group as a *question*
-                // rather than an assertion — the user still decides.
-                if (verdict.same === true) judged.push(group)
-                else if (verdict.judgeable === false) judged.push(group)
-            }
-            duplicates = judged
-        }
-        const hint = formatDuplicateHint(duplicates)
-        if (hint !== '') parts.push(hint)
-        return parts.join('\n\n')
-      },
       ...createAwayCommands({ stateRoot, accountId, warn, parseWhen }),
       ...createListCommands({ stateRoot, accountId, warn }),
       ...createHabitCommands({ stateRoot, accountId, warn }),
@@ -2519,10 +1667,7 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
           const held = readDraft(stateRoot, accountId, { warn })
           return held === undefined ? undefined : { kind: held.kind, label: held.forLabel }
         },
-        who: () => {
-          const person = readGlobalMemory(stateRoot, accountId, { warn })?.profile?.name
-          return typeof person === 'string' && person.trim() !== '' ? person.trim() : undefined
-        },
+        who: () => undefined,
         send: (text) => sendChunked(transport, effectiveConfig.current, { conversationId, text }),
         warn,
       }),
@@ -2555,13 +1700,6 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
         fileLog.info(`sent /say voice (${speech.chars} chars) to ${conversationId}`)
         return `用本机音色合成好了，作为${how}发了出去（${speech.chars} 字${speech.truncated ? '，只念了前一段' : ''}）。`
       },
-      ...createStyleCommands({
-        stateRoot,
-        accountId,
-        modeId: () => activeModeHere()?.id,
-        modeLabel: () => activeModeHere()?.label,
-        warn,
-      }),
       ...createMediaCommands({
         dir: inboxDir(),
         conversationId,
@@ -2870,21 +2008,7 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
       },
       reminders: reminderScheduler,
       subscription: subscriptionScheduler,
-      // Affinity rides /status when memory is on; computed fresh per message
-      // like the rest of the status facts (the card can edit between messages).
-      // Affinity is an emotional frame, so it rides /status only in a
-      // companion conversation — the stock assistant reports facts, not moods.
-      bondLine: effectiveConfig.current.memoryEnabled !== false
-        && isCompanionMode(resolveMode(readPersonaStore(stateRoot, { warn }), activeModeFor(stateRoot, accountId, message.conversationId, effectiveConfig.current.personaDefaultMode ?? DEFAULT_MODE_ID, { warn })))
-        ? bondLine(readConvMemory(stateRoot, accountId, message.conversationId, { warn }).bond)
-        : '',
-      // ② `/是`、`/不用` 答的是「要不要把它换成这条」（以及 ④ 的导入确认）。
-      //    问题只存在内存里，所以这个入口要能自己说「现在没人问你」（回
-      //    undefined = 普通聊天）。它必须挂在 persona 上：命令视图只认识
-      //    persona 这一袋 handler。
-      // ② 每收到一条消息都会新拼一个 persona bundle，两个 handler 都是无状态的，
-      //    待答问题存在上面那两个模块级变量里 —— 这正是 /import → /是 能接上的
-      //    原因。`answer` 因此是 bundle 上唯一的入口，不再额外包一层。
+      // 会话控制命令由 persona bundle 提供（状态目录只有这里知道）。
       persona: personaCommands(message.conversationId),
       t: createTranslator(effectiveConfig.current.locale).t,
     })
@@ -3085,30 +2209,9 @@ ${neutralizeTags(ocr.text)}
       prompt = weixinSourceBlock(message) + (prompt === '' ? '' : `\n\n${prompt}`)
     }
 
-    // Persona: only inject `<weixin_persona>` once per session line when
-    // activeMode.id !== 'default' (or when `/mode` changes), keeping turns
-    // completely free of repeated XML wrapper pollution.
-    const personaModes = readPersonaStore(stateRoot, { warn })
-    const activeMode = resolveMode(personaModes, activeModeFor(stateRoot, accountId, message.conversationId, effectiveConfig.current.personaDefaultMode ?? DEFAULT_MODE_ID, { warn }))
-    const lineSessionId = bridge.lines.active(message.conversationId, accountId)
-    let personaBlock = ''
-    if (activeMode && activeMode.id !== DEFAULT_MODE_ID && injectedPersonaBySession.get(lineSessionId) !== activeMode.id) {
-      personaBlock = buildPersonaBlock(activeMode)
-      injectedPersonaBySession.set(lineSessionId, activeMode.id)
-    }
-    if (personaBlock !== '') {
-      prompt = [personaBlock, prompt].filter((part) => part !== '').join('\n\n')
-    }
-
-    const separators = personaBlock !== '' ? 2 : 0
     recordPromptComposition(accountId, [
-      { key: 'persona', chars: personaBlock.length },
-      { key: 'message', chars: Math.max(0, prompt.length - personaBlock.length - separators) },
+      { key: 'message', chars: prompt.length },
     ], { total: prompt.length, at: journaledAt })
-
-    // The user spoke: clear the proactive backoff. Reset before the turn so a
-    // slow reply cannot count as silence and trigger a second message.
-    proactiveScheduler?.noteInbound(accountId)
 
     // 5. Drive the agent, then send the reply back in chunks.
     if (config.typingIndicator) await transport.setTyping(true, message.conversationId)
