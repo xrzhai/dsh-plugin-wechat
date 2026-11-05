@@ -244,9 +244,9 @@ export function allowlistForAccount(accountId, config) {
  * allowlist and the message itself is allowed through.
  *
  * Only the FIRST contact enrols: afterwards the account has an override and
- * further strangers are refused as before — whoever scans owns the account,
- * but a stranger who merely messages first does not (the enrolment has
- * already happened by then, or the operator removed it deliberately).
+ * further strangers are refused. The first contact may not be the scanner.
+ * The caller must check that the effective sender list is empty and the chat
+ * is permitted before calling this function.
  *
  * @param {string} accountId
  * @param {string} senderId the sender to enrol
@@ -258,7 +258,7 @@ export function allowlistForAccount(accountId, config) {
  * @returns {boolean} true when the sender was enrolled and the caller should
  *   let the message through; false when enrolment does not apply
  */
-export function enrolFirstContact(accountId, senderId, hasOverride, note = () => {}, globalSenders = []) {
+export function enrolFirstContact(accountId, senderId, hasOverride, note = () => {}) {
   if (typeof accountId !== 'string' || accountId === '') return false
   if (typeof senderId !== 'string' || senderId === '') return false
   if (hasOverride()) return false
@@ -269,12 +269,7 @@ export function enrolFirstContact(accountId, senderId, hasOverride, note = () =>
   if (Array.isArray(entry?.allowedSenders) && entry.allowedSenders.length > 0) return false
   if (entry?.firstContactEnrolledAt) return false
   const fresh = ensureAccountEntry(registry, accountId)
-  // Merge, not replace: an account-level list REPLACES the global one (that is
-  // the documented override rule), so seeding it with only the first contact
-  // would silently revoke every global sender mid-conversation. The enrolled
-  // entry starts as "global list plus the scanner".
-  const merged = new Set([...(Array.isArray(globalSenders) ? globalSenders : []), senderId])
-  fresh.allowedSenders = [...merged]
+  fresh.allowedSenders = [senderId]
   fresh.firstContactEnrolledAt = new Date().toISOString()
   writeRegistry(registry, () => {})
   note(`first contact ${senderId} enrolled into account ${accountId}'s allowlist`)
