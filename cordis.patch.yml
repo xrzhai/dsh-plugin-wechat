@@ -14,7 +14,7 @@
 # cannot start two long-poll loops on one WeChat account.
 - insert:
     - id: dsh-weixin
-      name: 'dsh-plugin-weixin'
+      name: 'dsh-plugin-wechat'
       config:
         enabled: true
         # Empty means deny-everyone. Fill in the Weixin user id(s) you scanned
@@ -27,4 +27,4 @@
       # Must stay a single-line scalar: the loader evaluates this with eval(),
       # and `entries()` yields entry records, not [id, entry] tuples — the
       # row's identity lives on `entry.options.id`, not in a destructured key.
-      disabled: !!js "[...ctx.loader.entries()].some((e) => e.options.name === 'dsh-plugin-weixin' && e.options.id !== 'dsh-weixin' && !e.disabled)"
+      disabled: !!js "[...ctx.loader.entries()].some((e) => (e.options.name === 'dsh-plugin-wechat' || e.options.name === 'dsh-plugin-weixin') && e.options.id !== 'dsh-weixin' && !e.disabled)"

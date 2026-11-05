@@ -1,5 +1,5 @@
 window.__ModuleLoader__.load({
-	id: "dsh-plugin-weixin",
+	id: "dsh-plugin-wechat",
 	factory: (require) => {
 		var module = { exports: {} };
 		var exports = module.exports;
@@ -34,10 +34,10 @@ window.__ModuleLoader__.load({
 		}
 		//#endregion
 
-		const PKG = "dsh-plugin-weixin";
+		const PKG = "dsh-plugin-wechat";
 		// Kept in step with package.json by bin/release.mjs bumpVersion() — the card
 		// cannot import package.json, so the release script rewrites this line.
-		const PLUGIN_VERSION = "1.5.0";
+		const PLUGIN_VERSION = "1.6.2";
 		const NS = "dshPluginWeixin";
 
 		const TYPERT_REMOTE = {

@@ -1,5 +1,5 @@
 window.__ModuleLoader__.load({
-	id: "dsh-plugin-weixin",
+	id: "dsh-plugin-wechat",
 	// A package-local lazy chunk. The loader's contract (client-modules) is:
 	// a package contributes ONE boot-graph entry (its `./client` export), and any
 	// source `import()` inside it compiles to `require.async("./client.<name>.js")`
@@ -1382,8 +1382,8 @@ window.__ModuleLoader__.load({
 					} else {
 						setCheckState("outdated");
 						setNotice(t(
-							`A newer version is out: ${latest} (installed ${PLUGIN_VERSION}). Update with "npm install dsh-plugin-weixin@${latest}" or the plugin market.`,
-							`有新版本：${latest}（当前 ${PLUGIN_VERSION}）。可用「npm install dsh-plugin-weixin@${latest}」或在插件市场更新。`,
+							`A newer version is out: ${latest} (installed ${PLUGIN_VERSION}). Update with "npm install dsh-plugin-wechat@${latest}" or the plugin market.`,
+							`有新版本：${latest}（当前 ${PLUGIN_VERSION}）。可用「npm install dsh-plugin-wechat@${latest}」或在插件市场更新。`,
 						));
 					}
 				} catch (e) {

@@ -57,7 +57,7 @@ const uninstall = argv.includes('--uninstall')
 // dependency at the version being copied and refresh its lockfile.
 const pin = argv.includes('--pin')
 
-const PKG_NAME = 'dsh-plugin-weixin'
+const PKG_NAME = 'dsh-plugin-wechat'
 const ROW_ID = 'dsh-weixin'
 
 const sourceRoot = path.resolve(import.meta.dirname, '..')
@@ -183,7 +183,7 @@ if (fs.existsSync(silkSrc) && !fs.existsSync(silkDst)) {
 // package that no longer exists — so drop the superseded entries and their
 // on-disk copies. The mounted row is deliberately NOT renamed (it keeps the id
 // `dsh-weixin`), so the operator's allowlist survives this migration untouched.
-const SUPERSEDED_PACKAGES = ['dsh-weixin']
+const SUPERSEDED_PACKAGES = ['dsh-weixin', 'dsh-plugin-weixin']
 const pkg = JSON.parse(fs.readFileSync(profilePkgPath, 'utf8'))
 const profileNode = pkg.dsh ?? (pkg.dsh = {})
 const profileCfg = profileNode.profile ?? (profileNode.profile = {})
@@ -191,7 +191,7 @@ const bundles = Array.isArray(profileCfg.bundles) ? profileCfg.bundles : (profil
 let profileChanged = false
 for (const stale of SUPERSEDED_PACKAGES) {
   if (bundles.includes(stale)) {
-    profileCfg.bundles = bundles.splice(bundles.indexOf(stale), 1)
+    bundles.splice(bundles.indexOf(stale), 1)
     profileChanged = true
     process.stdout.write(`removed superseded ${stale} from dsh.profile.bundles\n`)
   }

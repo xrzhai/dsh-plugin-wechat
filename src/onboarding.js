@@ -225,7 +225,7 @@ export function describeNextStep(checklist, t = (zh) => zh) {
 export function quickstartLines(options = {}) {
   const login = typeof options.loginHint === 'string' && options.loginHint !== '' ? options.loginHint : 'node bin/login.js'
   return [
-    { command: 'npm install dsh-plugin-weixin && node bin/doctor.mjs', note: '装好并自检：宿主版本、依赖、数据目录都会报出来。' },
+    { command: 'npm install dsh-plugin-wechat && node bin/doctor.mjs', note: '装好并自检：宿主版本、依赖、数据目录都会报出来。' },
     { command: login, note: '扫码登录一个微信账号——这一步只能用手机完成。' },
     { command: 'node bin/onboard.mjs', note: '把它需要的目录与默认配置建好，然后告诉你还差哪一步。' },
   ]

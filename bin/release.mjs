@@ -43,7 +43,7 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const ROOT = path.resolve(import.meta.dirname, '..')
-const PKG_NAME = 'dsh-plugin-weixin'
+const PKG_NAME = 'dsh-plugin-wechat'
 
 /**
  * Split the command line. Exported so a test can pin the shapes that matter —

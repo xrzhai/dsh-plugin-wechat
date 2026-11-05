@@ -16,7 +16,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 
-export const PKG_NAME = 'dsh-plugin-weixin'
+export const PKG_NAME = 'dsh-plugin-wechat'
 
 /** The pnpm the app itself uses, so the lockfile matches what the app resolves. */
 export const BUNDLED_PNPM = '/Applications/DeepSeek Harness.app/Contents/Resources/runtime/primary-runtime/dependencies/pnpm/bin/pnpm.mjs'

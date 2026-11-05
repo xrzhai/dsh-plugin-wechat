@@ -34,7 +34,7 @@ export function createWebhookSender({ url, secret = '', timeoutMs = DEFAULT_WEBH
   return {
     async send(event, payload = {}) {
       const body = JSON.stringify({ event, at: new Date().toISOString(), ...payload })
-      const headers = { 'content-type': 'application/json', 'user-agent': 'dsh-plugin-weixin' }
+      const headers = { 'content-type': 'application/json', 'user-agent': 'dsh-plugin-wechat' }
       if (secret !== '') {
         headers['x-weixin-signature'] = `sha256=${crypto.createHmac('sha256', secret).update(body).digest('hex')}`
       }
