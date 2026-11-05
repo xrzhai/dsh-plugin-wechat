@@ -474,13 +474,15 @@ export class SessionLines {
     if (line === undefined) return undefined
     // Only the first message names a line: re-titling on every message would
     // make `/list` show whatever was said most recently.
-    if (typeof line.title === 'string' && line.title !== '') return undefined
+    // deliver() calls this for every message. Keep the first title, but record
+    // every visit so notifications can follow a conversation resumed later.
+    const alreadyNamed = typeof line.title === 'string' && line.title !== ''
     const now = new Date().toISOString()
     if (line.createdAt === undefined) line.createdAt = now
     line.lastUsedAt = now
-    line.title = titledWithAccount(text, accountId)
+    if (!alreadyNamed) line.title = titledWithAccount(text, accountId)
     this.#set(key, { lines, active: existing?.active ?? sessionId })
-    return line.title
+    return alreadyNamed ? undefined : line.title
   }
 
   /**
