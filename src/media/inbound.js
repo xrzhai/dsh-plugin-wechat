@@ -66,6 +66,9 @@ const ERROR_DETAIL_MAX_BYTES = 200
 /** Lazily allocated body blocks; small network chunks are copied into these. */
 const BODY_BLOCK_BYTES = 64 * 1024
 
+/** Private sibling directory used until a complete attachment is committed. */
+const INBOUND_TEMP_PREFIX = '.inbound-tmp-'
+
 /**
  * A refusal, not a transport error: the caller reports the reason in the reply
  * and never retries.
@@ -152,10 +155,64 @@ function randomToken() {
 }
 
 /**
+ * Create the destination with exclusive, atomic no-clobber semantics.
+ *
+ * A temporary sibling directory gives this call provable ownership of every
+ * file it cleans up. Once the bytes and metadata are flushed, a hard link
+ * publishes the complete inode at the requested name. `link` is atomic and
+ * fails with EEXIST, unlike `rename`, which would replace a file another
+ * writer already committed. The final name therefore never refers to a partial
+ * write and an existing destination is never removed or overwritten.
+ *
+ * A killed process cannot run cleanup. If that happens before the link, only
+ * its private `.inbound-tmp-*` directory remains; if it happens after the link,
+ * the final file is already complete and the private link is merely redundant.
+ * Later calls never sweep old temporary directories because they cannot prove
+ * who owns them. `listInboundMedia` ignores non-files, so an abandoned temp
+ * directory is also absent from `/media`.
+ *
+ * Hard links are unavailable on some filesystems (for example, some FAT/exFAT
+ * or network-backed volumes). In that case `link` rejects, no destination is
+ * published, and the caller receives `write-failed`. Node does not expose a
+ * portable atomic "rename only if absent" operation: plain rename can replace
+ * the destination, an access-then-rename check has a TOCTOU race, and
+ * `COPYFILE_EXCL` is explicitly not atomic. A fallback would therefore weaken
+ * either no-clobber or no-partial-file guarantees, so this path fails closed.
+ *
+ * @param {string} target
+ * @param {Buffer} buffer
+ */
+async function writeInboundExclusive(target, buffer) {
+  const tempDir = await fs.mkdtemp(path.join(path.dirname(target), INBOUND_TEMP_PREFIX))
+  const tempFile = path.join(tempDir, 'payload')
+  let ownsTempFile = false
+  try {
+    const handle = await fs.open(tempFile, 'wx')
+    ownsTempFile = true
+    try {
+      await handle.writeFile(buffer)
+      // Flush before publishing: a delayed ENOSPC/EIO is still a failed write,
+      // so it must happen while the destination name does not exist.
+      await handle.sync()
+    } finally {
+      await handle.close()
+    }
+    await fs.link(tempFile, target)
+  } finally {
+    // Remove only the file this call opened. `rmdir` then succeeds only if no
+    // unknown file appeared; never recurse through a directory whose contents
+    // this call can no longer prove it owns.
+    if (ownsTempFile) await fs.unlink(tempFile).catch(() => {})
+    await fs.rmdir(tempDir).catch(() => {})
+  }
+}
+
+/**
  * Save one decrypted buffer into the inbox directory under a safe name.
  *
- * The write is exclusive (`wx`): if the generated name somehow already exists,
- * the call fails instead of clobbering a file that another message just saved.
+ * The final name appears only after a complete temporary file has been flushed
+ * and atomically linked into place. If the generated name already exists, the
+ * link fails instead of clobbering a file that another message just saved.
  *
  * @param {Buffer} buffer
  * @param {string} peerName  Untrusted name from the message, used for the stem.
@@ -173,7 +230,7 @@ export async function saveInboundBuffer(buffer, peerName, options = {}) {
   const name = inboundFileName(peerName, options.token)
   const target = path.join(dir, name)
   try {
-    await fs.writeFile(target, buffer, { flag: 'wx' })
+    await writeInboundExclusive(target, buffer)
   } catch (error) {
     throw new InboundMediaError(`could not save the attachment: ${String(error?.message ?? error)}`, 'write-failed')
   }
@@ -610,9 +667,14 @@ export function parseAesKey(aesKeyBase64) {
  * `transcript` / `transcriptError` rather than being thrown, because a voice note
  * the host cannot understand is still a voice note the user sent.
  *
- * @param {Parameters<typeof downloadInboundMedia>[0] & { bridge?: import('./asr.js').AsrBridge, transcribe?: typeof transcribeVoice }} params
+ * @param {Parameters<typeof downloadInboundMedia>[0] & {
+ *   bridge?: import('./asr.js').AsrBridge,
+ *   transcribe?: typeof transcribeVoice,
+ *   silkToWav?: (silk: Buffer) => Promise<Uint8Array>,
+ * }} params
  * @returns {Promise<Awaited<ReturnType<typeof downloadInboundMedia>> & {
- *   transcoded?: boolean, transcript?: string, transcriptError?: string, transcriptCode?: string }>}
+ *   transcoded?: boolean, transcodeError?: string, transcodeCode?: string,
+ *   transcript?: string, transcriptError?: string, transcriptCode?: string }>}
  */
 export async function downloadInboundVoice(params) {
   const result = await downloadInboundMedia(params)
@@ -638,17 +700,31 @@ export async function downloadInboundVoice(params) {
  * @param {Parameters<typeof downloadInboundVoice>[0]} params
  */
 async function transcodeVoiceToWav(result, params) {
-  let silkToWav
-  try {
-    ;({ silkToWav } = await import('../../vendor/openclaw-weixin/media/silk-transcode.js'))
-  } catch {
-    return { ...result, transcoded: false }
+  let silkToWav = params.silkToWav
+  if (silkToWav === undefined) {
+    try {
+      ;({ silkToWav } = await import('../../vendor/openclaw-weixin/media/silk-transcode.js'))
+    } catch (error) {
+      return voiceTranscodeFailure(
+        result,
+        `could not load the SILK transcoder: ${String(error?.message ?? error)}`,
+        'transcode-unavailable',
+      )
+    }
   }
-  if (typeof silkToWav !== 'function') return { ...result, transcoded: false }
+  if (typeof silkToWav !== 'function') {
+    return voiceTranscodeFailure(result, 'the SILK transcoder is unavailable', 'transcode-unavailable')
+  }
   try {
     const silk = await fs.readFile(result.path)
     const wav = await silkToWav(silk)
-    if (!(wav instanceof Uint8Array)) return { ...result, transcoded: false }
+    if (!(wav instanceof Uint8Array)) {
+      return voiceTranscodeFailure(
+        result,
+        'the SILK transcoder did not return a byte array',
+        'transcode-failed',
+      )
+    }
     // Keep the SILK original and save the playable WAV beside it: the original
     // is the only lossless copy, and a failed transcode must not destroy it.
     const wavSaved = await saveInboundBuffer(Buffer.from(wav), `${result.name}.wav`, {
@@ -664,10 +740,19 @@ async function transcodeVoiceToWav(result, params) {
       silkPath: result.path,
       transcoded: true,
     }
-  } catch {
+  } catch (error) {
     // Any transcode failure degrades to the SILK file we already saved.
-    return { ...result, transcoded: false }
+    return voiceTranscodeFailure(
+      result,
+      String(error?.message ?? error),
+      error instanceof InboundMediaError ? error.code : 'transcode-failed',
+    )
   }
+}
+
+/** Degrade to the saved SILK original while retaining why WAV was unavailable. */
+function voiceTranscodeFailure(result, reason, code) {
+  return { ...result, transcoded: false, transcodeError: reason, transcodeCode: code }
 }
 
 /** Fallback stem when the message named nothing ("file.bin" upstream). */
@@ -764,7 +849,10 @@ export function describeInboundMedia(saved, caption) {
       if (item.transcoded === true) {
         return `${head}\n这是一段已转码为 WAV 的语音${reason}，请用 read 工具处理（如无法直接读取音频，请说明）。`
       }
-      return `${head}\n这是微信 SILK 格式的语音，本机未安装转码模块，无法解码为可播放音频${reason}；如需内容请告知用户。`
+      // `transcodeError` contains diagnostic text and is logged by the caller.
+      // It may include arbitrary decoder/filesystem text, so the prompt gets
+      // only this fixed description and never the original error.
+      return `${head}\n这是微信 SILK 格式的语音，本机未能解码为可播放音频${reason}；如需内容请告知用户。`
     }
     if (item.kind === 'video') {
       const length = typeof item.durationSeconds === 'number' ? `，时长 ${item.durationSeconds.toFixed(1)} 秒` : ''
