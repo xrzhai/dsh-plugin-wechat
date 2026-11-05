@@ -155,6 +155,11 @@ export class WeixinLoginController extends TypertRemoteService {
         this.apiGetFetch = options.apiGetFetch ?? apiGetFetch;
         this.apiPostFetch = options.apiPostFetch ?? apiPostFetch;
         this.makeQrDataUrl = options.makeQrDataUrl ?? qrDataUrl;
+        // Account-store seams keep failure semantics testable without relying
+        // on platform-specific permission tricks.
+        this.loadAccount = options.loadAccount ?? loadWeixinAccount;
+        this.clearAccount = options.clearAccount ?? clearWeixinAccount;
+        this.unregisterAccount = options.unregisterAccount ?? unregisterWeixinAccountId;
         this.now = typeof options.now === "function" ? options.now : Date.now;
         this.startingLogin = undefined;
         this.loginRevision = 0;
@@ -448,12 +453,6 @@ export class WeixinLoginController extends TypertRemoteService {
         this.loginRevision += 1;
         logins.clear();
         const wanted = normalizeAccountId(accountId);
-        if (wanted) {
-            this.sessionExpiredAccounts.delete(wanted);
-        } else {
-            this.sessionExpiredAccounts.clear();
-            this.unscopedSessionExpired = false;
-        }
         const ids = wanted ? [wanted] : listIndexedWeixinAccountIds();
         if (ids.length === 0) {
             return { removed: [], reloadRequired: false };
@@ -462,11 +461,19 @@ export class WeixinLoginController extends TypertRemoteService {
         for (const id of ids) {
             // Only touch accounts we actually hold: a caller must not be able to
             // name an arbitrary path, and a typo should not report success.
-            const acct = loadWeixinAccount(id);
+            const acct = this.loadAccount(id);
             if (!acct?.token) continue;
-            clearWeixinAccount(id);
-            unregisterWeixinAccountId(id);
+            this.clearAccount(id);
+            this.unregisterAccount(id);
             removed.push(id);
+            // Expiry describes whether the saved credential is usable. Only a
+            // completed deletion proves that warning no longer needs action.
+            this.sessionExpiredAccounts.delete(id);
+        }
+        // A legacy aggregate flag has no account identity. Clear it only after
+        // logout-all completed for every indexed account it was meant to remove.
+        if (!wanted && ids.length > 0 && removed.length === ids.length) {
+            this.unscopedSessionExpired = false;
         }
         return { removed, reloadRequired: removed.length > 0 };
     }
@@ -477,12 +484,10 @@ export class WeixinLoginController extends TypertRemoteService {
         purgeStaleLogins(now);
         const ids = listIndexedWeixinAccountIds();
         const accounts = [];
-        const liveAccountIds = new Set();
         for (const id of ids) {
             try {
-                const acct = loadWeixinAccount(id);
+                const acct = this.loadAccount(id);
                 if (acct?.token) {
-                    liveAccountIds.add(id);
                     // Registry side-table data: label/paused/lastSeenAt live
                     // outside the credential on purpose (see account-registry.js).
                     // A missing entry means "never touched" — defaults, not an error.
@@ -510,9 +515,9 @@ export class WeixinLoginController extends TypertRemoteService {
         // file is present and complete, but the server refuses it, so inbound
         // messaging stops while the card still shows "bound". The transport
         // records the refusal here so the card can say "log in again".
-        for (const accountId of this.sessionExpiredAccounts) {
-            if (!liveAccountIds.has(accountId)) this.sessionExpiredAccounts.delete(accountId);
-        }
+        // Status is observational: a transient credential read failure or a
+        // momentary token gap must not erase a warning that only a successful
+        // login or completed logout can resolve.
         // Keep the old top-level boolean for older clients, while each account
         // now carries the flag that actually tells one login from another.
         return {

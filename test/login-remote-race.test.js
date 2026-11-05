@@ -52,6 +52,9 @@ function fixture(t, options = {}) {
     apiPostFetch: options.apiPostFetch ?? (async () => qrResponse()),
     apiGetFetch: options.apiGetFetch ?? (async () => JSON.stringify({ status: 'wait' })),
     makeQrDataUrl: options.makeQrDataUrl ?? (async () => undefined),
+    loadAccount: options.loadAccount,
+    clearAccount: options.clearAccount,
+    unregisterAccount: options.unregisterAccount,
     now: options.now,
   })
   const issued = []
@@ -406,6 +409,135 @@ test('session expiry is isolated per account and keeps the legacy aggregate', as
   assert.equal(status.sessionExpired, true)
   assert.equal(status.accounts.find(account => account.accountId === accountA)?.sessionExpired, true)
   assert.equal(status.accounts.some(account => account.accountId === accountB), false)
+  assert.equal(controller.sessionExpired, true)
+})
+
+test('status keeps expiry through transient unreadable and tokenless account reads', async t => {
+  const accountId = 'expiry-transient-read@im.bot'
+  cleanAccount(t, accountId)
+  saveWeixinAccount(accountId, { token: 'token', userId: 'user' })
+  registerWeixinAccountId(accountId)
+  let readNumber = 0
+  const { controller } = fixture(t, {
+    loadAccount: id => {
+      if (id !== accountId) return loadWeixinAccount(id)
+      readNumber += 1
+      if (readNumber === 1) throw new Error('temporary credential read failure')
+      if (readNumber === 2) return { token: '', userId: 'user' }
+      return loadWeixinAccount(id)
+    },
+  })
+  controller.markSessionExpired(accountId)
+
+  const unreadable = await controller.status()
+  assert.equal(unreadable.sessionExpired, true)
+  assert.equal(unreadable.accounts.length, 0)
+
+  const tokenless = await controller.status()
+  assert.equal(tokenless.sessionExpired, true)
+  assert.equal(tokenless.accounts.length, 0)
+
+  const recovered = await controller.status()
+  assert.equal(recovered.sessionExpired, true)
+  assert.equal(recovered.accounts.find(account => account.accountId === accountId)?.sessionExpired, true)
+})
+
+test('a failed logout preserves its credential and expiry until a successful retry', async t => {
+  const accountA = 'expiry-logout-a@im.bot'
+  const accountB = 'expiry-logout-b@im.bot'
+  cleanAccount(t, accountA)
+  cleanAccount(t, accountB)
+  saveWeixinAccount(accountA, { token: 'token-a', userId: 'user-a' })
+  saveWeixinAccount(accountB, { token: 'token-b', userId: 'user-b' })
+  registerWeixinAccountId(accountA)
+  registerWeixinAccountId(accountB)
+  let failB = true
+  const { controller } = fixture(t, {
+    clearAccount: id => {
+      if (id === accountB && failB) throw new Error('credential is busy')
+      return clearWeixinAccount(id)
+    },
+  })
+  controller.markSessionExpired(accountA)
+  controller.markSessionExpired(accountB)
+
+  await assert.rejects(controller.logout(accountB), /credential is busy/)
+  let status = await controller.status()
+  assert.equal(loadWeixinAccount(accountB)?.token, 'token-b')
+  assert.equal(status.accounts.find(account => account.accountId === accountA)?.sessionExpired, true)
+  assert.equal(status.accounts.find(account => account.accountId === accountB)?.sessionExpired, true)
+
+  failB = false
+  assert.deepEqual(await controller.logout(accountB), { removed: [accountB], reloadRequired: true })
+  status = await controller.status()
+  assert.equal(loadWeixinAccount(accountB), null)
+  assert.equal(status.accounts.find(account => account.accountId === accountA)?.sessionExpired, true)
+  assert.equal(status.accounts.some(account => account.accountId === accountB), false)
+})
+
+test('logout does not clear expiry for an account that does not exist', async t => {
+  const accountId = 'expiry-logout-missing@im.bot'
+  cleanAccount(t, accountId)
+  const { controller } = fixture(t)
+  controller.markSessionExpired(accountId)
+
+  assert.deepEqual(await controller.logout(accountId), { removed: [], reloadRequired: false })
+  saveWeixinAccount(accountId, { token: 'recovered-token', userId: 'user' })
+  registerWeixinAccountId(accountId)
+
+  const status = await controller.status()
+  assert.equal(status.accounts.find(account => account.accountId === accountId)?.sessionExpired, true)
+})
+
+test('logout-all clears only accounts whose credentials were removed', async t => {
+  const accountA = 'expiry-logout-all-a@im.bot'
+  const accountB = 'expiry-logout-all-b@im.bot'
+  cleanAccount(t, accountA)
+  cleanAccount(t, accountB)
+  saveWeixinAccount(accountA, { token: 'token-a', userId: 'user-a' })
+  saveWeixinAccount(accountB, { token: 'token-b', userId: 'user-b' })
+  registerWeixinAccountId(accountA)
+  registerWeixinAccountId(accountB)
+  const { controller } = fixture(t, {
+    clearAccount: id => {
+      if (id === accountB) throw new Error('credential is busy')
+      return clearWeixinAccount(id)
+    },
+  })
+  controller.markSessionExpired(accountA)
+  controller.markSessionExpired(accountB)
+
+  await assert.rejects(controller.logout(''), /credential is busy/)
+  assert.equal(loadWeixinAccount(accountA), null)
+  assert.equal(loadWeixinAccount(accountB)?.token, 'token-b')
+
+  saveWeixinAccount(accountA, { token: 'new-token-a', userId: 'user-a' })
+  registerWeixinAccountId(accountA)
+  const status = await controller.status()
+  assert.equal(status.accounts.find(account => account.accountId === accountA)?.sessionExpired, false)
+  assert.equal(status.accounts.find(account => account.accountId === accountB)?.sessionExpired, true)
+})
+
+test('logout-all clears account and legacy expiry after every credential is removed', async t => {
+  const accountId = 'expiry-logout-all-complete@im.bot'
+  cleanAccount(t, accountId)
+  saveWeixinAccount(accountId, { token: 'token', userId: 'user' })
+  registerWeixinAccountId(accountId)
+  const { controller } = fixture(t)
+  controller.markSessionExpired(accountId)
+  controller.markSessionExpired()
+
+  assert.deepEqual(await controller.logout(''), { removed: [accountId], reloadRequired: true })
+  const status = await controller.status()
+  assert.deepEqual(status.accounts, [])
+  assert.equal(status.sessionExpired, false)
+})
+
+test('logout-all does not clear a legacy expiry when no account is removed', async t => {
+  const { controller } = fixture(t)
+  controller.markSessionExpired()
+
+  assert.deepEqual(await controller.logout(''), { removed: [], reloadRequired: false })
   assert.equal(controller.sessionExpired, true)
 })
 
