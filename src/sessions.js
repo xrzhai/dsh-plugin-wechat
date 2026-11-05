@@ -889,15 +889,16 @@ export function runSessionCommand(lines, conversationId, text, accountId, contex
     if (raw === '') {
       return '用法：/remind <时间> <内容>，例如 /remind 10m 该喝水了 或 /remind 明天 9:00 开会\n时间支持 10m / 2h / 1d30m、14:30、2026-10-19 09:00、明天 9:00、周五、下周三 10点、3小时后、每天 9:00'
     }
-    // 时间可能自己带空格（`明天 9:00`），按前缀逐段尝试：第一个能解析的前缀
-    // 就是时间，其余是内容。这样不用在正则里穷举所有中文写法。
+    // 时间可能自己带空格（`明天 9:00`），按前缀逐段尝试：优先采用最长的
+    // 可解析前缀，其余是内容。这样裸星期几不会抢在「周五 10点」前面命中，
+    // 也不用在正则里穷举所有中文写法。
     // 重复写法（每天/工作日/每周X）先试 —— `每周一 10点` 里的「每周一」不能
     // 被一次性规则当成日期，`每天 9:00` 更是一次性规则根本没有的形态。
     const tokens = raw.split(/\s+/)
     let when
     let recurrence
     let text = ''
-    for (let take = 1; take <= tokens.length && take <= 4; take += 1) {
+    for (let take = Math.min(tokens.length, 4); take >= 1; take -= 1) {
       const prefix = tokens.slice(0, take).join(' ')
       const repeat = parseRecurrence(prefix)
       if (repeat.ok === true) {
