@@ -216,13 +216,12 @@ export function planRichContent(markdown, options = {}) {
   const source = typeof markdown === 'string' ? markdown : String(markdown ?? '')
   const enabled = options.enabled !== false
   const threshold = Number(options.codeFileChars ?? DEFAULT_CODE_FILE_CHARS)
-  const withTables = enabled ? renderTables(source) : source
-  if (!enabled) return { text: withTables, files: [], notes: [] }
-  const { parts } = splitFences(withTables)
+  if (!enabled) return { text: source, files: [], notes: [] }
+  const { parts } = splitFences(source)
   const files = []
   const notes = []
   const rendered = parts.map((part) => {
-    if (part.kind === 'text') return part.text
+    if (part.kind === 'text') return renderTables(part.text)
     if (part.body.length < threshold) {
       // Short snippets read better inline, but the fences themselves are noise
       // once the Markdown filter is off, so they are dropped here.
