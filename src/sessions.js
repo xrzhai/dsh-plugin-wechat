@@ -843,7 +843,7 @@ export function runSessionCommand(lines, conversationId, text, accountId, contex
     // The bridge owns the live agent handles; a bare caller (tests, tooling)
     // has no turn to interrupt and says so instead of pretending.
     const cancel = context?.cancelRunningTurn
-    if (cancel === undefined) return '当前没有可中断的回合（这个入口拿不到正在运行的会话）。'
+    if (cancel === undefined) return '当前入口无法停止正在运行的任务。'
     return cancel()
   }
   if (command.command === 'compact') {
@@ -864,7 +864,7 @@ export function runSessionCommand(lines, conversationId, text, accountId, contex
     // stored something. The handler may be async (/summary) — return the
     // promise as-is; the inbound handler awaits command replies.
     const handler = context?.persona?.[command.command]
-    if (typeof handler !== 'function') return '个性化功能在这个入口不可用（拿不到模式与记忆的存储）。'
+    if (typeof handler !== 'function') return '该指令在当前入口不可用。'
     return handler(command.arg)
   }
   if (command.command === 'remind') {

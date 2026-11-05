@@ -14,6 +14,8 @@
  * @module dsh-weixin/onboarding
  */
 
+import { translate } from './i18n.js'
+
 /** Checklist order: required setup first, then verification and operational notes. */
 export const ONBOARDING_STEPS = Object.freeze([
   'account',
@@ -78,10 +80,10 @@ export function buildOnboardingChecklist(input = {}) {
       action: accountCount > 0 ? null : 'login',
       detail: accountCount > 0
         ? `已找到 ${accountCount} 个带凭据文件的账号。`
-        : '还没有可用的账号凭据。请在 DSH 中扫码绑定；只有账号登记记录不算已登录。',
+        : '尚未登录微信。请打开 DSH 左侧边栏「大肥鱼」（或「设置 → 插件 → 大肥鱼」），在「微信账号」里扫码绑定。',
       detailEn: accountCount > 0
         ? `${accountCount} account(s) have credential files.`
-        : 'No usable account credential yet. Scan the QR code in DSH; a registry entry alone does not count as signed in.',
+        : 'Not signed in to WeChat yet. Open WeChat in the DSH sidebar (or Settings → Plugins → WeChat), then scan the QR code under WeChat Account.',
       why: '没有有效凭据，微信消息不会进入当前 DSH。',
       whyEn: 'Without a usable credential, messages cannot reach this DSH instance.',
     },
@@ -120,12 +122,12 @@ export function buildOnboardingChecklist(input = {}) {
         ? `工作目录可用：${workingDirectory}`
         : workingDirectory !== ''
           ? `已配置 ${workingDirectory}，但首次清单未能确认它是可用目录；请在网关配置中核对。`
-          : '请在“网关配置”中选择明确的工作目录。Agent 的读写和命令会以这里为上下文。',
+          : '未填写时使用插件自带的独立会话工作区，并会自动准备大肥鱼初始人设；需要操作某个项目时，再到「高级 → 网关配置」填写工作目录。',
       detailEn: workspaceVerified
         ? `Working directory is usable: ${workingDirectory}`
         : workingDirectory !== ''
           ? `${workingDirectory} is configured, but the checklist could not confirm it is usable; review it in gateway settings.`
-          : 'Choose an explicit working directory in gateway settings. File access and commands use it as their project context.',
+          : 'With no directory set, WeChat uses the plugin’s own workspace with the starter persona. To work in a project, open Advanced → Gateway Options and set its working directory.',
       why: '微信任务会落在工作目录里；目录不明确时，改错项目或找不到文件都很难排查。',
       whyEn: 'WeChat tasks run in this directory; an unclear workspace makes edits and missing files hard to diagnose.',
     },
@@ -217,10 +219,12 @@ export function describeNextStep(checklist, t = (zh) => zh) {
  * the only installation dependency; no upstream plugin or published copy of
  * this package is required.
  *
- * @param {{ loginHint?: string }} [options]
+ * @param {{ loginHint?: string, locale?: 'zh' | 'en' }} [options]
  */
 export function quickstartLines(options = {}) {
-  const login = typeof options.loginHint === 'string' && options.loginHint !== '' ? options.loginHint : 'node bin/login.js'
+  const login = typeof options.loginHint === 'string' && options.loginHint !== ''
+    ? options.loginHint
+    : translate('onboarding.loginPanel', undefined, options.locale)
   return [
     { command: 'pnpm install && node bin/install.mjs --profile desktop', note: '从当前仓库安装，并把 desktop profile 链接到这份源码。' },
     { command: login, note: '在 DSH 中完成扫码绑定；首条消息会触发首位联系人自动登记。' },

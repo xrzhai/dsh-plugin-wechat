@@ -62,8 +62,8 @@ test('onboard does not treat a registry-only record as a signed-in account', (t)
 
   const result = run('bin/onboard.mjs', fixture)
   assert.equal(result.status, 1)
-  assert.match(result.output, /还没有可用的账号凭据/)
-  assert.match(result.output, /只有账号登记记录不算已登录/)
+  assert.match(result.output, /尚未登录微信/)
+  assert.match(result.output, /绑定微信账号/)
   assert.doesNotMatch(result.output, /已找到 1 个带凭据文件的账号/)
 })
 

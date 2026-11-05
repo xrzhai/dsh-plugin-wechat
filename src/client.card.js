@@ -97,12 +97,7 @@ window.__ModuleLoader__.load({
 				return CONFIG_EFFECTS[field] ?? "live";
 			}
 
-						/**
-			 * A read-only page of the prompt, built on the host for whichever mode
-			 * is in use. This is the one screen that answers "what does it
-			 * actually send?" — and it is the answer that the ⭐ badge on a
-			 * 影响提示词 option points at.
-			 */
+			/** Edit the persona file DSH loads when a conversation starts. */
 			function PromptSection({ ctx, t }) {
 				const [content, setContent] = react.useState("");
 				const [savedContent, setSavedContent] = react.useState("");
@@ -138,7 +133,7 @@ window.__ModuleLoader__.load({
 						setContent(text);
 						setSavedContent(text);
 						if (r?.filePath) setFilePath(String(r.filePath));
-						setMessage(t("Saved AGENTS.md (takes effect on next message).", "已保存 AGENTS.md（下一条微信消息即自动增量生效，无需重启）。"));
+						setMessage(t("Saved. Takes effect on your next WeChat message.", "已保存，下一条微信消息起生效。"));
 					} catch (err) {
 						setError(String(err?.message ?? err));
 					} finally {
@@ -155,16 +150,16 @@ window.__ModuleLoader__.load({
 				return createElement("div", { style: { ...panelStyle, display: "flex", flexDirection: "column", gap: 12 } },
 					createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" } },
 						createElement("div", { style: { display: "flex", flexDirection: "column", gap: 4 } },
-							createElement("span", { style: panelTitleStyle }, t("Persona (AGENTS.md)", "人设 (AGENTS.md)")),
+							createElement("span", { style: panelTitleStyle }, t("Persona", "人设")),
 							createElement("span", { style: hintStyle },
-								t("Big Fish's long-term persona and standing settings. Loaded once at session baseline via @deepseek-ai/dsh-agent-instructions (never repeated in every user message); a save applies from the next turn.",
-									"大肥鱼的长期人设与基本设定。由 DSH 原生 agent-instructions 在会话基线单次加载（绝不污染每轮 User Message）；保存后下一轮对话自动生效。"))),
+								t("Big Fish's persona and standing rules. Loaded once for each new topic without adding it to every message; changes take effect from the next reply.",
+									"大肥鱼的性格设定与办事规矩。每个新话题加载一次，不挤占日常对话上下文；修改后从下一轮回复起生效。"))),
 						createElement("div", { style: { display: "flex", gap: 8, alignItems: "center" } },
 							dirty ? createElement("span", { style: pillStyle("warn") }, t("Unsaved changes", "未保存改动")) : null,
 							createElement("button", { onClick: load, disabled: busy, style: buttonStyleFor(busy) },
 								t("Reload", "重新读取")),
 							createElement("button", { onClick: save, disabled: busy || !dirty, style: busy || !dirty ? { ...primaryButtonStyle, opacity: 0.5, cursor: "default" } : primaryButtonStyle },
-								busy ? t("Saving…", "正在保存…") : t("Save AGENTS.md", "保存 AGENTS.md")))),
+								busy ? t("Saving…", "正在保存…") : t("Save persona", "保存人设")))),
 					filePath ? createElement("div", { style: { ...captionStyle, display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8 } },
 						createElement("span", null, `${t("Path", "文件路径")}：${filePath}`),
 						createElement("span", null, `${t("Length", "当前字数")}：${content.length} ${t("chars", "字符")}`)) : null,
@@ -550,8 +545,8 @@ window.__ModuleLoader__.load({
 						setLogoutNotice(t("No saved account was found to remove.", "没有找到可退出的账号。"));
 					} else {
 						setLogoutNotice(t(
-							"Credentials deleted. Reload DSH to stop the running poll loop, then scan again to re-bind.",
-							"凭证已删除。请重载 DSH 以停止正在运行的轮询，然后重新扫码绑定。",
+							"Logged out. Reopen DSH to stop the current WeChat connection; you can scan the QR code again whenever you need it.",
+							"已退出登录。重新打开 DSH 后，当前微信连接会停止；需要时可随时重新扫码绑定。",
 						));
 					}
 					await refreshStatus();
@@ -944,7 +939,7 @@ window.__ModuleLoader__.load({
 					if (r?.switched === false) {
 						setNotice(r.error || t("Could not switch", "切换失败"));
 					} else {
-						setNotice(t("Switched. New messages go to this session.", "已切换，接下来的消息进入这条会话。"));
+						setNotice(t("Switched. New messages go to this topic.", "已切换，接下来的消息进入这个话题。"));
 					}
 					await load();
 				} catch (e) {
@@ -958,16 +953,17 @@ window.__ModuleLoader__.load({
 				// The card's only destructive session action, so it asks first —
 				// same shape as logout. Deleting the line in use is allowed: the
 				// store falls back to the first surviving line, and deleting the
-				// last line removes the whole conversation entry (the next
-				// message re-creates a fresh line), so the confirm never guards
-				// an unreachable state.
+				// last line removes the whole conversation entry. A later message
+				// recreates the list entry while leaving the host session intact.
 				const last = lineCount <= 1;
 				const ok = globalThis.confirm?.(
 					t(
-						"Delete this session line? Its context is dropped from the list; the conversation keeps its other lines.",
 						last
-							? "确定删除这条会话？这是最后一条会话线，删除后整个会话条目会移除，下一条消息会自动新建会话。"
-							: "确定删除这条会话？它的上下文将从列表移除；该微信会话的其他会话线不受影响。",
+							? "Delete this topic? The list will be empty, but its DSH session is kept. Your next WeChat message will add a topic back to the list."
+							: "Delete this topic? It will disappear from this list, but its DSH session is kept; the other topics in this chat are unaffected.",
+						last
+							? "确定删除这个话题？删除后列表会清空，但 DSH 中的会话记录不会被删除。下次在微信发消息时，插件会重新建立列表项。"
+							: "确定删除这个话题？它不会再出现在列表里，但 DSH 中的会话记录不会被删除；这个微信会话的其他话题不受影响。",
 					),
 				);
 				if (ok === false) return;
@@ -990,7 +986,7 @@ window.__ModuleLoader__.load({
 
 			if (error) {
 				return createElement("div", { style: panelStyle },
-					createElement("p", { style: panelTitleStyle }, t("Sessions", "会话")),
+					createElement("p", { style: panelTitleStyle }, t("Topics", "话题")),
 					createElement("div", { style: noticeStyle },
 						createElement("span", { style: { flex: "0 0 auto" } }, "⚠"),
 						createElement("span", null, error)));
@@ -1001,10 +997,10 @@ window.__ModuleLoader__.load({
 			}
 			if (data.length === 0) {
 				return createElement("div", { style: panelStyle },
-					createElement("p", { style: panelTitleStyle }, t("Sessions", "会话")),
+					createElement("p", { style: panelTitleStyle }, t("Topics", "话题")),
 					createElement("p", { style: hintStyle },
-						t("No conversation yet. Send the bot a message to start one.",
-							"还没有会话。给机器人发一条消息就会创建。")));
+						t("No topics yet. Send a message in WeChat to start one.",
+							"还没有话题。用微信发一条消息就会自动创建一个。")));
 			}
 
 			return createElement("div", { style: { display: "flex", flexDirection: "column", gap: 12 } },
@@ -1066,8 +1062,8 @@ window.__ModuleLoader__.load({
 								}, t("Delete", "删除")));
 						})),
 					createElement("p", { style: captionStyle },
-						t("Send /new in WeChat to start another, /list to see them all.",
-							"在微信里发 /new 开新会话，发 /list 查看全部。")))),
+						t("Send /new in WeChat to start another topic; send /list to see them all.",
+							"在微信里发 /new 开新话题，发 /list 查看全部。")))),
 				notice
 					? createElement("div", { style: noticeStyle },
 						createElement("span", { style: { flex: "0 0 auto" } }, "⚠"),
@@ -1313,7 +1309,7 @@ window.__ModuleLoader__.load({
 					},
 					createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" } },
 						createElement("span", { style: { fontSize: 13, fontWeight: 600, color: C.labelPrimary } },
-							(field.promptMarked ? "\u2b50 " : "") + t(field.labelEn, field.label)),
+							t(field.labelEn, field.label)),
 						// Where the value comes from decides what a reset will
 						// do, so it is shown rather than inferred.
 						field.source === "saved"
@@ -1520,7 +1516,7 @@ window.__ModuleLoader__.load({
 				const TABS = [
 					{ id: "account", label: t("WeChat Account", "微信账号"), body: createElement(LoginSection, { ctx, t }) },
 					{ id: "prompt", label: t("Persona", "人设"), body: createElement(PromptSection, { ctx, t }) },
-					{ id: "sessions", label: t("Sessions", "会话"), body: createElement(SessionsSection, { ctx, t }), advanced: true },
+					{ id: "sessions", label: t("Topics", "话题"), body: createElement(SessionsSection, { ctx, t }), advanced: true },
 					{ id: "options", label: t("Gateway Options", "网关配置"), body: createElement(ConfigSection, { ctx, t }), advanced: true },
 				];
 				const visibleTabs = TABS.filter((entry) => advanced || !entry.advanced);

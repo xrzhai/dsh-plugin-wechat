@@ -28,6 +28,7 @@ export const DEFAULT_LOCALE = 'zh'
 export const CATALOG = Object.freeze({
     'error.processing': { zh: '（处理失败：{reason}）', en: '(Processing failed: {reason})' },
     'notice.longRunning': { zh: '（这条消息处理时间较长，先回复别的消息不影响它；结果出来后会直接发到这里）', en: '(This task is taking longer. You can send other messages; its result will arrive here when ready.)' },
+    'onboarding.loginPanel': { zh: '打开 DSH → 左侧边栏「大肥鱼」→「微信账号」→「扫码登录微信」', en: 'Open DSH → WeChat in the sidebar → WeChat Account → Scan QR code to log in' },
     // --- command help -------------------------------------------------------
     'help.header': { zh: '会话指令（发 /help 或 /帮助 可再看一遍）：', en: 'Session commands (send /help to see this again):' },
     'help.new': { zh: '/new [标题] 开一条新会话（当前这条会保留，之后可以切回来）', en: '/new [title] start a new session (this one is kept, you can switch back)' },

@@ -202,12 +202,13 @@ export const Config = z.object({
     'Send audio attachments (wav, mp3, m4a, ogg, flac, silk, ...) as Weixin voice messages instead of file attachments. wav and silk are transcoded in-process; the rest need ffmpeg on PATH. A voice send that FAILS falls back to the plain file path — but the iLink server currently ACCEPTS a bot voice_item (ret=0) without ever delivering it (measured 2026-06 and again 2026-10-26 with a fresh token; upload and send both succeed), so with this on an audio attachment can silently vanish. Off by default until the server actually delivers bot voice.',
   ),
   messageJournal: z.boolean().default(true).description('Record recent inbound and outbound messages (message journal, shown on the settings card).'),
-  // C20: the conversation gets the good model; background work (summaries,
-  // proactive lines, subscription fires) can be pointed at a cheaper route
-  // without touching the chat. Empty means "whatever the session uses".
+  // C20: the conversation gets the good model; background work (group
+  // summaries and subscription fires) can use a cheaper route without
+  // touching the chat. Resolution is purpose route, side route, legacy
+  // route where supported, then the host default; it does not imply chat.
   chatProvider: z.string().default('').description('主对话模型 provider：留空沿用 DSH 当前会话模型。只填 provider 或只填 model 都不生效。'),
   chatModel: z.string().default('').description('主对话模型 model：和 chatProvider 一起填才生效。'),
-  sideProvider: z.string().default('').description('后台任务模型 provider：/summary、/subscribe 到点、主动开口这类侧会话用它；留空则回落到记忆模型，再回落到会话模型。'),
+  sideProvider: z.string().default('').description('后台任务模型 provider：定时主动消息、群聊摘要等后台任务使用；留空仍会检查旧版用途路由，若仍无可用后台路由则使用 DSH 默认模型。'),
   sideModel: z.string().default('').description('后台任务模型 model：和 sideProvider 一起填才生效。'),
   documentExtract: z.boolean().default(true).description('Extract the text of an inbound document (docx/txt/md/csv/json) into the turn, instead of only telling the model where it was saved. PDF needs the optional pdfjs-dist package; without it a PDF is only described by its path.'),
   ocrEnabled: z.boolean().default(false).description('Run an external OCR command on inbound images and put the text into the turn. Off by default: the plugin ships no OCR engine.'),
@@ -248,14 +249,14 @@ export const Config = z.object({
   senderRatePerMinute: z.number().min(0).default(DEFAULT_PER_MINUTE).description('每个发送者每分钟最多几条消息；0 表示不限。超过时回一句「慢一点」，并写审计。'),
   senderDailyLimit: z.number().min(0).default(0).description('每个发送者每天最多被回复几次（按账号分开算；0 表示不限）。到量后当天不再回应，并在群里也按人算。'),
   maxQueuedPerConversation: z.number().min(0).default(DEFAULT_MAX_QUEUE).description('单个会话允许排队等回复的消息条数；0 表示不限制。超过的直接拒收，避免越堆越多。'),
-  retentionJournalDays: z.number().min(0).default(180).description('消息流水保留天数；0 表示不清理。设置卡「统计」页签显示磁盘占用。'),
+  retentionJournalDays: z.number().min(0).default(180).description('消息流水保留天数；0 表示不自动清理。'),
   retentionAuditDays: z.number().min(0).default(90).description('工具审计保留天数；0 表示不清理。'),
   retentionMediaDays: z.number().min(0).default(30).description('收到的图片/文件/语音保留天数；0 表示不清理。'),
   retentionExportsDays: z.number().min(0).default(60).description('/export 导出的 Markdown 保留天数；0 表示不清理。'),
   retentionLogsDays: z.number().min(0).default(30).description('vendor 每日日志保留天数；0 表示不清理。'),
   dryRun: z.boolean().default(false).description('预演模式：让模型先给计划再动手，你回「执行」才真正执行。这不是强制拦截——插件拦不住工具调用，它只是让模型先说后做，所以危险工具提醒仍然同时生效。'),
   metricsExport: z.boolean().default(true).description('每 30 秒把指标写到状态目录的 metrics.json / metrics.prom，方便外部抓取（npm run metrics 读取）。'),
-  backupEnabled: z.boolean().default(true).description('每天自动备份一次状态目录（记忆、人设、订阅、流水、账号）；备份在 <状态目录>/backups，含账号 token，别外传。'),
+  backupEnabled: z.boolean().default(true).description('每天自动备份一次状态目录（账号凭证、会话记录、提醒、配置及历史数据）；备份在 <状态目录>/backups，含登录凭证，请勿外传。'),
   backupKeep: z.number().min(1).max(60).default(DEFAULT_KEEP).description('保留最近几份自动备份；更旧的会被删掉。'),
   notifyEnabled: z.boolean().default(false).description('本地通知桥：开启后向 http://127.0.0.1:47832/notify POST 一句话就能推到你的微信（构建、备份、cron 用）。只绑回环地址、必须带 token、不经过模型。'),
   notifyPort: z.number().min(1).max(65535).default(DEFAULT_NOTIFY_PORT).description('通知桥监听端口；脚本里的 URL 要跟着改。'),
@@ -1593,8 +1594,7 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
       },
       // /export: render this conversation's journal as Markdown. Short
       // exports ride the normal reply; long ones land in
-      // `<stateRoot>/exports/` and the reply carries the path (the settings
-      // card's 消息流水 tab also has a one-click export).
+      // `<stateRoot>/exports/` and the reply carries the path.
       export: (rawDays) => {
         const days = Math.min(365, Math.max(1, Number(rawDays) || 30))
         const entries = readJournalRange(stateRoot, { accountId, conversationId, days })
@@ -1602,9 +1602,9 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
         const markdown = renderChatMarkdown(entries, { title: `聊天记录 · ${conversationId} · 最近 ${days} 天` })
         if (markdown.length <= 3000) return markdown
         const file = writeChatExport(stateRoot, accountId, conversationId, markdown)
-        return `聊天记录比较长（${entries.length} 条，${markdown.length} 字），已导出成文件：\n${file}\n完整内容也可以在设置卡「消息流水」页签里一键导出。`
+        return `聊天记录比较长（${entries.length} 条，${markdown.length} 字），已导出成文件：\n${file}`
       },
-      // ⑥ 群关键词规则配在设置卡里，命中是静默的模板回复 —— 用户看不出哪条
+      // ⑥ 群关键词规则配在 config.json 里，命中是静默的模板回复 —— 用户看不出哪条
       //    规则在干活、哪条写错了正则永远不响。这个命令把规则和计数一起摊开。
       config: () => {
         // 只描述规则：哪一项保存即生效、哪一项要重启。不读文件、不改任何东西。
@@ -1627,7 +1627,7 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
         }
         const rules = parseKeywordRules(String(withSavedConfig(config).groupKeywords ?? ''), { warn })
         if (rules.length === 0) {
-          return '还没有配置群关键词规则。设置卡的「群聊」页签里，每行一条：正则 => 回复。'
+          return '还没有配置群关键词规则。可在 config.json 的 groupKeywords 中按「正则 => 回复」每行配置一条。'
         }
         const stats = keywordStats(String(withSavedConfig(config).groupKeywords ?? ''), { warn })
         const lines = [`群关键词规则 ${stats.length} 条（命中次数是插件启动以来的累计）：`]
