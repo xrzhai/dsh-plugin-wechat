@@ -1083,7 +1083,7 @@ export function apply(ctx, config) {
         // the same line in the log the operator watches.
         onSessionRejected: (error) => {
           try {
-            loginController?.markSessionExpired?.()
+            loginController?.markSessionExpired?.(account.accountId)
           } catch {
             // the card is a convenience; never let it break the loop's report
           }

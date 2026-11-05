@@ -52,6 +52,7 @@ function fixture(t, options = {}) {
     apiPostFetch: options.apiPostFetch ?? (async () => qrResponse()),
     apiGetFetch: options.apiGetFetch ?? (async () => JSON.stringify({ status: 'wait' })),
     makeQrDataUrl: options.makeQrDataUrl ?? (async () => undefined),
+    now: options.now,
   })
   const issued = []
   t.after(async () => {
@@ -245,7 +246,13 @@ test('an active login keeps its normal transitions and retries after a poll erro
 
   const errorPoll = controller.poll(login.sessionKey)
   networks[4].reject(new Error('temporary network failure'))
-  assert.deepEqual(await errorPoll, { status: 'wait' })
+  assert.deepEqual(await errorPoll, {
+    status: 'retrying',
+    reason: 'network_error',
+    attempt: 1,
+    maxAttempts: 3,
+    message: '连接微信登录服务失败，正在重试。（1/3）',
+  })
 
   const confirmPoll = controller.poll(login.sessionKey)
   assert.equal(requests.at(-1).baseUrl, 'https://redirect.example.test')
@@ -257,6 +264,185 @@ test('an active login keeps its normal transitions and retries after a poll erro
   })
   assert.equal(starts, 1)
   assert.equal(loadWeixinAccount(accountId)?.token, 'late-token')
+})
+
+test('consecutive poll errors become an explicit retrying state and then fail', async t => {
+  const { controller, issued } = fixture(t, {
+    apiGetFetch: async () => { throw new Error('proxy returned 502') },
+  })
+  const login = await controller.startLogin()
+  issued.push(login.sessionKey)
+
+  const first = await controller.poll(login.sessionKey)
+  assert.equal(first.status, 'retrying')
+  assert.equal(first.attempt, 1)
+  assert.match(first.message, /重试/)
+
+  const second = await controller.poll(login.sessionKey)
+  assert.equal(second.status, 'retrying')
+  assert.equal(second.attempt, 2)
+
+  const third = await controller.poll(login.sessionKey)
+  assert.equal(third.status, 'failed')
+  assert.equal(third.reason, 'network_error')
+  assert.match(third.message, /连续 3 次/)
+  assert.equal((await controller.status()).pendingLogin, false)
+})
+
+test('a normal long-poll timeout stays waiting and can be followed by confirmation', async t => {
+  let getCalls = 0
+  const accountId = 'race-long-poll-timeout@im.bot'
+  cleanAccount(t, accountId)
+  const { controller, issued } = fixture(t, {
+    apiGetFetch: async () => {
+      getCalls += 1
+      if (getCalls === 1) {
+        const timeout = new Error('The operation was aborted')
+        timeout.name = 'AbortError'
+        throw timeout
+      }
+      return confirmedResponse(accountId)
+    },
+  })
+  const login = await controller.startLogin()
+  issued.push(login.sessionKey)
+
+  assert.deepEqual(await controller.poll(login.sessionKey), { status: 'wait' })
+  assert.deepEqual(await controller.poll(login.sessionKey), {
+    status: 'confirmed',
+    accountId,
+    userId: 'user-1',
+  })
+})
+
+test('a malformed poll response is an error rather than an implicit wait', async t => {
+  const { controller, issued } = fixture(t, {
+    apiGetFetch: async () => '{not-json',
+  })
+  const login = await controller.startLogin()
+  issued.push(login.sessionKey)
+
+  const result = await controller.poll(login.sessionKey)
+  assert.equal(result.status, 'retrying')
+  assert.equal(result.reason, 'invalid_response')
+  assert.match(result.message, /返回异常/)
+})
+
+test('the total login deadline fails and purges an idle login', async t => {
+  let now = 1_000_000
+  const { controller, issued } = fixture(t, {
+    now: () => now,
+  })
+  const login = await controller.startLogin()
+  issued.push(login.sessionKey)
+
+  now += 480_001
+  assert.deepEqual(await controller.poll(login.sessionKey), {
+    status: 'failed',
+    reason: 'login_timeout',
+    message: '登录已超时，请重新扫码。',
+  })
+  assert.equal((await controller.status()).pendingLogin, false)
+})
+
+test('status alone purges an idle login after its total deadline', async t => {
+  let now = 1_500_000
+  const { controller, issued } = fixture(t, {
+    now: () => now,
+  })
+  const login = await controller.startLogin()
+  issued.push(login.sessionKey)
+
+  now += 480_001
+  assert.equal((await controller.status()).pendingLogin, false)
+  await assert.rejects(controller.poll(login.sessionKey), error => error?.code === 'no_login')
+})
+
+test('status cleanup does not terminate a poll that can still confirm', async t => {
+  let now = 2_000_000
+  const network = deferred()
+  const accountId = 'race-expired-deadline@im.bot'
+  cleanAccount(t, accountId)
+  const { controller, issued } = fixture(t, {
+    now: () => now,
+    apiGetFetch: () => network.promise,
+  })
+  const login = await controller.startLogin()
+  issued.push(login.sessionKey)
+
+  const polling = controller.poll(login.sessionKey)
+  now += 480_001
+  assert.equal((await controller.status()).pendingLogin, true)
+
+  network.resolve(confirmedResponse(accountId, 'still-valid-token'))
+  assert.deepEqual(await polling, {
+    status: 'confirmed',
+    accountId,
+    userId: 'user-1',
+  })
+  assert.equal(loadWeixinAccount(accountId)?.token, 'still-valid-token')
+  assert.equal((await controller.status()).pendingLogin, false)
+})
+
+test('session expiry is isolated per account and keeps the legacy aggregate', async t => {
+  const accountA = 'expiry-account-a@im.bot'
+  const accountB = 'expiry-account-b@im.bot'
+  cleanAccount(t, accountA)
+  cleanAccount(t, accountB)
+  saveWeixinAccount(accountA, { token: 'token-a', userId: 'user-a' })
+  saveWeixinAccount(accountB, { token: 'token-b', userId: 'user-b' })
+  registerWeixinAccountId(accountA)
+  registerWeixinAccountId(accountB)
+  const { controller } = fixture(t)
+
+  controller.markSessionExpired(accountA)
+  let status = await controller.status()
+  assert.equal(status.sessionExpired, true)
+  assert.equal(status.accounts.find(account => account.accountId === accountA)?.sessionExpired, true)
+  assert.equal(status.accounts.find(account => account.accountId === accountB)?.sessionExpired, false)
+
+  await controller.logout(accountB)
+  status = await controller.status()
+  assert.equal(status.sessionExpired, true)
+  assert.equal(status.accounts.find(account => account.accountId === accountA)?.sessionExpired, true)
+  assert.equal(status.accounts.some(account => account.accountId === accountB), false)
+  assert.equal(controller.sessionExpired, true)
+})
+
+test('a successful login clears only its own expiry flag', async t => {
+  const accountA = 'expiry-login-account-a@im.bot'
+  const accountB = 'expiry-login-account-b@im.bot'
+  cleanAccount(t, accountA)
+  cleanAccount(t, accountB)
+  saveWeixinAccount(accountA, { token: 'token-a', userId: 'user-a' })
+  registerWeixinAccountId(accountA)
+  const { controller, issued } = fixture(t, {
+    apiGetFetch: async () => confirmedResponse(accountB, 'fresh-token-b'),
+  })
+  controller.markSessionExpired(accountA)
+  controller.markSessionExpired(accountB)
+  const login = await controller.startLogin()
+  issued.push(login.sessionKey)
+
+  assert.equal((await controller.poll(login.sessionKey)).status, 'confirmed')
+  const status = await controller.status()
+  assert.equal(status.accounts.find(account => account.accountId === accountA)?.sessionExpired, true)
+  assert.equal(status.accounts.find(account => account.accountId === accountB)?.sessionExpired, false)
+})
+
+test('legacy no-argument expiry calls remain supported', async t => {
+  const accountId = 'expiry-legacy-account@im.bot'
+  cleanAccount(t, accountId)
+  saveWeixinAccount(accountId, { token: 'token', userId: 'user' })
+  registerWeixinAccountId(accountId)
+  const { controller } = fixture(t)
+
+  controller.markSessionExpired()
+  assert.equal(controller.sessionExpired, true)
+  assert.equal((await controller.status()).sessionExpired, true)
+  controller.clearSessionExpired()
+  assert.equal(controller.sessionExpired, false)
+  assert.equal((await controller.status()).sessionExpired, false)
 })
 
 test('cancel during a QR refresh prevents stale QR work from finishing', async t => {

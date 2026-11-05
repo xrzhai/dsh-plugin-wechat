@@ -348,7 +348,10 @@ window.__ModuleLoader__.load({
 					if (request !== statusRequestRef.current) return;
 					if (!Array.isArray(s?.accounts)) throw new Error("Invalid account status response");
 					setAccounts(s.accounts);
-					setSessionExpired(s?.sessionExpired === true);
+					// `accounts[].sessionExpired` is the scoped source. The aggregate
+					// remains supported for older hosts that only returned the legacy
+					// top-level boolean.
+					setSessionExpired(s?.sessionExpired === true || s.accounts.some(account => account?.sessionExpired === true));
 					setStatusState("ready");
 				} catch {
 					if (request === statusRequestRef.current) setStatusState("error");
@@ -500,6 +503,13 @@ window.__ModuleLoader__.load({
 									setState({ phase: "needcode" });
 									setMessage(p.message ?? "");
 									next = true;
+								} else if (p.status === "retrying") {
+									// A network/HTTP/malformed-response failure is not the same
+									// as the server's normal long-poll wait. Keep the QR visible,
+									// but tell the operator why it is retrying.
+									setState({ phase: "qr" });
+									setMessage(p.message ?? "");
+									next = true;
 								} else if (p.status === "refreshed") {
 									setQrUrl(p.qrcodeUrl ?? null);
 									setQrDataUrl(p.qrDataUrl ?? null);
@@ -520,6 +530,10 @@ window.__ModuleLoader__.load({
 									setState({ phase: "blocked" });
 									setMessage(p.message ?? "");
 									refreshStatus();
+								} else if (p.status === "wait" || p.status === "scaned") {
+									setState({ phase: "qr" });
+									setMessage("");
+									next = true;
 								} else {
 									next = true;
 								}
@@ -715,6 +729,14 @@ window.__ModuleLoader__.load({
 			};
 
 			const bound = statusState === "ready" && accounts.length > 0;
+			// Expiry is account-scoped: one failed credential must not relabel a
+			// healthy second account. The top-level boolean is still honoured for
+			// compatibility with older hosts/front-end bundles.
+			const expiredAccounts = accounts.filter(account => account?.sessionExpired === true);
+			const expiredAccountNames = expiredAccounts
+				.map(account => account.label || account.accountId)
+				.filter(Boolean)
+				.join(", ");
 			// One status line: a colored dot for the state, the account as the
 			// value. Stating "no account" in grey text made a real state read
 			// like absent information, and an expired session looked identical
@@ -725,7 +747,9 @@ window.__ModuleLoader__.load({
 				: statusState === "loading"
 				? t("Checking account status…", "正在读取账号状态…")
 				: sessionExpired
-				? t("Session expired", "登录已过期")
+				? expiredAccounts.length > 0
+					? t(`${expiredAccounts.length} of ${accounts.length} sessions expired`, `${accounts.length} 个账号中有 ${expiredAccounts.length} 个登录已过期`)
+					: t("Session expired", "登录已过期")
 				: bound
 					? t("Bound", "已绑定")
 					: t("Not logged in", "未登录");
@@ -756,6 +780,7 @@ window.__ModuleLoader__.load({
 									style: { fontSize: 12, color: C.labelSecondary },
 								}, account.accountId) : null,
 								account.paused ? createElement("span", { style: pillStyle("idle") }, t("paused", "已暂停")) : null,
+								account.sessionExpired === true ? createElement("span", { style: pillStyle("bad") }, t("session expired", "登录已过期")) : null,
 								seen ? createElement("span", { style: { fontSize: 12, color: C.labelSecondary } }, seen) : null,
 								createElement("span", { style: { flex: 1 } }),
 								createElement("button", {
@@ -847,10 +872,16 @@ window.__ModuleLoader__.load({
 				statusState === "ready" && sessionExpired
 					? createElement("div", { style: noticeStyle },
 							createElement("span", { style: { flex: "0 0 auto" } }, "⚠"),
-							createElement("span", null, t(
-								"The saved session has expired, so incoming messages are not being received. Scan again to log in.",
-								"登录已过期，当前收不到微信消息。请重新扫码登录。",
-							)))
+							createElement("span", null,
+								expiredAccountNames
+									? t(
+										`The saved session for ${expiredAccountNames} has expired, so that account is not receiving messages. Scan again to log in.`,
+										`${expiredAccountNames} 登录已过期，当前收不到该账号的微信消息。请重新扫码登录。`,
+									)
+									: t(
+										"The saved session has expired, so incoming messages are not being received. Scan again to log in.",
+										"登录已过期，当前收不到微信消息。请重新扫码登录。",
+									)))
 					: null,
 
 				// The scan/relogin button is only for a state the operator must
