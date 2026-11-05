@@ -123,6 +123,34 @@ test('only a successful empty account list is presented as logged out', async ()
   assert.equal(button(tree, '扫码登录微信').props.disabled, false)
 })
 
+test('expired sessions are identified on their own account rows', async () => {
+  const f = fixture(async () => ({
+    sessionExpired: true,
+    accounts: [
+      { accountId: 'healthy-account', label: '工作号', sessionExpired: false },
+      { accountId: 'expired-account', label: '个人号', sessionExpired: true },
+    ],
+  }))
+  const tree = await f.mount()
+  const rendered = text(tree)
+  assert.match(rendered, /2 个账号中有 1 个登录已过期/)
+  assert.match(rendered, /个人号/)
+  assert.match(rendered, /个人号 登录已过期/)
+  assert.equal(button(tree, '重新扫码登录')?.props.disabled, false)
+})
+
+test('the legacy aggregate expiry field still produces an actionable warning', async () => {
+  const f = fixture(async () => ({
+    sessionExpired: true,
+    accounts: [{ accountId: 'legacy-expired-account' }],
+  }))
+  const tree = await f.mount()
+  const rendered = text(tree)
+  assert.match(rendered, /登录已过期/)
+  assert.match(rendered, /请重新扫码登录/)
+  assert.equal(button(tree, '重新扫码登录')?.props.disabled, false)
+})
+
 test('unmount cancels the live QR session instead of the initial null state', async () => {
   const polling = new Promise(() => {})
   const cancelled = []

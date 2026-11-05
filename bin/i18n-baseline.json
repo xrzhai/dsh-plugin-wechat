@@ -2,7 +2,7 @@
   "version": 1,
   "files": {
     "src/message/stickers.js": 280,
-    "src/client.card.js": 117,
+    "src/client.card.js": 121,
     "src/index.js": 102,
     "src/sessions.js": 95,
     "bin/stickers.mjs": 69,
@@ -24,7 +24,7 @@
     "src/message/dry-run.js": 20,
     "src/message/links.js": 20,
     "src/asr-remote.js": 18,
-    "src/login-remote.js": 18,
+    "src/login-remote.js": 25,
     "src/state-layout.js": 17,
     "src/message/prompt-composition.js": 12,
     "src/message/usage.js": 12,

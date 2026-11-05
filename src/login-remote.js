@@ -42,11 +42,53 @@ const LOGIN_TTL_MS = 5 * 60 * 1000;
 const MAX_QR_REFRESH_COUNT = 3;
 const POLL_INTERVAL_MS = 1000;
 const LOGIN_TIMEOUT_MS = 480_000;
+const MAX_CONSECUTIVE_POLL_ERRORS = 3;
+const QR_STATUS_VALUES = new Set([
+    "wait",
+    "scaned",
+    "need_verifycode",
+    "expired",
+    "verify_code_blocked",
+    "binded_redirect",
+    "scaned_but_redirect",
+    "confirmed",
+]);
 
 const logins = new Map(); // sessionKey -> active login record
 
-function isFresh(login) {
-    return Date.now() - login.startedAt < LOGIN_TTL_MS;
+function normalizeAccountId(accountId) {
+    return String(accountId ?? "").trim();
+}
+
+function isFresh(login, now = Date.now()) {
+    return now < login.deadlineAt && now - login.lastActivityAt < LOGIN_TTL_MS;
+}
+
+function isPastLoginDeadline(login, now = Date.now()) {
+    return now >= login.deadlineAt;
+}
+
+function timedOutLoginResult() {
+    return {
+        status: "failed",
+        reason: "login_timeout",
+        message: "登录已超时，请重新扫码。",
+    };
+}
+
+function classifyPollError(error) {
+    if (error instanceof SyntaxError) {
+        return {
+            reason: "invalid_response",
+            message: "微信登录服务返回异常，正在重试。",
+            failureMessage: `连续 ${MAX_CONSECUTIVE_POLL_ERRORS} 次无法获得有效的登录响应，本次登录已停止，请稍后重试。`,
+        };
+    }
+    return {
+        reason: "network_error",
+        message: "连接微信登录服务失败，正在重试。",
+        failureMessage: `连续 ${MAX_CONSECUTIVE_POLL_ERRORS} 次无法连接微信登录服务，本次登录已停止，请检查网络后重试。`,
+    };
 }
 
 function getLocalTokenList() {
@@ -88,10 +130,16 @@ async function pollQrStatus(baseUrl, qrcode, verifyCode, request = apiGetFetch) 
             timeoutMs: 35_000,
             label: "pollQRStatus",
         });
-        return JSON.parse(raw);
-    } catch {
-        // network hiccup / long-poll timeout: keep waiting like the CLI does
-        return { status: "wait" };
+        const status = JSON.parse(raw);
+        if (typeof status?.status !== "string" || !QR_STATUS_VALUES.has(status.status)) {
+            throw new SyntaxError("QR status response has no recognized status");
+        }
+        return status;
+    } catch (error) {
+        // A client-side timeout is the normal end of a long poll: the server
+        // had no transition to report. Every other failure must remain visible.
+        if (error?.name === "AbortError") return { status: "wait" };
+        throw error;
     }
 }
 
@@ -107,8 +155,16 @@ export class WeixinLoginController extends TypertRemoteService {
         this.apiGetFetch = options.apiGetFetch ?? apiGetFetch;
         this.apiPostFetch = options.apiPostFetch ?? apiPostFetch;
         this.makeQrDataUrl = options.makeQrDataUrl ?? qrDataUrl;
+        // Account-store seams keep failure semantics testable without relying
+        // on platform-specific permission tricks.
+        this.loadAccount = options.loadAccount ?? loadWeixinAccount;
+        this.clearAccount = options.clearAccount ?? clearWeixinAccount;
+        this.unregisterAccount = options.unregisterAccount ?? unregisterWeixinAccountId;
+        this.now = typeof options.now === "function" ? options.now : Date.now;
         this.startingLogin = undefined;
         this.loginRevision = 0;
+        this.sessionExpiredAccounts = new Set();
+        this.unscopedSessionExpired = false;
         /**
          * Called after a login writes a new credential, so the host can start
          * (or restart) the inbound loop without waiting for a reload. Assigned
@@ -134,7 +190,12 @@ export class WeixinLoginController extends TypertRemoteService {
 
     /** Start (or resume) a QR login; returns {qrcodeUrl, qrDataUrl, sessionKey, status}. */
     async startLogin() {
-        const existing = [...logins.values()].find((l) => isFresh(l) && l.qrcodeUrl);
+        const now = this.now();
+        // A new click is an explicit replacement. Drop expired records even if
+        // an old request is still unwinding; its identity check will then stop
+        // the late response from binding an account behind the new login.
+        purgeStaleLogins(now, { includeActive: true, includeIdle: true });
+        const existing = [...logins.values()].find((l) => isFresh(l, now) && l.qrcodeUrl);
         if (existing) {
             return {
                 qrcodeUrl: existing.qrcodeUrl,
@@ -165,12 +226,20 @@ export class WeixinLoginController extends TypertRemoteService {
         // Best-effort QR image; the clickable link is always a usable fallback.
         const qrDataUrlValue = await this.makeQrDataUrl(link).catch(() => undefined);
         if (revision !== this.loginRevision) return { status: "cancelled" };
+        const issuedAt = this.now();
         logins.set(sessionKey, {
             sessionKey,
             qrcode: data.qrcode,
             qrcodeUrl: link,
             qrDataUrl: qrDataUrlValue,
-            startedAt: Date.now(),
+            // Kept for compatibility with older diagnostics; total login time
+            // comes from createdAt/deadlineAt and is never extended by refresh.
+            startedAt: issuedAt,
+            createdAt: issuedAt,
+            deadlineAt: issuedAt + LOGIN_TIMEOUT_MS,
+            lastActivityAt: issuedAt,
+            inFlightPolls: 0,
+            consecutivePollErrors: 0,
             refreshCount: 0,
             pendingVerifyCode: null,
             baseUrl: FIXED_BASE_URL,
@@ -189,12 +258,64 @@ export class WeixinLoginController extends TypertRemoteService {
     async poll(sessionKey) {
         const login = logins.get(sessionKey);
         if (!login) throw new RemoteError("no_login", "没有进行中的登录，请重新扫码", {});
-        const status = await pollQrStatus(login.baseUrl, login.qrcode, login.pendingVerifyCode, this.apiGetFetch);
+        const startedAt = this.now();
+        if (isPastLoginDeadline(login, startedAt)) {
+            logins.delete(sessionKey);
+            return timedOutLoginResult();
+        }
+        login.inFlightPolls += 1;
+        login.lastActivityAt = startedAt;
+        let status;
+        try {
+            status = await pollQrStatus(login.baseUrl, login.qrcode, login.pendingVerifyCode, this.apiGetFetch);
+        } catch (error) {
+            // cancel()/logout() may have removed this exact record while the
+            // failed request was open. That is not a network failure to report.
+            if (logins.get(sessionKey) !== login) return { status: "cancelled" };
+            const failedAt = this.now();
+            login.lastActivityAt = failedAt;
+            if (isPastLoginDeadline(login, failedAt)) {
+                logins.delete(sessionKey);
+                return timedOutLoginResult();
+            }
+            const failure = classifyPollError(error);
+            login.consecutivePollErrors += 1;
+            logger.warn(
+                `weixin login: poll ${failure.reason} attempt=${login.consecutivePollErrors}/${MAX_CONSECUTIVE_POLL_ERRORS} session=${redactToken(sessionKey)}`,
+            );
+            if (login.consecutivePollErrors >= MAX_CONSECUTIVE_POLL_ERRORS) {
+                logins.delete(sessionKey);
+                return {
+                    status: "failed",
+                    reason: failure.reason,
+                    message: failure.failureMessage,
+                };
+            }
+            return {
+                status: "retrying",
+                reason: failure.reason,
+                attempt: login.consecutivePollErrors,
+                maxAttempts: MAX_CONSECUTIVE_POLL_ERRORS,
+                message: `${failure.message}（${login.consecutivePollErrors}/${MAX_CONSECUTIVE_POLL_ERRORS}）`,
+            };
+        } finally {
+            login.inFlightPolls = Math.max(0, login.inFlightPolls - 1);
+        }
         // cancel()/logout() remove this exact record while the request is open.
         // A later response belongs to a dead login and must have no side effects.
         // The identity check also makes concurrent polls safe: after the first
         // confirmed result removes the record, later duplicates stop here.
         if (logins.get(sessionKey) !== login) return { status: "cancelled" };
+        const completedAt = this.now();
+        login.lastActivityAt = completedAt;
+        // A request that was already in flight at the deadline may still have a
+        // successful confirmation. Give that terminal answer priority; reject
+        // every non-terminal result once the total time limit has elapsed.
+        if (status.status !== "confirmed" && isPastLoginDeadline(login, completedAt)) {
+            logins.delete(sessionKey);
+            return timedOutLoginResult();
+        }
+        login.consecutivePollErrors = 0;
         // The login flow used to leave no trace at all, which made a scan that
         // went nowhere impossible to diagnose after the fact.
         logger.debug(
@@ -229,7 +350,8 @@ export class WeixinLoginController extends TypertRemoteService {
                 login.qrcode = fresh.qrcode;
                 login.qrcodeUrl = fresh.qrcode_img_content;
                 login.qrDataUrl = freshQrDataUrl;
-                login.startedAt = Date.now();
+                login.startedAt = this.now();
+                login.lastActivityAt = login.startedAt;
                 return { status: "refreshed", qrcodeUrl: login.qrcodeUrl, qrDataUrl: login.qrDataUrl };
             }
             case "binded_redirect": {
@@ -268,7 +390,7 @@ export class WeixinLoginController extends TypertRemoteService {
                 );
                 // A completed login writes a usable credential, so any expiry
                 // recorded from an earlier session no longer applies.
-                this.clearSessionExpired();
+                this.clearSessionExpired(status.ilink_bot_id);
                 // The loop that is running belongs to the credential that was
                 // on disk when it started — which is the one this login just
                 // replaced, or nothing at all on a fresh install. Tell the host
@@ -330,7 +452,7 @@ export class WeixinLoginController extends TypertRemoteService {
         // every poll that did. Logout must win even when no old account remains.
         this.loginRevision += 1;
         logins.clear();
-        const wanted = String(accountId ?? "").trim();
+        const wanted = normalizeAccountId(accountId);
         const ids = wanted ? [wanted] : listIndexedWeixinAccountIds();
         if (ids.length === 0) {
             return { removed: [], reloadRequired: false };
@@ -339,23 +461,32 @@ export class WeixinLoginController extends TypertRemoteService {
         for (const id of ids) {
             // Only touch accounts we actually hold: a caller must not be able to
             // name an arbitrary path, and a typo should not report success.
-            const acct = loadWeixinAccount(id);
+            const acct = this.loadAccount(id);
             if (!acct?.token) continue;
-            clearWeixinAccount(id);
-            unregisterWeixinAccountId(id);
+            this.clearAccount(id);
+            this.unregisterAccount(id);
             removed.push(id);
+            // Expiry describes whether the saved credential is usable. Only a
+            // completed deletion proves that warning no longer needs action.
+            this.sessionExpiredAccounts.delete(id);
         }
-        this.sessionExpired = false;
+        // A legacy aggregate flag has no account identity. Clear it only after
+        // logout-all completed for every indexed account it was meant to remove.
+        if (!wanted && ids.length > 0 && removed.length === ids.length) {
+            this.unscopedSessionExpired = false;
+        }
         return { removed, reloadRequired: removed.length > 0 };
     }
 
     /** Account status for the settings card: which account is bound, state dir. */
     async status() {
+        const now = this.now();
+        purgeStaleLogins(now);
         const ids = listIndexedWeixinAccountIds();
         const accounts = [];
         for (const id of ids) {
             try {
-                const acct = loadWeixinAccount(id);
+                const acct = this.loadAccount(id);
                 if (acct?.token) {
                     // Registry side-table data: label/paused/lastSeenAt live
                     // outside the credential on purpose (see account-registry.js).
@@ -370,6 +501,7 @@ export class WeixinLoginController extends TypertRemoteService {
                         userId: acct.userId ?? null,
                         label: typeof entry.label === "string" ? entry.label : null,
                         paused: isAccountPaused(id),
+                        sessionExpired: this.sessionExpiredAccounts.has(id),
                         lastSeenAt: typeof entry.lastSeenAt === "string" ? entry.lastSeenAt : null,
                         allowedSenders: effective.allowedSenders,
                         allowedChats: effective.allowedChats,
@@ -383,11 +515,16 @@ export class WeixinLoginController extends TypertRemoteService {
         // file is present and complete, but the server refuses it, so inbound
         // messaging stops while the card still shows "bound". The transport
         // records the refusal here so the card can say "log in again".
+        // Status is observational: a transient credential read failure or a
+        // momentary token gap must not erase a warning that only a successful
+        // login or completed logout can resolve.
+        // Keep the old top-level boolean for older clients, while each account
+        // now carries the flag that actually tells one login from another.
         return {
             accounts,
             stateDir: stateDir(),
             pendingLogin: logins.size > 0,
-            sessionExpired: this.sessionExpired === true,
+            sessionExpired: this.sessionExpired,
         };
     }
 
@@ -879,13 +1016,22 @@ export class WeixinLoginController extends TypertRemoteService {
      * Called by the host when the poll loop sees `errcode: -14`. A fresh login
      * clears it, because the account is then writable again.
      */
-    markSessionExpired() {
-        this.sessionExpired = true;
+    markSessionExpired(accountId) {
+        const id = normalizeAccountId(accountId);
+        if (id) this.sessionExpiredAccounts.add(id);
+        else this.unscopedSessionExpired = true;
     }
 
     /** Clear the flag: a completed login means the session is valid again. */
-    clearSessionExpired() {
-        this.sessionExpired = false;
+    clearSessionExpired(accountId) {
+        const id = normalizeAccountId(accountId);
+        if (id) this.sessionExpiredAccounts.delete(id);
+        else this.unscopedSessionExpired = false;
+    }
+
+    /** Backward-compatible aggregate of all account-scoped expiry flags. */
+    get sessionExpired() {
+        return this.unscopedSessionExpired || this.sessionExpiredAccounts.size > 0;
     }
 
     /**
@@ -1002,9 +1148,18 @@ function lastUsedAt(entry) {
     return newest;
 }
 
-export function purgeStaleLogins() {
-    for (const [key, login] of logins) {
-        if (!isFresh(login)) logins.delete(key);
+/**
+ * Remove abandoned sessions without racing a request that can still confirm.
+ * `includeActive` is reserved for an explicit new login attempt; normal status
+ * reads leave an in-flight confirmation alone and let its own bounded request
+ * settle first.
+ */
+export function purgeStaleLogins(now = Date.now(), { includeActive = false, includeIdle = false } = {}) {
+    for (const [sessionKey, login] of logins) {
+        if (!includeActive && login.inFlightPolls > 0) continue;
+        if (isPastLoginDeadline(login, now) || (includeIdle && now - login.lastActivityAt >= LOGIN_TTL_MS)) {
+            logins.delete(sessionKey);
+        }
     }
 }
 
