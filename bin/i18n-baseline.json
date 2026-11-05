@@ -26,7 +26,7 @@
     "src/asr-remote.js": 18,
     "src/login-remote.js": 18,
     "src/state-layout.js": 17,
-    "src/message/prompt-composition.js": 13,
+    "src/message/prompt-composition.js": 12,
     "src/message/usage.js": 12,
     "bin/login.js": 11,
     "src/message/recall.js": 11,

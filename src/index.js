@@ -61,7 +61,6 @@ import { keywordGate, keywordStats, parseKeywordRules } from './message/keyword-
 import { isAllowedSender, denialReason } from './security/allowlist.js'
 import { ILinkTransport } from './transport/ilink.js'
 import { AgentBridge } from './agent-bridge.js'
-import './message/chunker.js'
 import { appendJournal } from './message/journal.js'
 import { appendToolAudit, readToolAudit } from './message/audit.js'
 import { DEFAULT_SEND_INTERVAL_MS, DEFAULT_COOLDOWN_MS } from './message/rate-limit.js'
@@ -85,7 +84,6 @@ let outbox
 /** 群聊摘要：内存里攒群消息，够一批就后台压成几行。 */
 let groupSummaries
 import { MessageDeduper } from './message/dedupe.js'
-import './message/markdown.js'
 import { extractUrls, fetchLinkText, describeLinkResults } from './message/links.js'
 import { ReminderScheduler, parseWhen } from './message/scheduler.js'
 import { createAwayCommands, readAway, noteMissed, buildAwayReply, awaySummary, clearAway } from './message/away.js'
@@ -120,7 +118,6 @@ import { createTranslator, resolveLocale } from './i18n.js'
 import { routeFor, sideRouteFor } from './model-route.js'
 import { readJournalRange, renderChatMarkdown, writeChatExport } from './message/chat-export.js'
 import { createNotifyServer, DEFAULT_NOTIFY_PORT, ensureNotifyToken } from './notify.js'
-import './message/dry-run.js'
 import { describeUnknownItems, firstSighting } from './message/unknown-items.js'
 import { statePaths } from './state-layout.js'
 import { createGroupSummaries, groupSummaryPrompt } from './message/group-summary.js'
