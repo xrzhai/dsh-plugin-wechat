@@ -11,6 +11,7 @@ import { statePath } from '../state-layout.js'
 import fs from 'node:fs'
 import { atomicWriteJson } from '../atomic.js'
 import { parseWhen } from './scheduler.js'
+import { armLongTimer } from './long-timer.js'
 
 export const MAX_SUBSCRIPTIONS_PER_ACCOUNT = 20
 /** A slot missed by downtime fires only if it is this fresh; older ones skip. */
@@ -123,13 +124,15 @@ export class SubscriptionScheduler {
      * @param {(message: string) => void} [options.warn]
      * @param {(ms: number, callback: () => void) => unknown} [options.setTimeoutRef] injectable for tests
      * @param {(timer: unknown) => void} [options.clearTimeoutRef] injectable for tests
+     * @param {() => number} [options.nowRef] injectable clock for tests
      */
-    constructor({ stateRoot, fire, warn = () => {}, setTimeoutRef = ((ms, cb) => setTimeout(cb, ms)), clearTimeoutRef = ((t) => clearTimeout(t)), quiet = null }) {
+    constructor({ stateRoot, fire, warn = () => {}, setTimeoutRef = ((ms, cb) => setTimeout(cb, ms)), clearTimeoutRef = ((t) => clearTimeout(t)), quiet = null, nowRef = (() => Date.now()) }) {
         this.stateRoot = stateRoot
         this.fire = fire
         this.warn = warn
         this.setTimeoutRef = setTimeoutRef
         this.clearTimeoutRef = clearTimeoutRef
+        this.nowRef = nowRef
         // Optional quiet-hours gate: (nowMs) => ms until the window ends, 0
         // when the moment is not quiet. A slot landing inside the window is
         // re-armed for the window's end instead of being consumed.
@@ -137,7 +140,7 @@ export class SubscriptionScheduler {
         this.store = readSubscriptions(stateRoot, warn)
         this.timers = new Map()
         this.stopped = false
-        const now = Date.now()
+        const now = this.nowRef()
         for (const item of this.store.items) this.#reconcile(item, now)
     }
 
@@ -183,11 +186,20 @@ export class SubscriptionScheduler {
 
     #arm(item) {
         if (this.stopped) return
-        const delay = Math.max(0, item.fireAt - Date.now())
-        this.timers.set(item.id, this.setTimeoutRef(delay, () => {
-            this.timers.delete(item.id)
-            void this.#trigger(item)
-        }))
+        this.#clearTimer(item.id)
+        let timer
+        timer = armLongTimer({
+            dueAt: item.fireAt,
+            nowRef: this.nowRef,
+            setTimeoutRef: this.setTimeoutRef,
+            clearTimeoutRef: this.clearTimeoutRef,
+            callback: () => {
+                if (this.timers.get(item.id) !== timer) return
+                this.timers.delete(item.id)
+                void this.#trigger(item)
+            },
+        })
+        this.timers.set(item.id, timer)
     }
 
     async #trigger(item) {
@@ -195,20 +207,21 @@ export class SubscriptionScheduler {
         const snapshot = { ...item }
         const current = this.store.items.find((entry) => entry.id === item.id)
         if (current === undefined) return
-        const quietMs = this.quiet === null ? 0 : this.quiet(Date.now(), item.accountId)
+        const now = this.nowRef()
+        const quietMs = this.quiet === null ? 0 : this.quiet(now, item.accountId)
         if (quietMs > 0) {
             // 免打扰时段: do not consume the slot — push fireAt to the window's
             // end and re-arm; the normal consume+fire happens then. The item
             // stays in the store, so a restart during the window re-arms it.
-            current.fireAt = Date.now() + quietMs
+            current.fireAt = now + quietMs
             writeSubscriptions(this.stateRoot, this.store, this.warn)
             this.#arm(current)
             this.warn(`免打扰时段，订阅 ${item.id} 推迟到 ${formatStamp(current.fireAt)} 发送`)
             return
         }
         if (current.kind === 'once') this.#remove(current.id)
-        else this.#advance(current, Date.now())
-        current.lastFiredAt = Date.now()
+        else this.#advance(current, now)
+        current.lastFiredAt = now
         writeSubscriptions(this.stateRoot, this.store, this.warn)
         try {
             await this.fire(snapshot)
@@ -239,8 +252,8 @@ export class SubscriptionScheduler {
             kind: when.kind,
             time: when.time,
             weekday: when.weekday,
-            fireAt: when.kind === 'once' ? when.fireAt : nextFireAt({ kind: when.kind, time: when.time, weekday: when.weekday }, Date.now()),
-            createdAt: Date.now(),
+            fireAt: when.kind === 'once' ? when.fireAt : nextFireAt({ kind: when.kind, time: when.time, weekday: when.weekday }, this.nowRef()),
+            createdAt: this.nowRef(),
         }
         this.store.items.push(item)
         writeSubscriptions(this.stateRoot, this.store, this.warn)
@@ -261,12 +274,15 @@ export class SubscriptionScheduler {
         const before = this.store.items.length
         this.store.items = this.store.items.filter((item) => item.id !== id)
         if (this.store.items.length === before) return false
-        const timer = this.timers.get(id)
-        if (timer !== undefined) {
-            this.clearTimeoutRef(timer)
-            this.timers.delete(id)
-        }
+        this.#clearTimer(id)
         return true
+    }
+
+    #clearTimer(id) {
+        const timer = this.timers.get(id)
+        if (timer === undefined) return
+        timer.cancel()
+        this.timers.delete(id)
     }
 
     /** Subscriptions, soonest first. Optionally narrowed to one account. */
@@ -278,7 +294,7 @@ export class SubscriptionScheduler {
     /** Stop every timer. The store is untouched: a reload re-arms from disk. */
     stop() {
         this.stopped = true
-        for (const timer of this.timers.values()) this.clearTimeoutRef(timer)
+        for (const timer of this.timers.values()) timer.cancel()
         this.timers.clear()
     }
 }
