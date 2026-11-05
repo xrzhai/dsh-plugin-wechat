@@ -675,20 +675,15 @@ const COMMANDS = [
     helpRank: 18,
     helpKey: 'help.remindcancel',
   },
-  // Bare `/subscribe` (and `/订阅`) answers with usage instead of reaching
-  // the agent: a bare time command read as a chat message would silently
-  // schedule nothing and confuse the sender.
+  // `/subscribe 明天 9:00 主题`: the time may contain spaces, so keep the whole
+  // argument and let the execution branch try parseable prefixes from longest
+  // to shortest. A bare command is recognised too, so it answers with usage.
   {
     id: 'subscribe',
-    pattern: /^\/(?:subscribe|订阅)\s+((?:每天|每日|daily)\s+\d{1,2}:\d{2}|每周[一二三四五六日天]\s+\d{1,2}:\d{2}|\d{1,2}:\d{2}|\S+)(?:\s+([\s\S]+))?$/i,
-    build: (match) => ({ when: match[1], text: match[2] ?? '' }),
+    pattern: /^\/(?:subscribe|订阅)(?:\s+([\s\S]+))?$/i,
+    build: (match) => ({ arg: match[1]?.trim() ?? '' }),
     helpRank: 19,
     helpKey: 'help.subscribe',
-  },
-  {
-    id: 'subscribe',
-    pattern: /^\/(?:subscribe|订阅)$/i,
-    build: () => ({ when: '', text: '' }),
   },
   { id: 'export', pattern: /^\/(?:export|导出)(?:\s+(\d{1,3}))?$/i,
     build: (match) => ({ days: match[1] === undefined ? undefined : Number(match[1]) }),
@@ -977,13 +972,28 @@ export function runSessionCommand(lines, conversationId, text, accountId, contex
   if (command.command === 'subscribe') {
     const scheduler = context?.subscription
     if (scheduler === undefined) return '当前无法安排定时消息（调度器不可用）。'
-    if (String(command.text ?? '').trim() === '') {
-      return '用法：/subscribe <时间> <主题>，例如 /subscribe 每天 08:00 早安，问问我睡得怎么样\n时间支持 每天 HH:mm、每周日 HH:mm、裸 HH:mm（等于每天），以及一次性时间（10m、2026-11-01 09:00）'
+    const usage = '用法：/subscribe <时间> <主题>，例如 /subscribe 每天 08:00 早安，问问我睡得怎么样\n时间支持 每天 HH:mm、每周日 HH:mm、裸 HH:mm（等于每天），以及一次性时间（10m、2026-11-01 09:00）'
+    const raw = String(command.arg ?? '').trim()
+    if (raw === '') return usage
+
+    // Match /remind: try the longest parseable prefix first. This keeps
+    // `周五 10点` together instead of taking bare `周五` and putting `10点`
+    // in the prompt, while time-like words later in the topic remain text.
+    const tokens = raw.split(/\s+/)
+    let when
+    let text = ''
+    for (let take = Math.min(tokens.length, 4); take >= 1; take -= 1) {
+      const parsed = parseSubscriptionWhen(tokens.slice(0, take).join(' '))
+      if (parsed.ok === true) {
+        when = parsed
+        text = tokens.slice(take).join(' ')
+        break
+      }
     }
-    const when = parseSubscriptionWhen(command.when)
-    if (when.ok === false) return `没有安排：${when.reason}`
+    if (when === undefined) return `没有安排：${parseSubscriptionWhen(tokens[0]).reason}`
+    if (text.trim() === '') return usage
     const accountIdForSub = context?.accountId ?? accountId ?? ''
-    const planned = scheduler.schedule({ accountId: accountIdForSub, conversationId, when, prompt: command.text })
+    const planned = scheduler.schedule({ accountId: accountIdForSub, conversationId, when, prompt: text })
     if (planned.error !== undefined) return `没有安排：${planned.error}`
     const recurring = planned.kind !== 'once'
     const tail = recurring
