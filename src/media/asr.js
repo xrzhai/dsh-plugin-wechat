@@ -198,7 +198,7 @@ export class AsrBridge {
       if (error instanceof AsrError) {
         // A timed-out or dead child is dropped so the next request gets a fresh
         // one; a per-request bridge error keeps the process, which is healthy.
-        if (error.code === 'timeout' || error.code === 'exited') this.#killChild()
+        if (error.code === 'timeout' || error.code === 'exited' || error.code === 'spawn-failed') this.#killChild()
         return { ok: false, reason: error.message, code: error.code }
       }
       this.#killChild()
@@ -269,7 +269,9 @@ export class AsrBridge {
         clearTimeout(timer)
         child.stdout.off('data', onData)
         child.off('exit', onExit)
-        if (this.closeSignal === onClose) this.closeSignal = undefined
+        child.off('error', onError)
+        child.off('close', onClosed)
+        if (this.closeSignal === onDispose) this.closeSignal = undefined
         fn(value)
       }
       const onData = (chunk) => {
@@ -303,7 +305,13 @@ export class AsrBridge {
       const onExit = (code, signal) => {
         finish(reject, new AsrError(`the ASR bridge exited (code=${code}${signal ? `, signal=${signal}` : ''})`, 'exited'))
       }
-      const onClose = () => {
+      const onError = (error) => {
+        finish(reject, new AsrError(`the ASR bridge failed to start: ${String(error?.message ?? error)}`, 'spawn-failed'))
+      }
+      const onClosed = (code, signal) => {
+        finish(reject, new AsrError(`the ASR bridge closed (code=${code}${signal ? `, signal=${signal}` : ''})`, 'exited'))
+      }
+      const onDispose = () => {
         finish(reject, new AsrError('the ASR bridge was shut down', 'closed'))
       }
       const timer = setTimeout(() => {
@@ -313,7 +321,9 @@ export class AsrBridge {
       // the timeout is the only thing guaranteeing this promise settles.
       child.stdout.on('data', onData)
       child.on('exit', onExit)
-      this.closeSignal = onClose
+      child.on('error', onError)
+      child.on('close', onClosed)
+      this.closeSignal = onDispose
       try {
         child.stdin.write(`${JSON.stringify({ wav: wavPath })}\n`)
       } catch (error) {
