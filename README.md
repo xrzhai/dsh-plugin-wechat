@@ -76,6 +76,23 @@
 - **以后怎么升级新版本？**
   直接对你的 DSH 说：*“帮我更新一下 `dsh-plugin-wechat` 插件”*，重启 DSH 即可。
 
+### 🍎 macOS 上要注意的几件事
+
+- **终端里不一定有 `node` / `pnpm`。** DSH 自带运行时，但不会写进你的 PATH，所以 `node bin/install.mjs`、`pnpm install` 在普通终端会 command not found。把自带运行时接进来（可写进 `~/.zshrc`）：
+  ```sh
+  export PATH="$HOME/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin:$PATH"
+  pnpm() { node "$HOME/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/pnpm/bin/pnpm.cjs" "$@"; }
+  ```
+  扫码登录不需要命令，直接用「大肥鱼 → 微信账号 → 扫码登录微信」。
+- **`ffmpeg` 系统不自带。** 想发 mp3/m4a/ogg 语音条、想给视频抽帧，先 `brew install ffmpeg`。没装时这两条路会降级：音频退成文件发送，视频抽帧静默跳过；wav 和 silk 走内置编码器，不受影响。
+- **`/say` 是本机语音合成，macOS 独占。** 用系统自带的 `say` + `afconvert`，不联网、不花钱，也不需要 ffmpeg。
+- **语音识别（ASR）别用系统 Python。** `/usr/bin/python3` 是 3.9，且没有 `mlx-whisper`。用 DSH 自带的 3.12：
+  ```sh
+  ~/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/python/bin/python -m pip install mlx-whisper
+  ```
+  然后把 `asr.command` 设成这个 python 的绝对路径；Apple 芯片会走 GPU，比 CPU 快得多。
+- **笔记本合盖会睡。** 睡眠期间长轮询和定时提醒都停；唤醒或重启后，错过的提醒会立即补发，不会静默丢掉。
+
 ---
 
 ## 五、 给 AI Agent 看的自动安装与维护指令 (For AI Agents Only)
@@ -84,7 +101,7 @@
 
 ### 1. 环境与目录选择
 - 开发验证和文案基线规则见 [开发检查](docs/development-checks.md)；安装前可用 `node bin/install.mjs --help` 查看参数，或追加 `--dry-run` 预览变更。
-- 确认本机具备 `git`、`node`（需 `>= 22.13.0`）与 `pnpm`。
+- 确认本机具备 `git`、`node`（需 `>= 22.13.0`）与 `pnpm`。**macOS 上 `node`/`pnpm` 常常不在 PATH 里**：优先使用 DSH 自带的 `~/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/node` 和同目录下的 `pnpm/bin/pnpm.cjs`，不要再要求用户额外安装一套 Node。
 - **重要**：安装脚本会将用户的 DSH Profile 通过软链接（`link:`）指向本仓库目录。因此**请勿将仓库克隆在 `/tmp` 或临时目录**，请克隆在用户固定的项目目录（例如 `~/Projects/dsh-plugin-wechat` 或 `D:\Projects\dsh-plugin-wechat`）或 `~/.dsh/plugins/dsh-plugin-wechat`。
 
 ### 2. 从零安装步骤

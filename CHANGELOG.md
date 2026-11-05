@@ -21,6 +21,7 @@
   - **收敛为纯网关**：整层删除记忆引擎与拟人功能——`memory.js`、`persona.js`、`packs.js`/`pack-presets.js`、`proactive*`、`life-state`、`affinity-history`、`human-pace`、`style-feedback`、`digest`/`reports`/`promotions`、`memory-*`/`fact-dedupe`、`dates`（事件提醒）；对应删除 `/mode /remember /forget /memory /undo /import /digest /summary /recall` 命令、`/bad /good /style` 反馈、模板包（pack）CLI 与全部 remote 声明、相关 config 字段与后台调度器。保留：账号扫码、消息收发（文本/图片/文件/语音）、会话命令、提醒/订阅、待办/稍后读、白名单、媒体、日志/备份/指标/诊断，以及 `AGENTS.md` + `memory.md`（按需读写）。`src/index.js` 由 ~3400 行降到 ~2460 行，净删一个数量级的拟人复杂度。
   - 修复 #11：清理纯网关已删除命令的帮助词条并补齐英文 `/compact`；doctor 按嵌套 ASR 配置、持久化模型目录和 legacy 扁平键给出准确状态，`--fix` 创建 `sessions/` 与现有的 `knowledge/`，不再创建废弃的 `memory/`。legacy 备份清单、模型路由和用户数据保持不变。
   - 修复 #13 的实例安全检查：`backup.mjs restore/open` 改用跨平台实例锁与 PID 探测，不再依赖 Windows 缺失的 `pgrep`。正常退出会删除 `instance.lock`，因此写入前应先退出 agent harness，再用 `--yes` 确认；缺锁、损坏、不可读或探测失败默认拒绝，`--yes` 仍是明确的手动覆盖。
+  - macOS 支持说明与宿主清单：兼容表加入 `0.2.2-rc.1`（本机 macOS arm64、DSH `0.2.2-rc.1` 上实测：460 项测试中 457 通过、3 跳过、0 失败，doctor 13 项检查 0 问题，同宿主真实收发正常）；中英文 README 补充 macOS 平台差异——终端通常没有 `node`/`pnpm`（用 DSH 自带运行时）、`ffmpeg` 需 `brew install`、`/say` 为 macOS 独占、ASR 应使用自带 Python 3.12 安装 `mlx-whisper`、合盖睡眠后提醒会补发。
 
 - **1.6.2（待本机 DSH / 微信验证）** —— **平行会话通知不再把长代码转附件丢正文（#31）**：
   - `onDispatchReply` 固定以 `richContent: false` 发送调度结果，长 fenced code block 始终走纯文本分段，不再生成 snippet 附件；即使媒体上传失败也不会丢掉代码正文。普通回复的富内容设置不受影响。

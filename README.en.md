@@ -28,6 +28,23 @@ Please install this WeChat plugin for me by reading its README and following the
 
 Once your Agent finishes installing, **fully quit and reopen DSH**.
 
+### Platform notes (macOS)
+
+- **`node` / `pnpm` are often not on your terminal PATH.** DSH ships its own runtime but does not export it, so `node bin/install.mjs` and `pnpm install` fail with "command not found". Wire the bundled runtime in (you can put this in `~/.zshrc`):
+  ```sh
+  export PATH="$HOME/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin:$PATH"
+  pnpm() { node "$HOME/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/pnpm/bin/pnpm.cjs" "$@"; }
+  ```
+  You do not need a command to log in: use **WeChat → WeChat Account → Scan QR to Log In**.
+- **`ffmpeg` is not bundled with macOS.** Install it with `brew install ffmpeg` if you want mp3/m4a/ogg sent as voice messages or video frames extracted for the model. Without it, audio falls back to a file attachment and frame extraction is skipped silently; wav and silk use the built-in encoder and are unaffected.
+- **`/say` is local speech synthesis and is macOS-only**, using the system `say` + `afconvert`: no network, no API key, no ffmpeg.
+- **Do not use the system Python for ASR.** `/usr/bin/python3` is 3.9 and has no `mlx-whisper`. Use the Python 3.12 bundled with DSH:
+  ```sh
+  ~/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/python/bin/python -m pip install mlx-whisper
+  ```
+  Then point `asr.command` at that absolute path. On Apple silicon it runs on the GPU and is markedly faster than CPU.
+- **A laptop sleeps when the lid closes.** Long-polling and scheduled reminders stop while asleep; reminders that came due are delivered immediately after wake or restart rather than being dropped.
+
 ---
 
 ## 2. Bind Your WeChat (Takes 1 Minute)
@@ -60,6 +77,8 @@ These shortcuts are handled locally by the plugin without spending model tokens:
 > **For AI Agents**: When the user asks you to install, update, or uninstall this plugin, run these steps directly.
 
 ### Install from Scratch
+You need `git`, `node` (>= 22.13.0) and `pnpm`. **On macOS these are often not on PATH**: prefer the runtime bundled with DSH (`~/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/node` and the sibling `pnpm/bin/pnpm.cjs`) instead of asking the user to install another Node.
+
 Clone into a permanent directory (do **not** use `/tmp`, as `install.mjs` creates a persistent `link:` to this checkout):
 
 ```bash
