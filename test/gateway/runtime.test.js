@@ -6,6 +6,7 @@ import { setImmediate as tick } from 'node:timers/promises'
 import { Context } from '@deepseek-ai/cordis'
 import { apply } from '../../src/index.js'
 import { AgentBridge } from '../../src/agent-bridge.js'
+import { readRegistry, setAccountAllowlist } from '../../src/account-registry.js'
 import { ILinkTransport } from '../../src/transport/ilink.js'
 import { ConfigController } from '../../src/config-remote.js'
 import { configureWeixinStateDir, configFile, stateDir } from '../../src/state.js'
@@ -54,7 +55,7 @@ function seedSubscription(root, prompt) {
 
 // Real Cordis services, persistence, apply(), AgentBridge and gateway wiring.
 // Only the external iLink boundary and host session factory are synthetic.
-function fixture(t, { enabled = false, baseEnabled = true, refresh, stop, beforeApply, summarize } = {}) {
+function fixture(t, { enabled = false, baseEnabled = true, allowedSenders = ['test-user'], allowedChats = [], refresh, stop, beforeApply, summarize } = {}) {
   const env = Object.fromEntries(['DSH_WEIXIN_STATE_DIR', 'OPENCLAW_STATE_DIR', 'CLAWDBOT_STATE_DIR'].map((key) => [key, process.env[key]]))
   const root = fs.mkdtempSync(path.join(stateDir(), 'runtime-'))
   process.env.DSH_WEIXIN_STATE_DIR = root
@@ -105,7 +106,7 @@ function fixture(t, { enabled = false, baseEnabled = true, refresh, stop, before
     fs.rmSync(root, { recursive: true, force: true })
   })
   beforeApply?.(root)
-  apply(ctx, { enabled: baseEnabled, allowedSenders: ['test-user'], knowledgeEnabled: false, notifyEnabled: false, mediaEnabled: false, typingIndicator: false })
+  apply(ctx, { enabled: baseEnabled, allowedSenders, allowedChats, knowledgeEnabled: false, notifyEnabled: false, mediaEnabled: false, typingIndicator: false })
   const controller = ctx.get('configController')
   const login = ctx.get('weixinLoginController')
   assert.ok(controller instanceof ConfigController)
@@ -114,6 +115,78 @@ function fixture(t, { enabled = false, baseEnabled = true, refresh, stop, before
   const message = (id) => ({ id, type: 'text', text: 'Hello', senderId: 'test-user', conversationId: 'test-user', contextToken: 'synthetic-context', timestamp: Date.now() })
   return { root, ctx, controller, login, prepared, started, stopped, sessions, sent, dispose, message }
 }
+
+test('a stranger cannot enroll when the global sender allowlist is configured', async (t) => {
+  const f = fixture(t, { enabled: true })
+  await until(() => f.started.length === 1, 'transport starts')
+  await f.started[0].testInbound({ ...f.message('stranger'), senderId: 'stranger', conversationId: 'stranger' })
+  assert.equal(f.sessions.length, 0)
+  assert.equal(readRegistry()[ACCOUNT]?.allowedSenders, undefined)
+  await f.started[0].testInbound(f.message('owner'))
+  assert.equal(f.sessions.length, 1)
+})
+
+test('saved sender settings prevent enrollment even when startup configuration is empty', async (t) => {
+  const f = fixture(t, {
+    enabled: true,
+    allowedSenders: [],
+    beforeApply: () => fs.writeFileSync(configFile(), JSON.stringify({ enabled: true, allowedSenders: ['test-user'] })),
+  })
+  await until(() => f.started.length === 1, 'transport starts')
+  await f.started[0].testInbound({ ...f.message('stranger-saved'), senderId: 'stranger', conversationId: 'stranger' })
+  assert.equal(f.sessions.length, 0)
+  assert.equal(readRegistry()[ACCOUNT]?.allowedSenders, undefined)
+  await f.started[0].testInbound(f.message('owner-saved'))
+  assert.equal(f.sessions.length, 1)
+})
+
+test('a sender list saved at runtime prevents first-contact enrollment', async (t) => {
+  const f = fixture(t, { enabled: true, allowedSenders: [] })
+  await until(() => f.started.length === 1, 'transport starts')
+  await f.controller.save(JSON.stringify([{ path: 'allowedSenders', value: ['test-user'] }]))
+  const transport = f.started.at(-1)
+  await transport.testInbound({ ...f.message('stranger-live'), senderId: 'stranger', conversationId: 'stranger' })
+  assert.equal(f.sessions.length, 0)
+  assert.equal(readRegistry()[ACCOUNT]?.allowedSenders, undefined)
+  await transport.testInbound(f.message('owner-live'))
+  assert.equal(f.sessions.length, 1)
+})
+
+test('an account sender list overrides the global sender list', async (t) => {
+  const f = fixture(t, {
+    enabled: true,
+    beforeApply: () => setAccountAllowlist(ACCOUNT, ['account-owner']),
+  })
+  await until(() => f.started.length === 1, 'transport starts')
+  await f.started[0].testInbound(f.message('global-owner'))
+  assert.equal(f.sessions.length, 0)
+  await f.started[0].testInbound({ ...f.message('account-owner'), senderId: 'account-owner', conversationId: 'account-owner' })
+  assert.equal(f.sessions.length, 1)
+  assert.deepEqual(readRegistry()[ACCOUNT]?.allowedSenders, ['account-owner'])
+})
+
+test('an empty sender list enrolls only the first contact in a permitted chat', async (t) => {
+  const f = fixture(t, { enabled: true, allowedSenders: [], allowedChats: ['test-user'] })
+  await until(() => f.started.length === 1, 'transport starts')
+  await f.started[0].testInbound({ ...f.message('wrong-chat'), senderId: 'stranger', conversationId: 'stranger' })
+  assert.equal(f.sessions.length, 0)
+  assert.equal(readRegistry()[ACCOUNT]?.allowedSenders, undefined)
+  await f.started[0].testInbound(f.message('first'))
+  assert.equal(f.sessions.length, 1)
+  assert.deepEqual(readRegistry()[ACCOUNT]?.allowedSenders, ['test-user'])
+  await f.started[0].testInbound({ ...f.message('second'), senderId: 'stranger', conversationId: 'stranger' })
+  assert.equal(f.sessions.length, 1)
+  assert.deepEqual(readRegistry()[ACCOUNT]?.allowedSenders, ['test-user'])
+})
+
+test('automatic enrollment admits just one sender when chats are unrestricted', async (t) => {
+  const f = fixture(t, { enabled: true, allowedSenders: [] })
+  await until(() => f.started.length === 1, 'transport starts')
+  await f.started[0].testInbound(f.message('first-unrestricted'))
+  await f.started[0].testInbound({ ...f.message('second-unrestricted'), senderId: 'stranger', conversationId: 'stranger' })
+  assert.equal(f.sessions.length, 1)
+  assert.deepEqual(readRegistry()[ACCOUNT]?.allowedSenders, ['test-user'])
+})
 
 test('apply starts from saved disabled state; real save enables, disables and fences queued inbound', async (t) => {
   const f = fixture(t)

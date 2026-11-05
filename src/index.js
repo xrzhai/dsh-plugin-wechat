@@ -1915,22 +1915,19 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
     //    able to make this host issue requests to Tencent's CDN, so nothing
     //    below this point may run for a denied message.
     if (!isAllowedSender(effectiveConfig.current, message.senderId, message.conversationId)) {
-      // First contact enrolment: at scan time only the bot id is known — the
-      // human's WeChat id first appears HERE, on the first inbound message.
-      // So the very first sender an account without an allowlist override
-      // hears is treated as the person who scanned (whoever scans owns the
-      // account), enrolled into that account's own allowlist, and let
-      // through. Every later stranger is refused exactly as before.
+      // Enrol only when no effective sender list is configured and this chat
+      // is permitted. The first contact is not necessarily the scanner.
+      const { allowedSenders = [], allowedChats = [] } = effectiveConfig.current
       let enrolled = false
-      if (accountId) {
+      if (accountId && allowedSenders.length === 0 && (allowedChats.length === 0 || allowedChats.includes(message.conversationId))) {
         const hasOverride = () => {
           const entry = readRegistry()[accountId]
           return (Array.isArray(entry?.allowedSenders) && entry.allowedSenders.length > 0) || Boolean(entry?.firstContactEnrolledAt)
         }
         enrolled = enrolFirstContact(accountId, message.senderId, hasOverride, (line) => {
           log(`${line}`)
-          fileLog.info(`dsh-weixin: ${line} (the scanner's first message; add more senders on the card or in the registry)`)
-        }, config.allowedSenders)
+          fileLog.info(`dsh-weixin: ${line} (add more senders on the card or in the registry)`)
+        })
         if (enrolled) {
           // Re-resolve the effective config so the rest of this message runs
           // under the list that now contains the sender.
