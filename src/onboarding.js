@@ -79,105 +79,105 @@ export function buildOnboardingChecklist(input = {}) {
       state: accountCount > 0 ? 'done' : 'todo',
       action: accountCount > 0 ? null : 'login',
       detail: accountCount > 0
-        ? `已找到 ${accountCount} 个带凭据文件的账号。`
+        ? `已检测到 ${accountCount} 个保存了微信登录信息的账号。`
         : '尚未登录微信。请打开 DSH 左侧边栏「大肥鱼」（或「设置 → 插件 → 大肥鱼」），在「微信账号」里扫码绑定。',
       detailEn: accountCount > 0
-        ? `${accountCount} account(s) have credential files.`
+        ? `Found ${accountCount} account(s) with saved WeChat sign-in data.`
         : 'Not signed in to WeChat yet. Open WeChat in the DSH sidebar (or Settings → Plugins → WeChat), then scan the QR code under WeChat Account.',
-      why: '没有有效凭据，微信消息不会进入当前 DSH。',
-      whyEn: 'Without a usable credential, messages cannot reach this DSH instance.',
+      why: '没有保存微信登录信息，手机消息不会送到这台 DSH。',
+      whyEn: 'Without saved WeChat sign-in data, messages from your phone cannot reach this DSH instance.',
     },
     {
       id: 'allowlist',
-      title: '确认谁可以下发工程任务',
-      titleEn: 'Authorize who can send engineering tasks',
+      title: '选择谁能和助理对话',
+      titleEn: 'Choose who may chat with the assistant',
       required: true,
       state: allowlisted ? 'done' : accountCount > 0 ? 'todo' : 'blocked',
       action: allowlisted ? null : 'allowlist',
       detail: allowlisted
         ? globalSenders.length > 0
-          ? `全局白名单有 ${globalSenders.length} 个发送者。`
-          : '账号级白名单已包含首位联系人自动登记。'
+          ? `全局名单中有 ${globalSenders.length} 位联系人；账号级名单可能覆盖全局名单，请以每个账号的实际设置为准。`
+          : '至少一个已登录账号保存了单独的联系人名单；它会覆盖全局名单，请逐账号核对实际允许的人。'
         : accountCount > 0
-          ? '还没有白名单。由账号主人发送第一条消息后，插件会登记该账号的首位联系人；随后请在设置中核对名单。'
-          : '先完成账号绑定，再配置或核对白名单。',
+          ? '还没有检测到联系人名单。请让扫码者尽早发送第一条消息；系统会把该账号实际遇到的首位联系人自动登记，随后请核对名单。这条记录不能证明发送者就是扫码人。'
+          : '绑定微信账号后，再选择谁能和助理对话。',
       detailEn: allowlisted
         ? globalSenders.length > 0
-          ? `The global allowlist has ${globalSenders.length} sender(s).`
-          : 'An account-level allowlist includes the automatically enrolled first contact.'
+          ? `The global list contains ${globalSenders.length} contact(s). Account-level lists may override it, so check the effective list for each account.`
+          : 'At least one signed-in account has its own contact list. It overrides the global list, so review the effective list for each account.'
         : accountCount > 0
-          ? 'No allowlist yet. The account owner should send the first message so it is enrolled; then review the account-level list in settings.'
-          : 'Bind an account first, then configure or review the allowlist.',
-      why: '微信端能驱动本机 DSH 读写文件、运行命令；白名单是任务下发边界。',
-      whyEn: 'WeChat can drive DSH to read files and run commands on this machine; the allowlist is the task boundary.',
+          ? 'No contact list was detected. Ask the person who signed in to send the first message soon. The account will automatically enrol the first contact it actually receives and you should review the result; this does not prove that the sender is the person who scanned the code.'
+          : 'Bind a WeChat account first, then choose who may chat with the assistant.',
+      why: '名单里的人可以让助理在这台电脑上读取或修改文件、执行命令；只加入你信任的人。',
+      whyEn: 'People in this list can ask the assistant to read or change files and run commands on this computer. Only add people you trust.',
     },
     {
       id: 'workspace',
-      title: '确认工作目录',
-      titleEn: 'Confirm the working directory',
+      title: '确认助理在哪个文件夹工作',
+      titleEn: 'Choose the assistant’s working folder',
       required: false,
       state: workspaceVerified ? 'done' : 'note',
       action: workspaceVerified ? null : 'options',
       detail: workspaceVerified
-        ? `工作目录可用：${workingDirectory}`
+        ? `助理会在这里工作：${workingDirectory}`
         : workingDirectory !== ''
-          ? `已配置 ${workingDirectory}，但首次清单未能确认它是可用目录；请在网关配置中核对。`
-          : '未填写时使用插件自带的独立会话工作区，并会自动准备大肥鱼初始人设；需要操作某个项目时，再到「高级 → 网关配置」填写工作目录。',
+          ? `已填写 ${workingDirectory}，但这次没有确认这个文件夹可以访问；请到「高级 → 网关配置」核对。`
+          : '没有填写时，助理会使用插件自带的工作区；如果要处理某个项目，请到「高级 → 网关配置」选择项目文件夹。',
       detailEn: workspaceVerified
-        ? `Working directory is usable: ${workingDirectory}`
+        ? `The assistant will work here: ${workingDirectory}`
         : workingDirectory !== ''
-          ? `${workingDirectory} is configured, but the checklist could not confirm it is usable; review it in gateway settings.`
-          : 'With no directory set, WeChat uses the plugin’s own workspace with the starter persona. To work in a project, open Advanced → Gateway Options and set its working directory.',
-      why: '微信任务会落在工作目录里；目录不明确时，改错项目或找不到文件都很难排查。',
-      whyEn: 'WeChat tasks run in this directory; an unclear workspace makes edits and missing files hard to diagnose.',
+          ? `${workingDirectory} is set, but this check could not confirm the folder is accessible; review it under Advanced → Gateway options.`
+          : 'With no folder set, the assistant uses the plugin’s own workspace. To work in a project, choose its folder under Advanced → Gateway options.',
+      why: '项目文件会在这里读写；选错文件夹时，容易改错项目或找不到文件。',
+      whyEn: 'Project files are read and changed here. A wrong folder can mean editing the wrong project or losing track of files.',
     },
     {
       id: 'verify',
-      title: '完成一次真实收发验证',
-      titleEn: 'Verify one real message round trip',
+      title: '用手机确认能收发消息',
+      titleEn: 'Check messaging from your phone',
       required: false,
       state: 'note',
       action: null,
-      detail: '请从手机微信发送 `/status`，再发一个简单问题确认收到回复。',
-      detailEn: 'Send `/status` from WeChat on your phone, then ask a simple question to confirm the reply arrives.',
-      why: '用于确认 DSH 与手机微信双向收发链路正常。',
-      whyEn: 'Confirms end-to-end message delivery between DSH and WeChat.',
+      detail: '请从手机微信发送 `/status`，再随便问一句，确认能收到回复。',
+      detailEn: 'Send `/status` from WeChat on your phone, then ask a simple question and check that a reply arrives.',
+      why: '这一步要靠真实消息确认，本地配置清单不能代替。',
+      whyEn: 'Only a real message can confirm this; the local checklist cannot stand in for it.',
     },
     {
       id: 'host',
-      title: '核对宿主兼容性',
-      titleEn: 'Check host compatibility',
+      title: '确认当前 DSH 版本',
+      titleEn: 'Check the current DSH version',
       required: false,
       state: hostVerified ? 'done' : 'note',
       action: null,
       detail: hostVerified
-        ? `宿主 ${hostVersion} 已在测试列表中。`
+        ? `当前 DSH ${hostVersion} 在已验证范围内。`
         : hostKnown
-          ? `检测到宿主 ${hostVersion}（未在已测版本列表中）；若运行异常请执行 npm run doctor。`
-          : '未检测到明确的宿主版本；若运行异常请执行 npm run doctor。',
+          ? `检测到 DSH ${hostVersion}，但还没有验证过。插件可能能用；遇到问题时运行 npm run doctor 收集诊断。`
+          : '没有识别到 DSH 版本。遇到问题时运行 npm run doctor 收集诊断。',
       detailEn: hostVerified
-        ? `Host ${hostVersion} is on the tested list.`
+        ? `This DSH version (${hostVersion}) has been verified.`
         : hostKnown
-          ? `Host ${hostVersion} is not on the tested list; run npm run doctor if you encounter issues.`
-          : 'Host version not detected; run npm run doctor if you encounter issues.',
-      why: '插件运行在 DSH 宿主进程里；版本未知或未测时，应保留真实诊断信息而不是提前判定可用。',
-      whyEn: 'The plugin runs inside the DSH host. An unknown or untested version must stay unverified instead of being reported as working.',
+          ? `DSH ${hostVersion} was detected but has not been verified. The plugin may still work; if you hit problems, run npm run doctor to collect diagnostics.`
+          : 'The DSH version could not be identified. If you hit problems, run npm run doctor to collect diagnostics.',
+      why: '只有核对过的版本，清单才会把这一项标为已完成。',
+      whyEn: 'This item is marked complete only for versions that have actually been checked.',
     },
     {
       id: 'backup',
-      title: '配置状态备份（建议）',
-      titleEn: 'Configure state backups (recommended)',
+      title: '备份账号和聊天数据（建议）',
+      titleEn: 'Back up account and chat data (recommended)',
       required: false,
       state: input.backupEnabled === true ? 'done' : 'note',
       action: 'options',
       detail: input.backupEnabled === true
-        ? '自动备份已开启。'
-        : '状态目录包含会话与控制数据；建议开启自动备份，并用 npm run doctor 检查最近备份。',
+        ? '设置中已开启自动备份。这里只确认开关状态，不代表最近一份备份已经验证；可用 npm run doctor 查看最近备份是否存在及更新时间。'
+        : '这份清单还没有确认自动备份已经开启。备份包含登录信息、会话、提醒和设置，不包含媒体、日志和下载的语音模型；请到「高级 → 网关配置」确认开关，并用 npm run doctor 查看最近的完成记录。',
       detailEn: input.backupEnabled === true
-        ? 'Automatic backups are enabled.'
-        : 'The state directory contains sessions and control data. Enable automatic backups and use npm run doctor to check backup freshness.',
-      why: '备份是恢复控制面和历史状态的实际保障，不依赖是否使用人设或其他可选功能。',
-      whyEn: 'Backups are a practical safeguard for the control channel and its state, independent of optional product features.',
+        ? 'Automatic backups are enabled in settings. This only confirms the switch, not that the latest backup has been verified. Use npm run doctor to see whether a recent backup exists and when it was made.'
+        : 'This checklist has not confirmed that automatic backups are enabled. Backups include sign-in data, conversations, reminders and settings, but not media, logs or downloaded speech models. Confirm the switch under Advanced → Gateway options and use npm run doctor to check recent completed backups.',
+      why: '有可用的完成备份时，换机、误删或状态文件损坏后可以尝试恢复；没有完成备份就没有这层保障。备份范围和完整性仍需另外核对。',
+      whyEn: 'A completed backup can help recover from a device change, accidental deletion or damaged state file. Without one, that protection is absent. Backup coverage and integrity still need separate checks.',
     },
   ]
 
@@ -222,12 +222,28 @@ export function describeNextStep(checklist, t = (zh) => zh) {
  * @param {{ loginHint?: string, locale?: 'zh' | 'en' }} [options]
  */
 export function quickstartLines(options = {}) {
+  const english = options.locale === 'en'
   const login = typeof options.loginHint === 'string' && options.loginHint !== ''
     ? options.loginHint
     : translate('onboarding.loginPanel', undefined, options.locale)
   return [
-    { command: 'pnpm install && node bin/install.mjs --profile desktop', note: '从当前仓库安装，并把 desktop profile 链接到这份源码。' },
-    { command: login, note: '在 DSH 中完成扫码绑定；首条消息会触发首位联系人自动登记。' },
-    { command: 'node bin/onboard.mjs', note: '核对绑定、授权、工作目录和宿主诊断；最后用手机完成一次真实收发。' },
+    {
+      command: 'pnpm install && node bin/install.mjs --profile desktop',
+      note: english
+        ? 'Install this checkout into the DSH desktop profile.'
+        : '从当前仓库安装这份插件，并注册到 DSH 的桌面配置。',
+    },
+    {
+      command: login,
+      note: english
+        ? 'Sign in to WeChat in DSH, then have the person who scanned the code send the first message soon and review the list. Whichever contact arrives first is enrolled; this does not prove that sender is the person who scanned the code.'
+        : '在 DSH 里扫码绑定微信后，请扫码者尽早发送第一条消息，并核对允许名单。系统会登记实际收到的首位联系人；这不能证明发送者就是扫码人。',
+    },
+    {
+      command: 'node bin/onboard.mjs',
+      note: english
+        ? 'Check sign-in, access, the working folder and the DSH version, then send a real message from your phone.'
+        : '再检查微信登录、允许名单、工作文件夹和 DSH 版本；最后用手机实际收发一次。',
+    },
   ]
 }

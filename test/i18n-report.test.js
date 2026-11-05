@@ -41,11 +41,29 @@ test('catalogue entries have both locales and interpolate newly migrated failure
   assert.equal(translate('error.processing', { reason: 'offline' }, 'en'), '(Processing failed: offline)')
   assert.equal(translate('error.processing', { reason: 'offline' }, 'unknown'), '（处理失败：offline）')
   assert.match(translate('notice.longRunning', {}, 'en'), /result/)
+  const storageZh = translate('error.reminderStorageReadOnly', { reason: 'the corrupt original could not be preserved' }, 'zh')
+  assert.match(storageZh, /日志中搜索“reminders\.json”/)
+  assert.doesNotMatch(storageZh, /the corrupt original could not be preserved/)
+  assert.match(translate('error.reminderStorageReadOnly', {}, 'en'), /logs for “reminders\.json”/)
+  assert.doesNotMatch(translate('error.reminderStorageReadOnly', { reason: 'disk is read-only' }, 'en'), /disk is read-only/)
+  assert.doesNotMatch(translate('error.reminderSequenceExhausted', {}, 'zh'), /清理.*提醒/)
 })
 
 test('live command help includes English /compact and omits retired commands', () => {
   const help = buildCommandsHelp(createTranslator('en').t)
-  assert.match(help, /^\/compact compact the current session history immediately$/m)
+  assert.match(help, /^\/compact compact the current topic’s history in DSH immediately$/m)
+  assert.match(help, /^\/cancel stop the reply currently being generated; actions already run are not undone, and queued messages will still be processed$/m)
+  assert.match(help, /^\/new \[title\] start a new topic/m)
+  assert.match(help, /^\/clear remove every topic from this WeChat chat’s topic list/m)
+  assert.match(help, /original DSH session history is not deleted/)
+  assert.doesNotMatch(help, /\/clear clear this session/)
+  const helpZh = buildCommandsHelp()
+  assert.match(helpZh, /^\/new \[标题\] 在当前微信聊天里新建话题/m)
+  assert.match(helpZh, /^\/list 查看当前微信聊天里的所有话题/m)
+  assert.match(helpZh, /^\/use <序号> 切换到当前微信聊天里的第几个话题/m)
+  assert.match(helpZh, /^\/clear 从当前微信聊天的话题列表移除所有话题，并新开一个/m)
+  assert.match(helpZh, /^\/cancel 停止当前正在生成的回复；已经执行的操作不会撤回，排队中的消息仍会继续处理/m)
+  assert.doesNotMatch(helpZh, /正在跑的回合/)
   for (const key of [
     'help.mode', 'help.remember', 'help.forget', 'help.memory', 'help.undo', 'help.import',
     'help.recall', 'help.summary', 'help.bad', 'help.good', 'help.style', 'help.digest',

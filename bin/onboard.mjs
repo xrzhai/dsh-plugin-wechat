@@ -122,7 +122,7 @@ function main() {
   const columns = (text) => [...text].reduce((sum, ch) => sum + (/[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe4f\uff00-\uff60\uffe0-\uffe6]/.test(ch) ? 2 : 1), 0)
   const width = Math.max(...checklist.steps.map((step) => columns(step.title)))
 
-  process.stdout.write(`大肥鱼 上手清单  数据目录：${root}\n\n`)
+  process.stdout.write(`大肥鱼 新手检查  数据保存在：${root}\n\n`)
   for (const step of checklist.steps) {
     // An unverifiable host is a note, not an unfinished task; it must never be
     // rendered as verified merely because no better version could be detected.
@@ -135,14 +135,14 @@ function main() {
   process.stdout.write(`\n${checklist.done}/${checklist.total} 步已就绪。${describeNextStep(checklist)}\n`)
 
   if (checklist.complete !== true) {
-    process.stdout.write('\n上手步骤：\n')
+    process.stdout.write('\n接下来可以这样做：\n')
     for (const [index, line] of quickstartLines().entries()) {
       process.stdout.write(`  ${index + 1}. ${line.command}\n     ${line.note}\n`)
     }
   }
 
   if (noHostToCheck) {
-    process.stdout.write('\n未检测到明确的宿主版本，建议在桌面端验证实际收发。\n')
+    process.stdout.write('\n没有识别到 DSH 版本。建议重启后打开「大肥鱼」，用手机实际收发一次。\n')
   }
 
   // Exit 0 exactly when the required steps are done. The host is a note either

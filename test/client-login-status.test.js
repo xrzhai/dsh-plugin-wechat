@@ -370,16 +370,16 @@ test('the settings page exposes and saves dispatcher permissions on a fresh prof
     },
   })
   const tree = await f.mount()
-  const dispatcher = nodes(tree).find(node => node.type === 'button' && text(node).includes('平行会话调度'))
+  const dispatcher = nodes(tree).find(node => node.type === 'button' && text(node).includes('远程查看与管理 DSH 会话'))
   assert.ok(dispatcher, 'core dispatcher settings must not be filtered out')
   dispatcher.props.onClick()
   const open = f.render()
-  for (const label of ['启用平行会话调度', '调度者发送者 ID', '允许访问的目标会话 ID', '只读会话 ID', '只读工作区根目录']) {
+  for (const label of ['允许通过微信管理其他会话', '可以管理其他会话的人', '可被操作的 DSH 会话', '跨会话管理中只能查看的 DSH 会话', '不要通过跨会话管理操作的工作区']) {
     assert.ok(text(open).includes(label), label)
   }
   const checkbox = nodes(open).find(node => node.type === 'input' && node.props.type === 'checkbox' && node.props.checked === false && node.props.onChange)
   // Pick the field control by its surrounding label, rather than the toolbar filter.
-  const field = nodes(open).find(node => node.type === 'div' && text(node).includes('启用平行会话调度') && nodes(node).filter(n => n.type === 'input' && n.props.type === 'checkbox').length === 1)
+  const field = nodes(open).find(node => node.type === 'div' && text(node).includes('允许通过微信管理其他会话') && nodes(node).filter(n => n.type === 'input' && n.props.type === 'checkbox').length === 1)
   const toggle = nodes(field).find(node => node.type === 'input' && node.props.type === 'checkbox')
   assert.ok(checkbox && toggle)
   toggle.props.onChange({ target: { checked: true } })
