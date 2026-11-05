@@ -49,7 +49,7 @@ import { createGatewayControl } from './gateway-control.js'
 import { configureOutbound, sendChunked, sendProducedFiles } from './outbound.js'
 import { channelFor } from './channel.js'
 import { HOOK_POINTS, createHooks } from './hooks.js'
-import { createMetrics, writeMetricsSnapshot } from './metrics.js'
+import { createMetrics, exportMetricsSnapshot } from './metrics.js'
 import { ensureSecretModes, redactSecrets } from './credentials.js'
 import { neutralizeTags } from './message/fence.js'
 import { quoteBlock } from './message/quote.js'
@@ -744,10 +744,10 @@ export function apply(ctx, config) {
       // expects, and the two files are tiny. `npm run metrics` is the read side.
       metricsTimer = setInterval(() => {
         if (withSavedConfig(config).metricsExport === false) return
-        void writeMetricsSnapshot(stateRoot, {
+        void exportMetricsSnapshot(stateRoot, {
           ...metrics.snapshot(),
           gauges: { ...metrics.snapshot().gauges, 'outbox.pending': typeof outbox?.pending === 'function' ? outbox.pending().length : 0 },
-        }).catch((error) => errLog(`metrics snapshot failed: ${String(error?.message ?? error)}`))
+        }, { warn })
       }, 30_000)
       metricsTimer.unref?.()
 

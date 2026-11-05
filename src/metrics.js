@@ -171,3 +171,47 @@ export async function writeMetricsSnapshot(stateRoot, snapshot, io = {}) {
   const [jsonOk, promOk] = await Promise.all([write('metrics.json', json), write('metrics.prom', prom)])
   return { json: jsonOk, prom: promOk }
 }
+
+/**
+ * Export one snapshot for the periodic task and report every outcome that could
+ * otherwise disappear behind a resolved Promise.
+ *
+ * `writeMetricsSnapshot` deliberately converts ordinary filesystem failures to
+ * `{ json: false, prom: false }`; a caller that only attaches `.catch()` misses
+ * both failures. Unexpected rejections are reduced to a fixed message here: an
+ * exception from a filesystem or import can contain paths or credential-shaped
+ * text, and the periodic metric exporter is not a safe place to echo it.
+ *
+ * @param {string} stateRoot
+ * @param {object} snapshot
+ * @param {{ warn?: (line: string) => void, write?: Function }} [options]
+ */
+export async function exportMetricsSnapshot(stateRoot, snapshot, options = {}) {
+  const write = options.write ?? writeMetricsSnapshot
+  const failed = []
+  try {
+    const result = await write(stateRoot, snapshot)
+    if (result?.json !== true) failed.push('metrics.json')
+    if (result?.prom !== true) failed.push('metrics.prom')
+  } catch {
+    // Keep the failure machine-readable without leaking the exception text.
+    notifyMetricFailure(options.warn, 'metrics snapshot failed unexpectedly')
+    return { ok: false, failed: ['metrics.json', 'metrics.prom'] }
+  }
+
+  if (failed.length > 0) {
+    const outcome = failed.length === 2 ? 'failed' : 'partially failed'
+    notifyMetricFailure(options.warn, `metrics snapshot ${outcome}: ${failed.join(', ')}`)
+  }
+  return { ok: failed.length === 0, failed }
+}
+
+function notifyMetricFailure(warn, line) {
+  if (typeof warn !== 'function') return
+  try {
+    warn(line)
+  } catch {
+    // A logging failure must not turn the next export cycle into an unhandled
+    // rejection. The warning itself is already safe and diagnostic.
+  }
+}
