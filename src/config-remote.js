@@ -17,9 +17,6 @@ import path from "node:path";
 import { TypertRemoteService, RemoteError } from "@deepseek-ai/dsh-typert-protocol";
 import { stateDir, readSavedConfig, configFile } from "./state.js";
 import { remoteMethods } from "./typert-js.js";
-import "./media/outbound.js";
-import "./media/inbound.js";
-import "./media/asr.js";
 
 /** Shape declarations the card understands. `number` carries min/max/step. */
 const T = {
