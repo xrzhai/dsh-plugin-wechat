@@ -6,12 +6,13 @@
  * direction). The upload side of this plugin never spoke SILK, which is why a
  * bot could RECEIVE voice but not send it. This module is the missing half:
  *
- *  - `.wav` → parsed here (RIFF/PCM, downmix to mono, resample when the rate is
- *    not one SILK accepts), encoded with silk-wasm.
+ *  - 16-bit PCM `.wav` → parsed here (RIFF/PCM, downmix to mono, resample when
+ *    the rate is not one SILK accepts), encoded with silk-wasm.
  *  - `.silk` → passed through untouched.
- *  - everything else (mp3/m4a/ogg/...) → decoded by ffmpeg into raw PCM on
- *    stdout, then encoded. ffmpeg is optional: when it is missing the caller
- *    falls back to sending the audio as a plain file attachment.
+ *  - unsupported WAV encodings and everything else (mp3/m4a/ogg/...) → decoded
+ *    by ffmpeg into raw PCM on stdout, then encoded. ffmpeg is optional: when it
+ *    is missing the caller falls back to sending the audio as a plain file
+ *    attachment.
  *
  * The wire shape follows the `VoiceItem` type in the vendored Tencent layer
  * (`types.ts`: `media`, `encode_type`, `bits_per_sample`, `sample_rate`,
@@ -38,6 +39,14 @@ const FALLBACK_RATE = 24_000
 export const VOICE_ENCODE_TYPE_SILK = 5
 /** VoiceItem.bits_per_sample — SILK decodes to 16-bit PCM. */
 export const VOICE_BITS_PER_SAMPLE = 16
+
+/** A structurally valid WAV whose sample encoding needs ffmpeg. */
+class UnsupportedWavFormatError extends Error {
+  constructor(format, bitsPerSample) {
+    super(`unsupported WAV format ${format} @ ${bitsPerSample}-bit; needs ffmpeg`)
+    this.name = 'UnsupportedWavFormatError'
+  }
+}
 
 /** Extensions that can become voice. `.silk` needs no transcode at all. */
 const VOICE_EXTENSIONS = new Set([
@@ -77,24 +86,29 @@ export function parseWavPcm(buffer) {
   while (offset + 8 <= buffer.length) {
     const id = buffer.toString('ascii', offset, offset + 4)
     const size = buffer.readUInt32LE(offset + 4)
+    const chunkStart = offset + 8
+    const chunkEnd = chunkStart + size
+    if (chunkEnd > buffer.length) throw new Error(`WAV ${id.trim() || 'unknown'} chunk is truncated`)
     if (id === 'fmt ') {
+      if (size < 16) throw new Error('WAV fmt chunk is shorter than 16 bytes')
       fmt = {
-        format: buffer.readUInt16LE(offset + 8),
-        channels: buffer.readUInt16LE(offset + 10),
-        sampleRate: buffer.readUInt32LE(offset + 12),
-        bitsPerSample: buffer.readUInt16LE(offset + 22),
+        format: buffer.readUInt16LE(chunkStart),
+        channels: buffer.readUInt16LE(chunkStart + 2),
+        sampleRate: buffer.readUInt32LE(chunkStart + 4),
+        bitsPerSample: buffer.readUInt16LE(chunkStart + 14),
       }
     } else if (id === 'data') {
-      data = buffer.subarray(offset + 8, Math.min(offset + 8 + size, buffer.length))
+      data = buffer.subarray(chunkStart, chunkEnd)
     }
-    // Chunks are word-aligned; a malformed size cannot loop forever because
-    // offset still advances.
-    offset += 8 + size + (size % 2)
+    // RIFF chunks are word-aligned.
+    offset = chunkEnd + (size % 2)
   }
   if (!fmt || !data || data.length === 0) throw new Error('WAV is missing fmt or data chunk')
-  const pcm16 = fmt.format === 1 || fmt.format === 0xfffe ? fmt.bitsPerSample === 16 : false
-  if (!pcm16) throw new Error(`unsupported WAV format ${fmt.format} @ ${fmt.bitsPerSample}-bit; needs ffmpeg`)
+  if (fmt.channels <= 0) throw new Error(`WAV declares ${fmt.channels} channels`)
   if (fmt.sampleRate <= 0) throw new Error(`WAV declares sample rate ${fmt.sampleRate}`)
+  if (fmt.bitsPerSample <= 0) throw new Error(`WAV declares ${fmt.bitsPerSample}-bit samples`)
+  const pcm16 = fmt.format === 1 || fmt.format === 0xfffe ? fmt.bitsPerSample === 16 : false
+  if (!pcm16) throw new UnsupportedWavFormatError(fmt.format, fmt.bitsPerSample)
   const bytesPerFrame = 2 * fmt.channels
   const frames = Math.floor(data.length / bytesPerFrame)
   const mono = Buffer.alloc(frames * 2)
@@ -135,11 +149,12 @@ function resamplePcm(pcm, fromRate, toRate) {
  *
  * @param {string} filePath
  * @param {string} [ffmpegPath]
+ * @param {{ spawnImpl?: typeof spawn }} [hooks]
  * @returns {Promise<{ pcm: Uint8Array, sampleRate: number }>}
  */
-export function ffmpegToPcm(filePath, ffmpegPath = 'ffmpeg') {
+export function ffmpegToPcm(filePath, ffmpegPath = 'ffmpeg', { spawnImpl = spawn } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(
+    const child = spawnImpl(
       ffmpegPath,
       ['-v', 'error', '-i', filePath, '-ac', '1', '-ar', String(FALLBACK_RATE), '-f', 's16le', 'pipe:1'],
       { stdio: ['ignore', 'pipe', 'pipe'] },
@@ -166,11 +181,12 @@ export function ffmpegToPcm(filePath, ffmpegPath = 'ffmpeg') {
  * @param {string} filePath
  * @param {object} [options]
  * @param {string} [options.ffmpegPath]  ffmpeg binary for non-WAV inputs.
+ * @param {typeof spawn} [options.spawnImpl]  Command launcher, injectable in tests.
  * @returns {Promise<{ silk: Uint8Array, durationMs: number, sampleRate: number }>}
  * @throws when the file cannot be read, parsed or encoded — the caller decides
  *   the fallback (this module never degrades silently).
  */
-export async function transcodeToSilk(filePath, { ffmpegPath } = {}) {
+export async function transcodeToSilk(filePath, { ffmpegPath, spawnImpl } = {}) {
   const silk = await silkWasm()
   const ext = filePath.split('.').pop()?.toLowerCase() ?? ''
   let pcm
@@ -182,12 +198,19 @@ export async function transcodeToSilk(filePath, { ffmpegPath } = {}) {
     return { silk: raw, durationMs: silk.getDuration(raw), sampleRate: FALLBACK_RATE }
   }
   if (ext === 'wav') {
-    const parsed = parseWavPcm(await fs.readFile(filePath))
-    pcm = parsed.pcm
-    sampleRate = SILK_RATES.has(parsed.sampleRate) ? parsed.sampleRate : FALLBACK_RATE
-    if (sampleRate !== parsed.sampleRate) pcm = resamplePcm(parsed.pcm, parsed.sampleRate, sampleRate)
-  } else {
-    const decoded = await ffmpegToPcm(filePath, ffmpegPath)
+    try {
+      const parsed = parseWavPcm(await fs.readFile(filePath))
+      pcm = parsed.pcm
+      sampleRate = SILK_RATES.has(parsed.sampleRate) ? parsed.sampleRate : FALLBACK_RATE
+      if (sampleRate !== parsed.sampleRate) pcm = resamplePcm(parsed.pcm, parsed.sampleRate, sampleRate)
+    } catch (error) {
+      // Only a valid WAV with an encoding ffmpeg can decode may cross this
+      // boundary. Corrupt containers and malformed chunks remain hard errors.
+      if (!(error instanceof UnsupportedWavFormatError)) throw error
+    }
+  }
+  if (pcm === undefined) {
+    const decoded = await ffmpegToPcm(filePath, ffmpegPath, { spawnImpl })
     pcm = decoded.pcm
     sampleRate = decoded.sampleRate
   }
