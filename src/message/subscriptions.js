@@ -18,6 +18,10 @@ export const MAX_SUBSCRIPTIONS_PER_ACCOUNT = 20
 export const GRACE_MS = 30 * 60 * 1000
 export const MAX_SUBSCRIPTION_PROMPT_CHARS = 500
 
+/** Retry an undelivered subscription without spinning or abandoning it. */
+const RETRY_BASE_MS = 1_000
+const RETRY_MAX_MS = 30_000
+
 const WEEKDAY_ALIASES = { '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '日': 7, '天': 7 }
 const WEEKDAY_NAMES = { 1: '一', 2: '二', 3: '三', 4: '四', 5: '五', 6: '六', 7: '日' }
 
@@ -120,7 +124,7 @@ export function writeSubscriptions(stateRoot, store, warn = () => {}) {
 export class SubscriptionScheduler {
     /**
      * @param {object} options
-     * @param {(item: object) => Promise<void> | void} options.fire sends the produced text; must not throw into the timer
+     * @param {(item: object) => Promise<void> | void} options.fire sends the produced text; rejection keeps it pending
      * @param {(message: string) => void} [options.warn]
      * @param {(ms: number, callback: () => void) => unknown} [options.setTimeoutRef] injectable for tests
      * @param {(timer: unknown) => void} [options.clearTimeoutRef] injectable for tests
@@ -139,6 +143,12 @@ export class SubscriptionScheduler {
         this.quiet = quiet
         this.store = readSubscriptions(stateRoot, warn)
         this.timers = new Map()
+        /** @type {Map<string, Promise<void>>} subscription id -> in-flight delivery */
+        this.inFlight = new Map()
+        /** @type {Map<string, number>} subscription id -> consecutive failed attempts */
+        this.retryAttempts = new Map()
+        /** @type {Set<string>} due callbacks that arrived while an attempt was in flight */
+        this.pendingAttempts = new Set()
         this.stopped = false
         const now = this.nowRef()
         for (const item of this.store.items) this.#reconcile(item, now)
@@ -161,9 +171,9 @@ export class SubscriptionScheduler {
         // for: a restart that slept through it fires once when the slot is
         // still inside the grace window, otherwise the miss is skipped.
         if (item.fireAt <= now && now - item.fireAt <= GRACE_MS) {
-            item.fireAt = nextFireAt(item, now)
-            writeSubscriptions(this.stateRoot, this.store, this.warn)
-            this.#arm({ ...item, fireAt: now })
+            // Keep the stored slot until delivery succeeds. Advancing first made
+            // a missing startup transport consume the one grace-window catch-up.
+            this.#arm(item, now)
             return
         }
         if (item.fireAt > now) {
@@ -184,12 +194,12 @@ export class SubscriptionScheduler {
         this.#arm(item)
     }
 
-    #arm(item) {
+    #arm(item, dueAt = item.fireAt) {
         if (this.stopped) return
         this.#clearTimer(item.id)
         let timer
         timer = armLongTimer({
-            dueAt: item.fireAt,
+            dueAt,
             nowRef: this.nowRef,
             setTimeoutRef: this.setTimeoutRef,
             clearTimeoutRef: this.clearTimeoutRef,
@@ -204,6 +214,10 @@ export class SubscriptionScheduler {
 
     async #trigger(item) {
         if (this.stopped) return
+        if (this.inFlight.has(item.id)) {
+            this.pendingAttempts.add(item.id)
+            return
+        }
         const snapshot = { ...item }
         const current = this.store.items.find((entry) => entry.id === item.id)
         if (current === undefined) return
@@ -219,15 +233,40 @@ export class SubscriptionScheduler {
             this.warn(`免打扰时段，订阅 ${item.id} 推迟到 ${formatStamp(current.fireAt)} 发送`)
             return
         }
-        if (current.kind === 'once') this.#remove(current.id)
-        else this.#advance(current, now)
-        current.lastFiredAt = now
-        writeSubscriptions(this.stateRoot, this.store, this.warn)
-        try {
-            await this.fire(snapshot)
-        } catch (error) {
-            this.warn(`subscription ${snapshot.id} fire failed: ${error.message}`)
-        }
+        const slot = current.fireAt
+        const task = (async () => {
+            try {
+                await this.fire(snapshot)
+            } catch (error) {
+                if (this.stopped) return
+                const latest = this.store.items.find((entry) => entry.id === item.id)
+                if (latest === undefined || latest.fireAt !== slot) return
+                const attempts = (this.retryAttempts.get(item.id) ?? 0) + 1
+                this.retryAttempts.set(item.id, attempts)
+                const delay = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** Math.min(attempts - 1, 5))
+                this.warn(`subscription ${item.id} fire failed; retrying in ${delay}ms: ${String(error?.message ?? error)}`)
+                this.#arm(latest, this.nowRef() + delay)
+                return
+            }
+            if (this.stopped) return
+            this.retryAttempts.delete(item.id)
+            const latest = this.store.items.find((entry) => entry.id === item.id)
+            if (latest === undefined || latest.fireAt !== slot) return
+            if (latest.kind === 'once') {
+                this.#remove(latest.id)
+                writeSubscriptions(this.stateRoot, this.store, this.warn)
+                return
+            }
+            latest.lastFiredAt = this.nowRef()
+            this.#advance(latest, this.nowRef())
+        })().finally(() => {
+            if (this.inFlight.get(item.id) === task) this.inFlight.delete(item.id)
+            if (!this.pendingAttempts.delete(item.id) || this.stopped) return
+            const latest = this.store.items.find((entry) => entry.id === item.id)
+            if (latest !== undefined) this.#arm(latest)
+        })
+        this.inFlight.set(item.id, task)
+        await task
     }
 
     /**
@@ -264,6 +303,8 @@ export class SubscriptionScheduler {
     /** Remove one subscription by id (as shown by /subscribelist). */
     cancel(id) {
         if (this.#remove(id)) {
+            this.retryAttempts.delete(id)
+            this.pendingAttempts.delete(id)
             writeSubscriptions(this.stateRoot, this.store, this.warn)
             return true
         }
@@ -291,10 +332,28 @@ export class SubscriptionScheduler {
         return items.sort((a, b) => (a.fireAt ?? Infinity) - (b.fireAt ?? Infinity))
     }
 
-    /** Stop every timer. The store is untouched: a reload re-arms from disk. */
+    /** Retry every due item for an account after its transport becomes live. */
+    wake(accountId) {
+        if (this.stopped) return
+        const now = this.nowRef()
+        for (const item of this.store.items) {
+            if (item.accountId !== accountId || item.fireAt > now) continue
+            if (this.inFlight.has(item.id)) {
+                this.pendingAttempts.add(item.id)
+                continue
+            }
+            this.retryAttempts.delete(item.id)
+            this.#arm(item, now)
+        }
+    }
+
+    /** Stop every timer without waiting for an in-flight network/model call. */
     stop() {
         this.stopped = true
         for (const timer of this.timers.values()) timer.cancel()
         this.timers.clear()
+        this.retryAttempts.clear()
+        this.pendingAttempts.clear()
+        this.inFlight.clear()
     }
 }
