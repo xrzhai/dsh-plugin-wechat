@@ -60,7 +60,7 @@ window.__ModuleLoader__.load({
 			const CONFIG_EFFECTS = {
 				"sendIntervalMs": "restart", "voiceOutbound": "restart", "ocrTimeoutMs": "restart", "notifyPort": "restart", "eventPollMs": "restart",
 				"asr": "restart",
-				"enabled": "live", "accountId": "live", "cwd": "live", "allowedSenders": "live", "allowedChats": "live",
+				"enabled": "live", "accountId": "live", "cwd": "restart", "allowedSenders": "live", "allowedChats": "live",
 				"maxMessageLength": "live", "sendCooldownMs": "live", "messageJournal": "live", "personaDefaultMode": "live", "memoryEnabled": "live",
 				"memorySummaryTurns": "live", "memoryStaleDays": "live", "memoryGlobalMaxFacts": "live", "memorySimilarityRoute": "live", "memoryConvMaxChars": "live", "memoryGlobalMaxTokens": "live",
 				"chatProvider": "live", "chatModel": "live", "sideProvider": "live", "sideModel": "live", "documentExtract": "live",
