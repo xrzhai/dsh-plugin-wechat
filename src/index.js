@@ -2118,9 +2118,13 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
       for (const [index, result] of downloads.entries()) {
         const media = message.media[index]
         if (result.ok) {
+          const transcode = result.kind === 'voice'
+            ? ` transcoded=${result.transcoded === true}` +
+              (typeof result.transcodeError === 'string' ? ` transcode-error=${JSON.stringify(result.transcodeError)}` : '')
+            : ''
           log(
             `saved inbound ${result.kind} to ${result.path} (${result.bytes} bytes)` +
-              (result.kind === 'voice' ? ` transcoded=${result.transcoded === true} transcribed=${typeof result.transcript === 'string'}` : ''),
+              (result.kind === 'voice' ? `${transcode} transcribed=${typeof result.transcript === 'string'}` : ''),
           )
           saved.push(result)
         } else {

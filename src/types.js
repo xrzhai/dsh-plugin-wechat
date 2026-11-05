@@ -97,8 +97,9 @@
  *
  * The three stages degrade independently on purpose, so the caller can tell
  * "we could not decode it" apart from "we decoded it but could not understand
- * it": `transcoded:false` means the audio is still SILK (no `silk-wasm`), while
- * `transcriptError` means the audio was playable but the bridge failed.
+ * it": `transcoded:false` means the saved audio is still SILK and
+ * `transcodeError` explains why WAV was not produced, while `transcriptError`
+ * means the audio was playable but the bridge failed.
  * `transcript` and `transcriptError` are mutually exclusive, and both are absent
  * when ASR is not configured at all.
  *
@@ -110,6 +111,8 @@
  * @property {string} path               Absolute path of the stored file.
  * @property {string} [silkPath]         Original SILK, kept when transcoding ran.
  * @property {boolean} [transcoded]      True only for a real decoded WAV.
+ * @property {string} [transcodeError]   Why WAV transcoding failed or was unavailable.
+ * @property {string} [transcodeCode]    Machine-readable counterpart of the above.
  * @property {string} [transcript]       User's words; `''` means "nothing heard".
  * @property {string} [transcriptError]  Why transcription failed, if it did.
  * @property {string} [transcriptCode]   Machine-readable counterpart of the above.
