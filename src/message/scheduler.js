@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { atomicWriteJson } from '../atomic.js'
+import { armLongTimer } from './long-timer.js'
 
 /**
  * Durable scheduled messages: `/remind <when> <text>` stores a reminder, a
@@ -24,6 +25,7 @@ export const MAX_PENDING_PER_ACCOUNT = 50
 
 /** Far-future cap: a reminder more than 366 days out is almost surely a typo. */
 export const MAX_DELAY_MS = 366 * 24 * 60 * 60 * 1000
+const MAX_DELAY_REASON = '定得太远：最多支持一年以内'
 
 /**
  * Parse a `/remind` time spec. Supported forms, in the order they are tried:
@@ -49,7 +51,7 @@ export function parseWhen(spec, now = new Date()) {
   const duration = parseDuration(trimmed)
   if (duration !== undefined) {
     if (duration <= 0) return { ok: false, reason: '时间必须是未来的某个时刻' }
-    if (duration > MAX_DELAY_MS) return { ok: false, reason: '定得太远：最多支持一年以内' }
+    if (duration > MAX_DELAY_MS) return { ok: false, reason: MAX_DELAY_REASON }
     return { ok: true, fireAt: now.getTime() + duration, label: formatLabel(new Date(now.getTime() + duration)) }
   }
 
@@ -62,6 +64,7 @@ export function parseWhen(spec, now = new Date()) {
       return { ok: false, reason: '日期或时间不存在，请检查' }
     }
     if (target.getTime() <= now.getTime()) return { ok: false, reason: '那个时刻已经过去了' }
+    if (target.getTime() - now.getTime() > MAX_DELAY_MS) return { ok: false, reason: MAX_DELAY_REASON }
     return { ok: true, fireAt: target.getTime(), label: formatLabel(target) }
   }
 
@@ -110,7 +113,7 @@ function parseNaturalWhen(spec, now) {
     const unitMs = { 分钟: 60_000, 分: 60_000, 小时: 3_600_000, 钟头: 3_600_000, 天: 86_400_000 }
     const delay = Math.round(amount * unitMs[relative[2]])
     if (delay <= 0) return { ok: false, reason: '时间必须是未来的某个时刻' }
-    if (delay > MAX_DELAY_MS) return { ok: false, reason: '定得太远：最多支持一年以内' }
+    if (delay > MAX_DELAY_MS) return { ok: false, reason: MAX_DELAY_REASON }
     return { ok: true, fireAt: now.getTime() + delay, label: formatLabel(new Date(now.getTime() + delay)) }
   }
 
@@ -179,7 +182,7 @@ function parseNaturalWhen(spec, now) {
     target.setDate(target.getDate() + 7)
   }
   if (target.getTime() <= now.getTime()) return { ok: false, reason: '那个时刻已经过去了' }
-  if (target.getTime() - now.getTime() > MAX_DELAY_MS) return { ok: false, reason: '定得太远：最多支持一年以内' }
+  if (target.getTime() - now.getTime() > MAX_DELAY_MS) return { ok: false, reason: MAX_DELAY_REASON }
   return { ok: true, fireAt: target.getTime(), label: formatLabel(target) }
 }
 
@@ -320,10 +323,11 @@ export class ReminderScheduler {
    * @param {string} options.stateRoot
    * @param {(reminder: Reminder) => Promise<void> | void} options.fire sends the text; must not throw into the timer
    * @param {(message: string) => void} [options.warn]
-   * @param {(ms: number, callback: () => void) => unknown} [options.setTimeout] injectable for tests
-   * @param {(timer: unknown) => void} [options.clearTimeout] injectable for tests
+   * @param {(ms: number, callback: () => void) => unknown} [options.setTimeoutRef] injectable for tests
+   * @param {(timer: unknown) => void} [options.clearTimeoutRef] injectable for tests
+   * @param {() => number} [options.nowRef] injectable clock for tests
    */
-  constructor({ stateRoot, fire, warn = () => {}, setTimeoutRef = ((ms, cb) => setTimeout(cb, ms)), clearTimeoutRef = ((t) => clearTimeout(t)), quiet = null }) {
+  constructor({ stateRoot, fire, warn = () => {}, setTimeoutRef = ((ms, cb) => setTimeout(cb, ms)), clearTimeoutRef = ((t) => clearTimeout(t)), quiet = null, nowRef = (() => Date.now()) }) {
     this.stateRoot = stateRoot
     this.fire = fire
     // Optional quiet-hours gate: (nowMs) => ms until the window ends, 0 when
@@ -333,7 +337,8 @@ export class ReminderScheduler {
     this.warn = warn
     this.setTimeoutRef = setTimeoutRef
     this.clearTimeoutRef = clearTimeoutRef
-    /** @type {Map<string, unknown>} reminder id -> timer handle */
+    this.nowRef = nowRef
+    /** @type {Map<string, { cancel: () => void }>} reminder id -> timer controller */
     this.timers = new Map()
     this.store = readReminders(stateRoot)
     this.stopped = false
@@ -361,7 +366,7 @@ export class ReminderScheduler {
       conversationId: plan.conversationId,
       text,
       fireAt: plan.fireAt,
-      createdAt: new Date().toISOString(),
+      createdAt: new Date(this.nowRef()).toISOString(),
       ...(plan.recurrence === undefined
         ? {}
         : {
@@ -387,11 +392,7 @@ export class ReminderScheduler {
     this.store.items = this.store.items.filter((item) => item.id !== id)
     if (this.store.items.length === before) return false
     writeReminders(this.stateRoot, this.store, this.warn)
-    const timer = this.timers.get(id)
-    if (timer !== undefined) {
-      this.clearTimeoutRef(timer)
-      this.timers.delete(id)
-    }
+    this.#clearTimer(id)
     return true
   }
 
@@ -405,7 +406,7 @@ export class ReminderScheduler {
    * @param {number} [now]
    * @returns {Reminder | undefined} the item, or undefined when nothing is pending
    */
-  snooze(accountId, minutes, now = Date.now()) {
+  snooze(accountId, minutes, now = this.nowRef()) {
     return this.snoozeById(this.list(accountId)[0]?.id, minutes, now)
   }
 
@@ -419,15 +420,11 @@ export class ReminderScheduler {
    * @param {number} [now]
    * @returns {Reminder | undefined}
    */
-  snoozeById(id, minutes, now = Date.now()) {
+  snoozeById(id, minutes, now = this.nowRef()) {
     const item = this.store.items.find((entry) => entry.id === id)
     if (item === undefined) return undefined
     const span = Math.max(1, Math.round(minutes)) * 60_000
-    const timer = this.timers.get(item.id)
-    if (timer !== undefined) {
-      this.clearTimeoutRef(timer)
-      this.timers.delete(item.id)
-    }
+    this.#clearTimer(item.id)
     const base = Math.max(item.fireAt, now)
     item.fireAt = base + span
     if (item.recurrence !== undefined) item.scheduledFor = item.fireAt
@@ -448,11 +445,7 @@ export class ReminderScheduler {
     if (item === undefined) return undefined
     const base = item.scheduledFor ?? item.fireAt
     const next = nextRecurrenceAt(item.recurrence, Number(item.hour ?? 0), Number(item.minute ?? 0), base)
-    const timer = this.timers.get(item.id)
-    if (timer !== undefined) {
-      this.clearTimeoutRef(timer)
-      this.timers.delete(item.id)
-    }
+    this.#clearTimer(item.id)
     item.scheduledFor = next
     item.fireAt = next
     writeReminders(this.stateRoot, this.store, this.warn)
@@ -472,8 +465,15 @@ export class ReminderScheduler {
   /** Stop every timer. The store is untouched: a reload re-arms from disk. */
   stop() {
     this.stopped = true
-    for (const timer of this.timers.values()) this.clearTimeoutRef(timer)
+    for (const timer of this.timers.values()) timer.cancel()
     this.timers.clear()
+  }
+
+  #clearTimer(id) {
+    const timer = this.timers.get(id)
+    if (timer === undefined) return
+    timer.cancel()
+    this.timers.delete(id)
   }
 
   /**
@@ -483,39 +483,48 @@ export class ReminderScheduler {
    */
   #arm(reminder) {
     if (this.stopped) return
-    const delay = Math.max(0, reminder.fireAt - Date.now())
-    const timer = this.setTimeoutRef(delay, () => {
-      this.timers.delete(reminder.id)
-      const quietMs = this.quiet === null ? 0 : this.quiet(Date.now(), reminder.accountId)
-      if (quietMs > 0) {
-        // 免打扰时段: the item was not removed yet — keep it in the store with
-        // a pushed fireAt so it survives a restart, then re-arm for the end.
-        reminder.fireAt = Date.now() + quietMs
-        writeReminders(this.stateRoot, this.store, this.warn)
-        this.warn(`免打扰时段，提醒 ${reminder.id} 推迟到 ${new Date(reminder.fireAt).toLocaleString('zh-CN', { hour12: false })} 发送`)
-        this.#arm(reminder)
-        return
-      }
-      if (reminder.recurrence !== undefined) {
-        // A repeat is never removed: the slot it just fired is behind us, so the
-        // store moves to the next occurrence and the timer re-arms for it. The
-        // next slot is computed from `scheduledFor` (the intended moment), not
-        // from a quiet-hours push, or a pushed reminder would skip a day.
-        const slot = reminder.scheduledFor ?? reminder.fireAt
-        const next = nextRecurrenceAt(reminder.recurrence, Number(reminder.hour ?? 0), Number(reminder.minute ?? 0), slot)
-        reminder.scheduledFor = next
-        reminder.fireAt = next
-        writeReminders(this.stateRoot, this.store, this.warn)
-        this.#arm(reminder)
-      } else {
-        this.store.items = this.store.items.filter((item) => item.id !== reminder.id)
-        writeReminders(this.stateRoot, this.store, this.warn)
-      }
-      // The send must never throw into the timer callback: a transport hiccup
-      // would otherwise leave the other timers unstarted for this tick.
-      Promise.resolve()
-        .then(() => this.fire(reminder))
-        .catch((error) => this.warn(`reminder ${reminder.id} send failed: ${String(error?.message ?? error)}`))
+    this.#clearTimer(reminder.id)
+    let timer
+    timer = armLongTimer({
+      dueAt: reminder.fireAt,
+      nowRef: this.nowRef,
+      setTimeoutRef: this.setTimeoutRef,
+      clearTimeoutRef: this.clearTimeoutRef,
+      callback: () => {
+        if (this.timers.get(reminder.id) !== timer) return
+        this.timers.delete(reminder.id)
+        const now = this.nowRef()
+        const quietMs = this.quiet === null ? 0 : this.quiet(now, reminder.accountId)
+        if (quietMs > 0) {
+          // 免打扰时段: the item was not removed yet — keep it in the store with
+          // a pushed fireAt so it survives a restart, then re-arm for the end.
+          reminder.fireAt = now + quietMs
+          writeReminders(this.stateRoot, this.store, this.warn)
+          this.warn(`免打扰时段，提醒 ${reminder.id} 推迟到 ${new Date(reminder.fireAt).toLocaleString('zh-CN', { hour12: false })} 发送`)
+          this.#arm(reminder)
+          return
+        }
+        if (reminder.recurrence !== undefined) {
+          // A repeat is never removed: the slot it just fired is behind us, so the
+          // store moves to the next occurrence and the timer re-arms for it. The
+          // next slot is computed from `scheduledFor` (the intended moment), not
+          // from a quiet-hours push, or a pushed reminder would skip a day.
+          const slot = reminder.scheduledFor ?? reminder.fireAt
+          const next = nextRecurrenceAt(reminder.recurrence, Number(reminder.hour ?? 0), Number(reminder.minute ?? 0), slot)
+          reminder.scheduledFor = next
+          reminder.fireAt = next
+          writeReminders(this.stateRoot, this.store, this.warn)
+          this.#arm(reminder)
+        } else {
+          this.store.items = this.store.items.filter((item) => item.id !== reminder.id)
+          writeReminders(this.stateRoot, this.store, this.warn)
+        }
+        // The send must never throw into the timer callback: a transport hiccup
+        // would otherwise leave the other timers unstarted for this tick.
+        Promise.resolve()
+          .then(() => this.fire(reminder))
+          .catch((error) => this.warn(`reminder ${reminder.id} send failed: ${String(error?.message ?? error)}`))
+      },
     })
     this.timers.set(reminder.id, timer)
   }
