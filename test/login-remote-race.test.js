@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { Context } from '@deepseek-ai/cordis'
 import { WeixinLoginController } from '../src/login-remote.js'
+import { setAccountPaused } from '../src/account-registry.js'
 import {
   clearWeixinAccount,
   listIndexedWeixinAccountIds,
@@ -55,6 +56,7 @@ function fixture(t, options = {}) {
     loadAccount: options.loadAccount,
     clearAccount: options.clearAccount,
     unregisterAccount: options.unregisterAccount,
+    persistAccountPaused: options.persistAccountPaused,
     now: options.now,
   })
   const issued = []
@@ -71,6 +73,40 @@ function cleanAccount(t, accountId) {
     unregisterWeixinAccountId(accountId)
   })
 }
+
+test('pause and resume report a registry write failure before notifying the host', async t => {
+  const accountId = 'write-failure@im.bot'
+  const calls = []
+  let persisted = false
+  const { controller } = fixture(t, {
+    persistAccountPaused: (id, paused, warn) => setAccountPaused(id, paused, warn, {
+      writeJson: (_file, value) => {
+        calls.push([id, value[id]?.paused])
+        return persisted
+      },
+    }),
+  })
+  const controlChanges = []
+  controller.onAccountControlChange = accountId => controlChanges.push(accountId)
+
+  await assert.rejects(
+    controller.pause(accountId),
+    error => error?.code === 'registry_write_failed' && /连接状态未改变/.test(error.message),
+  )
+  assert.deepEqual(controlChanges, [])
+
+  await assert.rejects(
+    controller.resume(accountId),
+    error => error?.code === 'registry_write_failed' && /连接状态未改变/.test(error.message),
+  )
+  assert.deepEqual(controlChanges, [])
+  assert.deepEqual(calls, [[accountId, true], [accountId, false]])
+
+  persisted = true
+  assert.deepEqual(await controller.pause(accountId), { accountId, paused: true })
+  assert.deepEqual(await controller.resume(accountId), { accountId, paused: false })
+  assert.deepEqual(controlChanges, [accountId, accountId])
+})
 
 test('concurrent start requests share one QR session', async t => {
   const qr = deferred()

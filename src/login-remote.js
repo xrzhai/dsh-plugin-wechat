@@ -19,6 +19,7 @@ import {
 import { logger } from "../vendor/openclaw-weixin/util/logger.js";
 import { redactToken } from "../vendor/openclaw-weixin/util/redact.js";
 import { allowlistForAccount, isAccountPaused, readRegistry, setAccountAllowlist, setAccountLabel, setAccountPaused } from "./account-registry.js";
+import { translate } from "./i18n.js";
 import { readSavedConfig, stateDir } from "./state.js";
 import { DEFAULT_RETENTION, directoryUsage } from "./message/retention.js";
 import { readOutbox } from "./message/outbox.js";
@@ -160,6 +161,7 @@ export class WeixinLoginController extends TypertRemoteService {
         this.loadAccount = options.loadAccount ?? loadWeixinAccount;
         this.clearAccount = options.clearAccount ?? clearWeixinAccount;
         this.unregisterAccount = options.unregisterAccount ?? unregisterWeixinAccountId;
+        this.persistAccountPaused = options.persistAccountPaused ?? setAccountPaused;
         this.now = typeof options.now === "function" ? options.now : Date.now;
         this.startingLogin = undefined;
         this.loginRevision = 0;
@@ -961,7 +963,9 @@ export class WeixinLoginController extends TypertRemoteService {
     async pause(accountId) {
         const id = String(accountId ?? "").trim();
         if (!id) throw new RemoteError("account id is required");
-        setAccountPaused(id, true, (m) => logger.warn(m));
+        if (!this.persistAccountPaused(id, true, (m) => logger.warn(m))) {
+            throw new RemoteError("registry_write_failed", translate("error.accountPauseWrite", {}, readSavedConfig().locale), {});
+        }
         this.onAccountControlChange?.(id);
         return { accountId: id, paused: true };
     }
@@ -970,7 +974,9 @@ export class WeixinLoginController extends TypertRemoteService {
     async resume(accountId) {
         const id = String(accountId ?? "").trim();
         if (!id) throw new RemoteError("account id is required");
-        setAccountPaused(id, false, (m) => logger.warn(m));
+        if (!this.persistAccountPaused(id, false, (m) => logger.warn(m))) {
+            throw new RemoteError("registry_write_failed", translate("error.accountResumeWrite", {}, readSavedConfig().locale), {});
+        }
         this.onAccountControlChange?.(id);
         return { accountId: id, paused: false };
     }

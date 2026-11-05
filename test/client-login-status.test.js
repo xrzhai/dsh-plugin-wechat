@@ -123,6 +123,32 @@ test('only a successful empty account list is presented as logged out', async ()
   assert.equal(button(tree, '扫码登录微信').props.disabled, false)
 })
 
+test('a failed pause shows the error and leaves the account row unpaused', async () => {
+  const f = fixture(async () => ({ accounts: [{ accountId: 'pause-write-failure', paused: false }] }), {
+    weixin: { pause: async () => { throw new Error('无法保存账号暂停状态；连接状态未改变') } },
+  })
+  const mounted = await f.mount()
+  await button(mounted, '暂停').props.onClick()
+  const failed = f.render()
+  assert.match(text(failed), /无法保存账号暂停状态；连接状态未改变/)
+  assert.ok(button(failed, '暂停'))
+  assert.equal(button(failed, '恢复'), undefined)
+  assert.doesNotMatch(text(failed), /已暂停/)
+})
+
+test('a failed resume shows the error and leaves the account row paused', async () => {
+  const f = fixture(async () => ({ accounts: [{ accountId: 'resume-write-failure', paused: true }] }), {
+    weixin: { resume: async () => { throw new Error('无法保存账号恢复状态；连接状态未改变') } },
+  })
+  const mounted = await f.mount()
+  await button(mounted, '恢复').props.onClick()
+  const failed = f.render()
+  assert.match(text(failed), /无法保存账号恢复状态；连接状态未改变/)
+  assert.ok(button(failed, '恢复'))
+  assert.equal(button(failed, '暂停'), undefined)
+  assert.match(text(failed), /已暂停/)
+})
+
 test('expired sessions are identified on their own account rows', async () => {
   const f = fixture(async () => ({
     sessionExpired: true,

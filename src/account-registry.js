@@ -46,9 +46,15 @@ export function readRegistry() {
   return {}
 }
 
-/** Write the whole registry atomically; failure warns but never throws. */
+/**
+ * Write the whole registry atomically; failure warns but never throws.
+ *
+ * @param {{ durable?: boolean, writeJson?: typeof atomicWriteJson }} [options]
+ * @returns {boolean} whether the registry was persisted
+ */
 export function writeRegistry(registry, warn = () => {}, options = {}) {
-  atomicWriteJson(registryFile(), { schemaVersion: 1, ...registry }, {
+  const writeJson = options.writeJson ?? atomicWriteJson
+  return writeJson(registryFile(), { schemaVersion: 1, ...registry }, {
     warn: (message) => warn(`dsh-weixin: could not persist the registry: ${message}`),
     // Settings edits and enrolments keep the default (durable). The last-seen
     // bookkeeping that runs on every message passes durable: false.
@@ -125,13 +131,15 @@ export function resetTouchThrottle() {
  * A paused account keeps its credentials and its session history; the host
  * simply stops polling it, the way "退出登录" would — but without deleting the
  * login, so resuming is instant and needs no re-scan.
+ *
+ * @returns {boolean} whether the pause state was persisted
  */
-export function setAccountPaused(accountId, paused, warn = () => {}) {
+export function setAccountPaused(accountId, paused, warn = () => {}, options = {}) {
   const registry = readRegistry()
   const entry = ensureAccountEntry(registry, accountId)
   entry.paused = paused === true
   entry.pausedAt = entry.paused ? new Date().toISOString() : undefined
-  writeRegistry(registry, warn)
+  return writeRegistry(registry, warn, options)
 }
 
 /** Whether an account is paused. Missing entry means "not paused". */
