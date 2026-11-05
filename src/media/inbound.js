@@ -14,10 +14,10 @@
  *    prefixed with a random token. `../../../.ssh/authorized_keys` becomes
  *    `a1b2c3d4-authorized_keys` inside the inbox directory and cannot escape it
  *    (see {@link safeFileName}).
- *  - **Size is bounded before the bytes are trusted.** The CDN path buffers the
- *    whole download in memory, so the cap is enforced on the response's
- *    `Content-Length` first and on the buffered result second. A missing or
- *    lying header still cannot exceed the cap.
+ *  - **Size is bounded while the bytes arrive.** An oversized
+ *    `Content-Length` may reject and cancel before reading, but the streamed
+ *    byte count is authoritative, so an absent or false-small header cannot
+ *    make the process retain an arbitrarily large reply.
  *  - **Failure is returned, never thrown.** The caller must be able to tell the
  *    user *why* an attachment did not arrive, which the old blanket "not
  *    supported" notice could not.
@@ -39,6 +39,16 @@ import { transcribeVoice } from './asr.js'
 export const DEFAULT_MAX_INBOUND_MEDIA_BYTES = 20 * 1024 * 1024
 
 /**
+ * Hard deadline for one inbound CDN request, including its response body.
+ *
+ * The cap bounds memory; this bounds a peer that keeps the connection open but
+ * sends little or no data. Two minutes leaves room for a 20MB attachment on a
+ * slow mobile connection while still ensuring that a stalled request cannot
+ * hold an inbound turn forever.
+ */
+export const DEFAULT_INBOUND_DOWNLOAD_TIMEOUT_MS = 120_000
+
+/**
  * Default Weixin CDN root, matching `CDN_BASE_URL` in upstream `accounts.ts`.
  * Configurable because a saved account may point at a different CDN.
  */
@@ -49,6 +59,12 @@ const MAX_EXTENSION_LENGTH = 12
 
 /** Characters that are never safe in a file name on any supported platform. */
 const UNSAFE_NAME_CHARS = /[\u0000-\u001f\u007f/\\:*?"<>|]/g
+
+/** Enough of an error response to explain it, without buffering its whole body. */
+const ERROR_DETAIL_MAX_BYTES = 200
+
+/** Lazily allocated body blocks; small network chunks are copied into these. */
+const BODY_BLOCK_BYTES = 64 * 1024
 
 /**
  * A refusal, not a transport error: the caller reports the reason in the reply
@@ -236,58 +252,236 @@ function downloadUrlFor(descriptor, cdnBaseUrl) {
  * Fetch one descriptor's ciphertext from the CDN and return the raw bytes.
  *
  * Split out from {@link downloadInboundMedia} so the size cap is enforceable —
- * and testable — without decryption, and so the `Content-Length` check happens
- * before any bytes are buffered.
+ * and testable — without decryption. `Content-Length` is used only as a safe,
+ * one-way fast rejection: a declared value over the cap cancels immediately,
+ * while every accepted response is still counted as it streams in. An absent,
+ * invalid or false-small header therefore cannot bypass the cap.
  *
  * @param {InboundMediaDescriptor} descriptor
- * @param {{ cdnBaseUrl?: string, maxBytes: number, fetchImpl?: typeof fetch, label?: string }} options
+ * @param {{ cdnBaseUrl?: string, maxBytes: number, fetchImpl?: typeof fetch, timeoutMs?: number, label?: string }} options
  * @returns {Promise<Buffer>}
  * @throws {InboundMediaError}
  */
 export async function fetchInboundBytes(descriptor, options) {
-  const maxBytes = options.maxBytes
+  const maxBytes = normalizeMaxBytes(options.maxBytes)
+  const timeoutMs = normalizeTimeout(options.timeoutMs)
   const url = downloadUrlFor(descriptor, options.cdnBaseUrl)
   if (url === undefined) {
     throw new InboundMediaError('the message carries no CDN reference', 'no-cdn-reference')
   }
   const doFetch = options.fetchImpl ?? fetch
+  const signal = AbortSignal.timeout(timeoutMs)
   let response
   try {
-    response = await doFetch(url)
+    response = await doFetch(url, { signal })
   } catch (error) {
+    if (timedOut(signal)) throw timeoutError(timeoutMs)
     throw new InboundMediaError(`CDN request failed: ${String(error?.cause ?? error?.message ?? error)}`, 'fetch-failed')
   }
   if (!response.ok) {
     let detail = ''
     try {
-      detail = (await response.text()).slice(0, 200)
+      detail = (await readBoundedErrorBody(response, { signal, timeoutMs }))
+        .toString('utf8')
+        .slice(0, ERROR_DETAIL_MAX_BYTES)
     } catch {
       // A body we cannot read is not worth failing over; the status says enough.
+      if (timedOut(signal)) throw timeoutError(timeoutMs)
     }
     throw new InboundMediaError(
       `CDN returned ${response.status}${response.statusText ? ` ${response.statusText}` : ''}${detail === '' ? '' : ` (${detail})`}`,
       'cdn-status',
     )
   }
-  // Prefer the declared length: it lets an oversize download be refused before
-  // the body is buffered.
-  const declared = Number(response.headers?.get?.('content-length'))
-  if (Number.isFinite(declared) && declared > maxBytes) {
-    throw new InboundMediaError(
-      `the attachment is ${formatBytes(declared)}, larger than the ${formatBytes(maxBytes)} limit`,
+  const declaredBytes = declaredContentLength(response)
+  if (declaredBytes !== undefined && declaredBytes > maxBytes) {
+    const error = new InboundMediaError(
+      `the attachment is ${formatBytes(declaredBytes)}, larger than the ${formatBytes(maxBytes)} limit`,
       'too-large',
     )
+    cancelResponseBody(response, error)
+    throw error
   }
-  const bytes = Buffer.from(await response.arrayBuffer())
-  // The header is peer-influenced and may be absent or wrong: enforce again on
-  // what actually arrived.
-  if (bytes.length > maxBytes) {
+  try {
+    return await readBoundedBody(response, maxBytes, { signal, timeoutMs })
+  } catch (error) {
+    if (error instanceof InboundMediaError) throw error
+    if (timedOut(signal)) throw timeoutError(timeoutMs)
     throw new InboundMediaError(
-      `the attachment is ${formatBytes(bytes.length)}, larger than the ${formatBytes(maxBytes)} limit`,
-      'too-large',
+      `CDN response failed: ${String(error?.cause ?? error?.message ?? error)}`,
+      'body-failed',
     )
   }
-  return bytes
+}
+
+/** Parse a non-negative Content-Length without treating malformed input as zero. */
+function declaredContentLength(response) {
+  const raw = response?.headers?.get?.('content-length')
+  if (typeof raw !== 'string' || raw.trim() === '') return undefined
+  const value = Number(raw)
+  return Number.isFinite(value) && value >= 0 ? value : undefined
+}
+
+/** Start cancellation without waiting for a body or cancel promise to settle. */
+function cancelResponseBody(response, reason) {
+  const body = response?.body
+  if (body === undefined || body === null || typeof body.cancel !== 'function') return
+  try {
+    void Promise.resolve(body.cancel(reason)).catch(() => {})
+  } catch {
+    // A broken body must not turn a definitive size refusal into a hang.
+  }
+}
+
+/**
+ * Read a short explanation from an error response only when it is streamable.
+ *
+ * A response without a body stream is reported by status alone. Calling
+ * `text()` or `arrayBuffer()` there would reintroduce the whole-body allocation
+ * this path is meant to avoid.
+ */
+async function readBoundedErrorBody(response, { signal, timeoutMs }) {
+  const body = response?.body
+  if (body === undefined || body === null || typeof body.getReader !== 'function') return Buffer.alloc(0)
+  return readBoundedBody(response, ERROR_DETAIL_MAX_BYTES, { signal, timeoutMs })
+}
+
+/**
+ * Read a response without ever retaining more than `maxBytes` of body.
+ *
+ * Real fetch responses expose a web `ReadableStream`, which lets us count each
+ * chunk and cancel as soon as the limit is crossed. A non-streamable successful
+ * response fails closed instead of calling `arrayBuffer()` on untrusted input;
+ * a standard empty response (`body === null`) is the only bodyless success.
+ * Stream chunks are coalesced into fixed-size blocks, so retained allocations
+ * scale with accepted bytes rather than with the number of network chunks.
+ */
+async function readBoundedBody(response, maxBytes, { signal, timeoutMs }) {
+  const body = response?.body
+  if (body === null) return Buffer.alloc(0)
+  if (body === undefined || typeof body.getReader !== 'function') {
+    throw new InboundMediaError(
+      'CDN response body is not streamable; refusing to buffer it without a size bound',
+      'body-not-streamable',
+    )
+  }
+
+  const reader = body.getReader()
+  const blocks = []
+  let block
+  let blockOffset = 0
+  let total = 0
+
+  try {
+    while (true) {
+      const { done, value } = await readNextChunk(reader, signal, timeoutMs)
+      if (done) break
+      const chunk = chunkBytes(value)
+      const nextTotal = total + chunk.byteLength
+      if (nextTotal > maxBytes) {
+        throw new InboundMediaError(
+          `the attachment is at least ${formatBytes(nextTotal)}, larger than the ${formatBytes(maxBytes)} limit`,
+          'too-large',
+        )
+      }
+
+      let chunkOffset = 0
+      while (chunkOffset < chunk.byteLength) {
+        if (block === undefined || blockOffset === block.byteLength) {
+          // Allocate lazily and never from the configured cap directly: a huge
+          // user limit must not reserve a huge buffer before data arrives.
+          const blockBytes = Math.min(BODY_BLOCK_BYTES, maxBytes - (total + chunkOffset))
+          block = Buffer.allocUnsafe(blockBytes)
+          blocks.push(block)
+          blockOffset = 0
+        }
+        const copied = Math.min(block.byteLength - blockOffset, chunk.byteLength - chunkOffset)
+        block.set(chunk.subarray(chunkOffset, chunkOffset + copied), blockOffset)
+        blockOffset += copied
+        chunkOffset += copied
+      }
+      total = nextTotal
+    }
+  } catch (error) {
+    // Start cancellation without waiting for its promise: a broken source can
+    // return a cancel promise that never settles, and the security decision is
+    // already final. Attaching a rejection handler keeps that best-effort work
+    // from surfacing as an unhandled rejection.
+    try {
+      void Promise.resolve(reader.cancel(error)).catch(() => {})
+    } catch {
+      // A mocked reader may throw synchronously from cancel().
+    }
+    throw error
+  } finally {
+    try {
+      reader.releaseLock()
+    } catch {
+      // A mocked reader may not implement releaseLock.
+    }
+  }
+
+  if (blocks.length === 0) return Buffer.alloc(0)
+  if (blocks.length === 1) return blocks[0].subarray(0, total)
+  return Buffer.concat(blocks, total)
+}
+
+/**
+ * Race one stream read against the shared deadline without accumulating
+ * reactions on a permanently pending abort promise. The listener belongs to
+ * this read only and is removed as soon as either side settles.
+ */
+function readNextChunk(reader, signal, timeoutMs) {
+  if (signal?.aborted) return Promise.reject(timeoutError(timeoutMs))
+  if (signal === undefined) return reader.read()
+
+  return new Promise((resolve, reject) => {
+    let settled = false
+    const finish = (callback) => {
+      if (settled) return
+      settled = true
+      signal.removeEventListener('abort', onAbort)
+      callback()
+    }
+    const onAbort = () => finish(() => reject(timeoutError(timeoutMs)))
+    signal.addEventListener('abort', onAbort, { once: true })
+    if (signal.aborted) {
+      onAbort()
+      return
+    }
+    try {
+      reader.read().then(
+        (result) => finish(() => resolve(result)),
+        (error) => finish(() => reject(error)),
+      )
+    } catch (error) {
+      finish(() => reject(error))
+    }
+  })
+}
+
+/** Coerce a web-stream value to a byte view without retaining a per-chunk Buffer. */
+function chunkBytes(value) {
+  if (value instanceof Uint8Array) return value
+  if (value instanceof ArrayBuffer) return new Uint8Array(value)
+  if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength)
+  throw new TypeError('the response stream produced a non-binary chunk')
+}
+
+function normalizeMaxBytes(value) {
+  return Number.isFinite(value) && value >= 0 ? Math.floor(value) : DEFAULT_MAX_INBOUND_MEDIA_BYTES
+}
+
+function normalizeTimeout(value) {
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : DEFAULT_INBOUND_DOWNLOAD_TIMEOUT_MS
+}
+
+function timedOut(signal) {
+  return signal?.aborted === true && signal.reason?.name === 'TimeoutError'
+}
+
+function timeoutError(timeoutMs) {
+  return new InboundMediaError(`CDN download timed out after ${timeoutMs}ms`, 'timeout')
 }
 
 /** `12.3MB` / `900KB` — for user-facing size notes. */
@@ -306,6 +500,7 @@ function formatBytes(bytes) {
  * @param {number} params.maxBytes
  * @param {string} [params.dir]         Inbox directory override (tests).
  * @param {typeof fetch} [params.fetchImpl]
+ * @param {number} [params.timeoutMs]
  * @param {() => string} [params.token]
  * @returns {Promise<{ ok: true, path: string, name: string, bytes: number, kind: string, mime: string }
  *   | { ok: false, reason: string, code: string }>}
@@ -321,6 +516,7 @@ export async function downloadInboundMedia(params) {
       cdnBaseUrl,
       maxBytes,
       ...(params.fetchImpl === undefined ? {} : { fetchImpl: params.fetchImpl }),
+      ...(params.timeoutMs === undefined ? {} : { timeoutMs: params.timeoutMs }),
     })
     const aesKey = resolveAesKey(media)
     let plaintext = ciphertext
