@@ -111,7 +111,7 @@
  * @property {string} path               Absolute path of the stored file.
  * @property {string} [silkPath]         Original SILK, kept when transcoding ran.
  * @property {boolean} [transcoded]      True only for a real decoded WAV.
- * @property {string} [transcodeError]   Why WAV transcoding failed or was unavailable.
+ * @property {string} [transcodeError]   Detailed diagnostic; log only, never interpolate into a prompt.
  * @property {string} [transcodeCode]    Machine-readable counterpart of the above.
  * @property {string} [transcript]       User's words; `''` means "nothing heard".
  * @property {string} [transcriptError]  Why transcription failed, if it did.

@@ -171,14 +171,24 @@ function randomToken() {
  * who owns them. `listInboundMedia` ignores non-files, so an abandoned temp
  * directory is also absent from `/media`.
  *
+ * Hard links are unavailable on some filesystems (for example, some FAT/exFAT
+ * or network-backed volumes). In that case `link` rejects, no destination is
+ * published, and the caller receives `write-failed`. Node does not expose a
+ * portable atomic "rename only if absent" operation: plain rename can replace
+ * the destination, an access-then-rename check has a TOCTOU race, and
+ * `COPYFILE_EXCL` is explicitly not atomic. A fallback would therefore weaken
+ * either no-clobber or no-partial-file guarantees, so this path fails closed.
+ *
  * @param {string} target
  * @param {Buffer} buffer
  */
 async function writeInboundExclusive(target, buffer) {
   const tempDir = await fs.mkdtemp(path.join(path.dirname(target), INBOUND_TEMP_PREFIX))
+  const tempFile = path.join(tempDir, 'payload')
+  let ownsTempFile = false
   try {
-    const tempFile = path.join(tempDir, 'payload')
     const handle = await fs.open(tempFile, 'wx')
+    ownsTempFile = true
     try {
       await handle.writeFile(buffer)
       // Flush before publishing: a delayed ENOSPC/EIO is still a failed write,
@@ -189,9 +199,11 @@ async function writeInboundExclusive(target, buffer) {
     }
     await fs.link(tempFile, target)
   } finally {
-    // `mkdtemp` returned a path this call alone created, so recursive cleanup
-    // cannot touch a pre-existing temp file or another writer's workspace.
-    await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {})
+    // Remove only the file this call opened. `rmdir` then succeeds only if no
+    // unknown file appeared; never recurse through a directory whose contents
+    // this call can no longer prove it owns.
+    if (ownsTempFile) await fs.unlink(tempFile).catch(() => {})
+    await fs.rmdir(tempDir).catch(() => {})
   }
 }
 
@@ -815,7 +827,7 @@ export function describeMediaFailures(failures) {
  * stated as empty: a silent or unintelligible recording must not be answered as
  * if it had said something.
  *
- * @param {Array<{ ok: true, kind: string, path: string, name: string, bytes: number, transcoded?: boolean, transcodeError?: string, transcript?: string, transcriptError?: string }>} saved
+ * @param {Array<{ ok: true, kind: string, path: string, name: string, bytes: number, transcoded?: boolean, transcript?: string, transcriptError?: string }>} saved
  * @param {string} [caption]
  * @returns {string}
  */
@@ -837,8 +849,10 @@ export function describeInboundMedia(saved, caption) {
       if (item.transcoded === true) {
         return `${head}\n这是一段已转码为 WAV 的语音${reason}，请用 read 工具处理（如无法直接读取音频，请说明）。`
       }
-      const transcodeReason = typeof item.transcodeError === 'string' ? `（${item.transcodeError}）` : ''
-      return `${head}\n这是微信 SILK 格式的语音，本机未能解码为可播放音频${transcodeReason}${reason}；如需内容请告知用户。`
+      // `transcodeError` contains diagnostic text and is logged by the caller.
+      // It may include arbitrary decoder/filesystem text, so the prompt gets
+      // only this fixed description and never the original error.
+      return `${head}\n这是微信 SILK 格式的语音，本机未能解码为可播放音频${reason}；如需内容请告知用户。`
     }
     if (item.kind === 'video') {
       const length = typeof item.durationSeconds === 'number' ? `，时长 ${item.durationSeconds.toFixed(1)} 秒` : ''
