@@ -47,3 +47,12 @@ test('裸星期几始终取最近未来时刻，覆盖整周与有无钟点', ()
     }
   }
 })
+
+test('绝对日期会先拒绝非法小时和分钟，不让 Date 自动进位', () => {
+  const now = new Date(2026, 10, 5, 18, 20)
+  for (const spec of ['2026-11-06 25:00', '2026-11-06 10:99']) {
+    const parsed = parseWhen(spec, now)
+    assert.equal(parsed.ok, false, spec)
+    assert.match(parsed.reason, /^时间格式应为 HH:mm/, spec)
+  }
+})

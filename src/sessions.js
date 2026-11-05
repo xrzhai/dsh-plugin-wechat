@@ -586,6 +586,11 @@ export function isInterruptCommand(text) {
 
 const identity = () => ({})
 
+/** A prefix that reached the clock parser but failed its hour/minute syntax. */
+function isInvalidClockError(result) {
+  return result?.invalidClock === true
+}
+
 /**
  * Phrases that used to answer a temporary persona/memory confirmation. The
  * question state was removed with the memory subsystem; keep these exact
@@ -886,6 +891,7 @@ export function runSessionCommand(lines, conversationId, text, accountId, contex
     const tokens = raw.split(/\s+/)
     let when
     let recurrence
+    let failure
     let text = ''
     for (let take = Math.min(tokens.length, 4); take >= 1; take -= 1) {
       const prefix = tokens.slice(0, take).join(' ')
@@ -901,8 +907,12 @@ export function runSessionCommand(lines, conversationId, text, accountId, contex
         text = tokens.slice(take).join(' ')
         break
       }
+      if (isInvalidClockError(parsed) || isInvalidClockError(repeat)) {
+        failure = isInvalidClockError(parsed) ? parsed : repeat
+        break
+      }
     }
-    if (when === undefined && recurrence === undefined) return `没有安排：${parseWhen(tokens[0]).reason}`
+    if (when === undefined && recurrence === undefined) return `没有安排：${failure?.reason ?? parseWhen(tokens[0]).reason}`
     if (text.trim() === '') {
       return '用法：/remind <时间> <内容>，例如 /remind 明天 9:00 开会 或 /remind 每天 9:00 吃药（只给时间没有内容，没有可提醒的事）'
     }
@@ -981,6 +991,7 @@ export function runSessionCommand(lines, conversationId, text, accountId, contex
     // in the prompt, while time-like words later in the topic remain text.
     const tokens = raw.split(/\s+/)
     let when
+    let failure
     let text = ''
     for (let take = Math.min(tokens.length, 4); take >= 1; take -= 1) {
       const parsed = parseSubscriptionWhen(tokens.slice(0, take).join(' '))
@@ -989,8 +1000,12 @@ export function runSessionCommand(lines, conversationId, text, accountId, contex
         text = tokens.slice(take).join(' ')
         break
       }
+      if (isInvalidClockError(parsed)) {
+        failure = parsed
+        break
+      }
     }
-    if (when === undefined) return `没有安排：${parseSubscriptionWhen(tokens[0]).reason}`
+    if (when === undefined) return `没有安排：${failure?.reason ?? parseSubscriptionWhen(tokens[0]).reason}`
     if (text.trim() === '') return usage
     const accountIdForSub = context?.accountId ?? accountId ?? ''
     const planned = scheduler.schedule({ accountId: accountIdForSub, conversationId, when, prompt: text })

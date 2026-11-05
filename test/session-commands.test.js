@@ -106,6 +106,41 @@ test('/remind 裸星期几仍使用 09:00，正文中的时间词完整保留', 
   assert.equal(duration.plan.text, '9点 开会')
 })
 
+test('/remind 和 /subscribe 不会把日期后的非法钟点静默回退', () => {
+  const tomorrow = localStamp(1, 9, 0).text.slice(0, 10)
+  const cases = [
+    ['/remind 周五 25点 周报', () => captureReminder('周五 25点 周报')],
+    ['/remind 周五 10:99 周报', () => captureReminder('周五 10:99 周报')],
+    ['/remind 2099-01-01 25:00 周报', () => captureReminder('2099-01-01 25:00 周报')],
+    [`/remind ${tomorrow} 10:99 周报`, () => captureReminder(`${tomorrow} 10:99 周报`)],
+    ['/subscribe 周五 25点 周报', () => captureSubscription('/subscribe 周五 25点 周报')],
+    ['/subscribe 周五 10:99 周报', () => captureSubscription('/subscribe 周五 10:99 周报')],
+    ['/subscribe 2099-01-01 25:00 周报', () => captureSubscription('/subscribe 2099-01-01 25:00 周报')],
+    [`/subscribe ${tomorrow} 10:99 周报`, () => captureSubscription(`/subscribe ${tomorrow} 10:99 周报`)],
+  ]
+  for (const [text, capture] of cases) {
+    const { plan, reply } = capture()
+    assert.equal(plan, undefined, text)
+    assert.match(reply, /^没有安排：时间格式应为/, text)
+  }
+})
+
+test('/remind 和 /subscribe 的裸星期五仍保留非时间正文', () => {
+  const reminder = captureReminder('周五 25号交周报')
+  assert.equal(new Date(reminder.plan.fireAt).getDay(), 5)
+  assert.equal(new Date(reminder.plan.fireAt).getHours(), 9)
+  assert.equal(reminder.plan.text, '25号交周报')
+
+  const subscription = captureSubscription('/subscribe 周五 25号交周报')
+  assert.equal(new Date(subscription.plan.when.fireAt).getDay(), 5)
+  assert.equal(new Date(subscription.plan.when.fireAt).getHours(), 9)
+  assert.equal(subscription.plan.prompt, '25号交周报')
+
+  const withClockInTopic = captureSubscription('/subscribe 周五 周报 10点发出')
+  assert.equal(new Date(withClockInTopic.plan.when.fireAt).getHours(), 9)
+  assert.equal(withClockInTopic.plan.prompt, '周报 10点发出')
+})
+
 test('/subscribe 把完整的每天/每周时间交给调度器，主题保持完整', () => {
   const daily = captureSubscription('/subscribe 每天 08:00 早安，问问我睡得怎么样')
   assert.equal(daily.plan.when.kind, 'daily')
