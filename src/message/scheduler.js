@@ -27,6 +27,8 @@ export const MAX_PENDING_PER_ACCOUNT = 50
 export const MAX_DELAY_MS = 366 * 24 * 60 * 60 * 1000
 const MAX_DELAY_REASON = '定得太远：最多支持一年以内'
 const INVALID_HHMM_REASON = '时间格式应为 HH:mm，例如 09:30'
+const NOT_FUTURE_REASON = '时间必须是未来的某个时刻'
+const PAST_REASON = '那个时刻已经过去了'
 
 /** Retry an undelivered reminder without spinning or abandoning it. */
 const RETRY_BASE_MS = 1_000
@@ -55,7 +57,7 @@ export function parseWhen(spec, now = new Date()) {
   // 1. Pure duration: `1d30m`-style run-together units, smallest to largest.
   const duration = parseDuration(trimmed)
   if (duration !== undefined) {
-    if (duration <= 0) return { ok: false, reason: '时间必须是未来的某个时刻' }
+    if (duration <= 0) return { ok: false, reason: NOT_FUTURE_REASON }
     if (duration > MAX_DELAY_MS) return { ok: false, reason: MAX_DELAY_REASON }
     return { ok: true, fireAt: now.getTime() + duration, label: formatLabel(new Date(now.getTime() + duration)) }
   }
@@ -69,7 +71,7 @@ export function parseWhen(spec, now = new Date()) {
     if (Number.isNaN(target.getTime()) || target.getDate() !== d || target.getMonth() !== mo - 1) {
       return { ok: false, reason: '日期或时间不存在，请检查' }
     }
-    if (target.getTime() <= now.getTime()) return { ok: false, reason: '那个时刻已经过去了' }
+    if (target.getTime() <= now.getTime()) return { ok: false, reason: PAST_REASON }
     if (target.getTime() - now.getTime() > MAX_DELAY_MS) return { ok: false, reason: MAX_DELAY_REASON }
     return { ok: true, fireAt: target.getTime(), label: formatLabel(target) }
   }
@@ -96,6 +98,7 @@ const CN_DAY_OFFSET = { 今天: 0, 今晚: 0, 明天: 1, 明晚: 1, 后天: 2, �
 const CN_WEEKDAY = { 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 日: 0, 天: 0 }
 const CN_PERIOD_PM = new Set(['下午', '傍晚', '晚上', '夜里'])
 const CN_PERIOD_AM = new Set(['凌晨', '早上', '早晨', '上午'])
+const CN_PERIOD_NIGHT = new Set(['晚上', '夜里'])
 
 /**
  * 中文口语时间：`明天 9:00`、`后天下午3点半`、`下周一 10点`、`3小时后`。
@@ -118,7 +121,7 @@ function parseNaturalWhen(spec, now) {
     const amount = relative[1] === '半' ? 0.5 : Number(relative[1])
     const unitMs = { 分钟: 60_000, 分: 60_000, 小时: 3_600_000, 钟头: 3_600_000, 天: 86_400_000 }
     const delay = Math.round(amount * unitMs[relative[2]])
-    if (delay <= 0) return { ok: false, reason: '时间必须是未来的某个时刻' }
+    if (delay <= 0) return { ok: false, reason: NOT_FUTURE_REASON }
     if (delay > MAX_DELAY_MS) return { ok: false, reason: MAX_DELAY_REASON }
     return { ok: true, fireAt: now.getTime() + delay, label: formatLabel(new Date(now.getTime() + delay)) }
   }
@@ -160,11 +163,22 @@ function parseNaturalWhen(spec, now) {
   let hour = Number(clock[1])
   const minute = clock[3] === '半' ? 30 : Number(clock[2] ?? 0)
   if (hour > 23 || minute > 59) return { ok: false, reason: '时间格式应为 9:00 或 9点半', invalidClock: true }
-  if (CN_PERIOD_PM.has(period) && hour < 12) hour += 12
+  // 今晚/明晚 only imply an evening time when no explicit period was written.
+  // An explicit period wins, so conflicting forms are not shifted twice.
+  const inferredEvening = period === null && day?.evening === true
+  const lateEvening = inferredEvening || CN_PERIOD_NIGHT.has(period)
+  if ((CN_PERIOD_PM.has(period) || inferredEvening) && hour < 12) hour += 12
   if (period === '中午' && hour < 11) hour += 12
   if (period === '凌晨' && hour === 12) hour = 0
-  if (day?.evening === true && hour < 12) hour += 12
   if (CN_PERIOD_AM.has(period) && hour === 12) hour = 0
+
+  // A 12 o'clock evening time is the end of that evening, not noon. Apply
+  // the date offset first, then roll over once so an evening day is not doubled.
+  let midnightRollover = 0
+  if (lateEvening && hour === 12) {
+    hour = 0
+    midnightRollover = 1
+  }
 
   const target = new Date(now)
   if (day?.offset !== undefined) {
@@ -179,6 +193,7 @@ function parseNaturalWhen(spec, now) {
     }
     target.setDate(target.getDate() + delta)
   }
+  target.setDate(target.getDate() + midnightRollover)
   target.setHours(hour, minute, 0, 0)
 
   if (day === null && target.getTime() <= now.getTime()) target.setDate(target.getDate() + 1)
@@ -187,7 +202,7 @@ function parseNaturalWhen(spec, now) {
   if (day?.weekday !== undefined && day.next !== true && target.getTime() <= now.getTime()) {
     target.setDate(target.getDate() + 7)
   }
-  if (target.getTime() <= now.getTime()) return { ok: false, reason: '那个时刻已经过去了' }
+  if (target.getTime() <= now.getTime()) return { ok: false, reason: PAST_REASON }
   if (target.getTime() - now.getTime() > MAX_DELAY_MS) return { ok: false, reason: MAX_DELAY_REASON }
   return { ok: true, fireAt: target.getTime(), label: formatLabel(target) }
 }

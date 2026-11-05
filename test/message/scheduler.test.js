@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { parseWhen } from '../../src/message/scheduler.js'
+import { parseSubscriptionWhen } from '../../src/message/subscriptions.js'
 
 const WEEKDAYS = [
   ['一', 9],
@@ -54,5 +55,58 @@ test('绝对日期会先拒绝非法小时和分钟，不让 Date 自动进位',
     const parsed = parseWhen(spec, now)
     assert.equal(parsed.ok, false, spec)
     assert.match(parsed.reason, /^时间格式应为 HH:mm/, spec)
+  }
+})
+
+test('晚间 12 点跨到当晚结束的零点，并覆盖午夜、日间和星期边界', () => {
+  const now = new Date(2026, 10, 5, 18, 20)
+  const cases = [
+    ['今晚12点', new Date(2026, 10, 6, 0, 0)],
+    ['明晚12点', new Date(2026, 10, 7, 0, 0)],
+    ['今晚11点', new Date(2026, 10, 5, 23, 0)],
+    ['明晚11点', new Date(2026, 10, 6, 23, 0)],
+    ['晚上12点', new Date(2026, 10, 6, 0, 0)],
+    ['明天凌晨12点', new Date(2026, 10, 6, 0, 0)],
+    ['明天中午12点', new Date(2026, 10, 6, 12, 0)],
+    ['周五晚上12点', new Date(2026, 10, 7, 0, 0)],
+    ['周一凌晨12点', new Date(2026, 10, 9, 0, 0)],
+    ['周日中午12点', new Date(2026, 10, 8, 12, 0)],
+  ]
+
+  for (const [spec, expected] of cases) {
+    const parsed = parseWhen(spec, now)
+    assert.equal(parsed.ok, true, spec)
+    assert.equal(parsed.fireAt, expected.getTime(), spec)
+  }
+})
+
+test('显式时段优先于今晚明晚的推测，冲突写法不会重复改小时', () => {
+  const now = new Date(2026, 10, 5, 18, 20)
+  const cases = [
+    ['明晚上午10点', new Date(2026, 10, 6, 10, 0)],
+    ['明晚中午12点', new Date(2026, 10, 6, 12, 0)],
+    ['明晚凌晨12点', new Date(2026, 10, 6, 0, 0)],
+  ]
+
+  for (const [spec, expected] of cases) {
+    const parsed = parseWhen(spec, now)
+    assert.equal(parsed.ok, true, spec)
+    assert.equal(parsed.fireAt, expected.getTime(), spec)
+  }
+})
+
+test('一次性订阅沿用修正后的提醒时间解析器', () => {
+  const now = new Date(2026, 10, 5, 18, 20)
+  const cases = [
+    ['今晚12点', new Date(2026, 10, 6, 0, 0)],
+    ['明晚12点', new Date(2026, 10, 7, 0, 0)],
+    ['明晚11点', new Date(2026, 10, 6, 23, 0)],
+  ]
+
+  for (const [spec, expected] of cases) {
+    const parsed = parseSubscriptionWhen(spec, now)
+    assert.equal(parsed.ok, true, spec)
+    assert.equal(parsed.kind, 'once', spec)
+    assert.equal(parsed.fireAt, expected.getTime(), spec)
   }
 })
