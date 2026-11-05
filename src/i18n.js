@@ -73,6 +73,13 @@ export const CATALOG = Object.freeze({
         zh: '要停就发 /cancel —— 正在跑的这一步可能已经执行，但后面的步骤不会再继续。',
         en: 'send /cancel to stop — the step in flight may already have run, but nothing after it will.',
     },
+
+    // --- settings card labels -----------------------------------------------
+    'config.workspaceTitle.label': { zh: '微信工作区显示名', en: 'Workspace title' },
+    'config.workspaceTitle.hint': {
+        zh: '留空沿用目录名；保存后重启 DSH 生效，且不会覆盖你在界面里手动改过的标题。',
+        en: 'Empty keeps the folder name. Restart DSH to apply; a title you chose in the UI is never overwritten.',
+    },
 })
 
 /**
