@@ -488,6 +488,22 @@ export function parseWeixinApiJson(rawText) {
     }
     return JSON.parse(output);
 }
+/**
+ * The server parsed and explicitly rejected a `sendmessage` request.
+ *
+ * This is distinct from fetch/HTTP/parse failures, whose delivery outcome is
+ * unknown: the request may have reached the server before the response was
+ * lost. Callers must only treat this typed rejection as safe to retry.
+ */
+export class SendMessageRejectedError extends Error {
+    constructor(ret, errmsg) {
+        super(`sendMessage ret=${ret} errmsg=${errmsg ?? "(none)"}`);
+        this.name = "SendMessageRejectedError";
+        this.ret = ret;
+        this.errmsg = errmsg ?? "(none)";
+        this.sendOutcome = "rejected";
+    }
+}
 /** Send a single message downstream and return the server-assigned message ID. */
 export async function sendMessage(params) {
     const rawText = await apiPostFetch({
@@ -500,7 +516,7 @@ export async function sendMessage(params) {
     });
     const resp = parseWeixinApiJson(rawText);
     if (resp.ret && resp.ret !== 0) {
-        throw new Error(`sendMessage ret=${resp.ret} errmsg=${resp.errmsg ?? "(none)"}`);
+        throw new SendMessageRejectedError(resp.ret, resp.errmsg);
     }
     return resp;
 }

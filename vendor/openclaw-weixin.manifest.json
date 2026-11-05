@@ -3,7 +3,7 @@
   "version": "2.4.10",
   "files": {
     "LICENSE": "7f1e8cf099cf03de7c775e33e97e3c950c3a56a9616bb4de6b14d3c911bc5573",
-    "api/api.js": "0f83baf659da14277896cacfa0194dec9be2c7ed31b2a039a0a62f2a8ff58eaf",
+    "api/api.js": "66078ed4636cd76e7ccd6939e725e183ec92c87a4ec6ec51b8246d33103dab12",
     "api/types.js": "bb1beff52adda8e48c6b4bc04d583a2823e2ebc23d682bb81dcadf905cdecc6e",
     "auth/accounts.js": "0b7cfa122acae7cb3d673faf8d6b66c6bee22e8cf5478792666506fc5047f8df",
     "auth/login-qr.js": "bca3ca5610fb8926809e9649f6a66a6ca41bb2f71fac9c973112dfd280af06c8",
