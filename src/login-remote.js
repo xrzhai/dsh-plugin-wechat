@@ -847,8 +847,6 @@ export class WeixinLoginController extends TypertRemoteService {
             hostVersion,
             hostTested: hostStatus(hostVersion).status === "tested",
             allowedSenders: Array.isArray(live.allowedSenders) ? live.allowedSenders : [],
-            personaDefaultMode: typeof live.personaDefaultMode === "string" && live.personaDefaultMode !== "" && live.personaDefaultMode !== DEFAULT_MODE_ID,
-            proactiveEnabled: live.proactiveEnabled === true,
             knowledgeEnabled: live.knowledgeEnabled !== false,
             knowledgeFiles,
             backupEnabled: live.backupEnabled === true,
@@ -1042,4 +1040,4 @@ export function purgeStaleLogins() {
     }
 }
 
-remoteMethods(WeixinLoginController, ["startLogin", "poll", "submitVerifyCode", "cancel", "status", "logout", "sessions", "useSession", "removeSession", "pause", "resume", "label", "allowlist", "journal", "journalExport", "stats", "onboarding", "storage", "metrics", "outbox", "outboxRetry", "outboxDrop", "reminders", "remindCancel", "donateQr", "donateQrAlipay", "usageLedger", "migrateSummary", "migrateExport", "migrateInspect", "migrateRestore", "promptPreview", "memoryEventRemove"]);
+remoteMethods(WeixinLoginController, ["startLogin", "poll", "submitVerifyCode", "cancel", "status", "logout", "sessions", "useSession", "removeSession", "pause", "resume", "label", "allowlist", "journal", "journalExport", "stats", "onboarding", "storage", "metrics", "outbox", "outboxRetry", "outboxDrop", "reminders", "remindCancel", "donateQr", "donateQrAlipay", "usageLedger", "migrateSummary", "migrateExport", "migrateInspect", "migrateRestore", "promptPreview"]);

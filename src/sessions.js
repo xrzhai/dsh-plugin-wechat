@@ -157,6 +157,41 @@ export function readLines() {
 }
 
 /**
+ * Conversation most recently used by one account.
+ *
+ * Store keys are account-scoped, so filtering by the account prefix is part
+ * of choosing the target; another account's more recent activity must never
+ * steal a notification. Timestamps are compared as instants because persisted
+ * ISO strings may carry different UTC offsets.
+ *
+ * @param {string} accountId
+ * @param {ReturnType<typeof readLines>} [store]
+ * @returns {string | undefined}
+ */
+export function mostRecentConversationId(accountId, store = readLines()) {
+  const account = String(accountId ?? '').trim()
+  if (account === '') return undefined
+  const prefix = `${conversationSlug(account)}:`
+  let best
+  for (const [key, entry] of Object.entries(store)) {
+    if (!key.startsWith(prefix) || key.length === prefix.length) continue
+    let lastUsed = Number.NEGATIVE_INFINITY
+    for (const line of Array.isArray(entry?.lines) ? entry.lines : []) {
+      const usedAt = Date.parse(line?.lastUsedAt ?? '')
+      const createdAt = Date.parse(line?.createdAt ?? '')
+      const candidate = Number.isFinite(usedAt)
+        ? usedAt
+        : Number.isFinite(createdAt) ? createdAt : Number.NEGATIVE_INFINITY
+      if (candidate > lastUsed) lastUsed = candidate
+    }
+    if (Number.isFinite(lastUsed) && (best === undefined || lastUsed > best.lastUsed)) {
+      best = { conversationId: key.slice(prefix.length), lastUsed }
+    }
+  }
+  return best?.conversationId
+}
+
+/**
  * Write the line store.
  *
  * Written through a temp file and renamed, so a crash mid-write cannot leave a
@@ -782,12 +817,12 @@ export function runSessionCommand(lines, conversationId, text, accountId, contex
   const rule = COMMANDS.find((candidate) => candidate.id === command.command)
   if (rule?.run !== undefined) return rule.run({ lines, conversationId, accountId, command, context })
 
-  if (command.command === 'answer' && typeof context?.persona?.answer === 'function') {
+  if (command.command === 'answer') {
     // ② `/是`、`/不用` 只在真的有待答问题时才算命令：`/remember` 刚问过「要换成
-    //    这条吗」，下一句就靠这里认出来。handler 回 undefined 表示没人问话，
-    //    于是继续往下走 —— 最后落到桥的答案分支回 undefined，调用方当作普通聊天。
-    const answered = context.persona.answer(command.arg)
-    if (answered !== undefined) return answered
+    //    这条吗」，下一句就靠这里认出来。没有 handler 或 handler 回 undefined
+    //    都表示没人问话，调用方必须把正文继续交给普通聊天。
+    if (typeof context?.persona?.answer !== 'function') return undefined
+    return context.persona.answer(command.arg)
   }
   if (command.command === 'new') {
     const sessionId = lines.create(conversationId, accountId)

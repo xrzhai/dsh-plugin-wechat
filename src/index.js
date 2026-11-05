@@ -111,7 +111,7 @@ import { mapWithConcurrency } from './concurrency.js'
 // `/cancel` is the one message the transport must be able to deliver while a
 // turn is still running; the predicate lives beside the parser so the two
 // cannot drift apart.
-import { isInterruptCommand, readLines, conversationSlug } from './sessions.js'
+import { isInterruptCommand, readLines, mostRecentConversationId } from './sessions.js'
 
 import { startKnowledgeRefresh } from './message/knowledge-refresh.js'
 import { groupReplyPolicy, isGroupMessage } from './message/groups.js'
@@ -143,26 +143,6 @@ import {
 } from './media/inbound.js'
 
 export const name = 'dsh-weixin'
-
-/**
- * Conversation ids recorded for one account in the session-line store.
- *
- * The notify bridge needs one conversation to push a sentence to; with the
- * memory engine gone, the session-line index is the durable list of
- * conversations that have actually had a turn.
- *
- * @param {string} accountId
- * @returns {string[]}
- */
-function conversationIdsForAccount(accountId) {
-  const store = readLines()
-  const prefix = `${conversationSlug(accountId)}:`
-  const ids = []
-  for (const key of Object.keys(store)) {
-    if (key.startsWith(prefix)) ids.push(key.slice(prefix.length))
-  }
-  return ids
-}
 
 /**
  * Directory this file was loaded from — the plugin package root (one level
@@ -924,9 +904,10 @@ export function apply(ctx, config) {
             port: Number(withSavedConfig(config).notifyPort ?? DEFAULT_NOTIFY_PORT),
             warn,
             send: async (text) => {
-              const accountId = [...transports.keys()].find((id) => conversationIdsForAccount(id).length > 0)
+              const store = readLines()
+              const accountId = [...transports.keys()].find((id) => mostRecentConversationId(id, store) !== undefined)
               if (accountId === undefined) throw new Error('no conversation has ever been spoken in')
-              const conversationId = conversationIdsForAccount(accountId)[0]
+              const conversationId = mostRecentConversationId(accountId, store)
               const transport = transports.get(accountId)
               if (transport === undefined || conversationId === undefined) throw new Error('the Weixin transport is not up yet')
               await sendChunked(transport, withSavedConfig(config), { conversationId, text })
