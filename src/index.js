@@ -2116,8 +2116,13 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
           failures.push({ kind: media.kind, reason: result.reason, code: result.code })
         }
       }
+      // `prompt` already contains the neutralized quote, caption and optional
+      // link enrichment. Keep media-derived blocks separate so they are
+      // appended to that context instead of replacing it. The caption is not
+      // passed to describeInboundMedia: that would add the same user text a
+      // second time, after the earlier neutralization step.
       const parts = []
-      if (saved.length > 0) parts.push(describeInboundMedia(saved, message.text))
+      if (saved.length > 0) parts.push(describeInboundMedia(saved))
       // ② A document's text, not only its path: the model can answer "这份合同
       //    第三条写了什么" in the same turn. Anything unrecognised (pdf, images)
       //    falls back to the path-only description above.
@@ -2183,7 +2188,7 @@ ${neutralizeTags(ocr.text)}
         })
         return
       }
-      prompt = parts.join('\n\n')
+      prompt = [prompt, ...parts].filter((part) => part !== '').join('\n\n')
     }
 
     // Source context: the agent has no other way to know where a message came
