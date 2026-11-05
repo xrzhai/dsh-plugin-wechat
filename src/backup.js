@@ -27,7 +27,9 @@ import path from 'node:path'
 export const DEFAULT_KEEP = 3
 
 /**
- * What a backup copies, in the order it is reported.
+ * Fixed roots every backup copies, in the order it is reported. Reminder
+ * recovery files are discovered separately because their names come from the
+ * contents of the damaged store.
  *
  * `asr-models/` is deliberately absent: it is a downloaded model cache (~900 MB
  * on this machine) that can be fetched again, and copying it would turn a daily
@@ -57,6 +59,25 @@ const BACKUP_ROOTS = [
   ['exports', 'dir'],
   ['snippets', 'dir'],
 ]
+
+// Reminder repairs keep exact source bytes beside the live store. These files
+// may be the only remaining copy of rows that were filtered from reminders.json.
+const REMINDER_RECOVERY_FILE = /^reminders\.recovery-[0-9a-f]+\.json$/
+
+function reminderRecoveryFiles(dir, { warn } = {}) {
+  try {
+    return fs
+      .readdirSync(dir, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && REMINDER_RECOVERY_FILE.test(entry.name))
+      .map((entry) => entry.name)
+      .sort()
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      warn?.(`backup: cannot list reminder recovery files in ${dir}: ${error.message}`)
+    }
+    return []
+  }
+}
 
 /** Copied only when asked for: big, and reproducible by asking again. */
 const OPTIONAL_ROOTS = [['media', 'dir']]
@@ -100,6 +121,14 @@ function copyTree(from, to, { warn }) {
   return { files, bytes }
 }
 
+function sameFileContents(left, right) {
+  try {
+    return fs.readFileSync(left).equals(fs.readFileSync(right))
+  } catch {
+    return false
+  }
+}
+
 /**
  * Take a backup of everything worth keeping.
  *
@@ -114,7 +143,12 @@ export function createBackup(stateRoot, { now = Date.now(), label = '', warn, ke
   const skipped = []
   let files = 0
   let bytes = 0
-  const roots = includeMedia ? [...BACKUP_ROOTS, ...OPTIONAL_ROOTS] : BACKUP_ROOTS
+  const recoveryRoots = reminderRecoveryFiles(stateRoot, { warn }).map((name) => [name, 'file'])
+  const roots = [
+    ...BACKUP_ROOTS,
+    ...recoveryRoots,
+    ...(includeMedia ? OPTIONAL_ROOTS : []),
+  ]
   for (const [name, kind] of roots) {
     const source = path.join(stateRoot, name)
     try {
@@ -221,6 +255,7 @@ export function restoreBackup(stateRoot, id, { now = Date.now(), warn } = {}) {
   if (!fs.existsSync(path.join(source, 'MANIFEST.json'))) {
     throw new Error(`no backup named ${id} (or it is incomplete)`)
   }
+  const recoveryFiles = reminderRecoveryFiles(source, { warn })
 
   // Move the current state aside first, so this operation is itself revertible.
   const aside = path.join(dir, `pre-restore-${stampFor(now)}`)
@@ -240,7 +275,64 @@ export function restoreBackup(stateRoot, id, { now = Date.now(), warn } = {}) {
     const copied = copyTree(from, path.join(stateRoot, name), { warn })
     files += copied.files
   }
-  return { id, movedAside: moved, restoredFiles: files, aside }
+
+  // Recovery files are content-addressed immutable evidence, so merge them
+  // separately. In particular, never move or overwrite a live copy that differs
+  // from the backup: it may be the only copy of another damaged reminder store.
+  const recoveryConflicts = []
+  for (const name of recoveryFiles) {
+    const from = path.join(source, name)
+    const target = path.join(stateRoot, name)
+    try {
+      fs.copyFileSync(from, target, fs.constants.COPYFILE_EXCL)
+      try {
+        fs.chmodSync(target, 0o600)
+      } catch {}
+      files += 1
+    } catch (error) {
+      let same = false
+      if (error.code === 'EEXIST') {
+        same = sameFileContents(from, target)
+      }
+      if (same) continue
+      if (error.code === 'EEXIST') {
+        const conflict = {
+          name,
+          livePath: target,
+          backupPath: from,
+          preservedPath: null,
+          preserved: false,
+        }
+        const preservedPath = path.join(aside, name)
+        try {
+          fs.copyFileSync(from, preservedPath, fs.constants.COPYFILE_EXCL)
+          try {
+            fs.chmodSync(preservedPath, 0o600)
+          } catch {}
+          conflict.preservedPath = preservedPath
+          conflict.preserved = true
+          warn?.(`kept existing reminder recovery ${name}; saved the backup copy to ${preservedPath}`)
+        } catch (copyError) {
+          if (copyError.code === 'EEXIST' && sameFileContents(from, preservedPath)) {
+            conflict.preservedPath = preservedPath
+            conflict.preserved = true
+            warn?.(`kept existing reminder recovery ${name}; the backup copy is already preserved at ${preservedPath}`)
+            recoveryConflicts.push(conflict)
+            continue
+          }
+          conflict.error = String(copyError?.message ?? copyError)
+          warn?.(
+            `kept existing reminder recovery ${name}; could not preserve the backup copy in ${aside}: ` +
+              `${conflict.error}; it remains at ${from} until backup rotation`,
+          )
+        }
+        recoveryConflicts.push(conflict)
+      } else {
+        warn?.(`backup: cannot restore reminder recovery ${name}: ${error.message}`)
+      }
+    }
+  }
+  return { id, movedAside: moved, restoredFiles: files, aside, recoveryConflicts }
 }
 
 /** Count what is in a backup, for the "did this actually copy anything" question. */

@@ -146,6 +146,16 @@ switch (command) {
     const result = restoreBackup(root, id, { warn })
     console.log(`✓ restored ${result.restoredFiles} file(s) from ${id}`)
     console.log(`  previous state moved to ${path.relative(root, result.aside)} (delete it once you are happy)`)
+    for (const conflict of result.recoveryConflicts) {
+      if (conflict.preserved) {
+        console.log(`  kept live recovery ${conflict.name}; backup copy saved to ${conflict.preservedPath}`)
+      } else {
+        console.error(`✗ kept live recovery ${conflict.name}, but its backup copy was not preserved outside rotation`)
+        console.error(`  backup copy: ${conflict.backupPath}`)
+        console.error(`  preservation error: ${conflict.error}`)
+        process.exitCode = 1
+      }
+    }
     console.log(`  restart DSH to load the restored state`)
     break
   }

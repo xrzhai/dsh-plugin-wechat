@@ -5,9 +5,10 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { backupsDir, createBackup } from '../src/backup.js'
+import { backupsDir, createBackup, stampFor } from '../src/backup.js'
 import { sealState } from '../src/backup-crypto.js'
 import { lockFile } from '../src/instance-lock.js'
+import { readReminders } from '../src/message/scheduler.js'
 
 const REPO_ROOT = path.resolve(import.meta.dirname, '..')
 const CLI = path.join(REPO_ROOT, 'bin', 'backup.mjs')
@@ -107,6 +108,51 @@ test('restore proceeds from an OS-confirmed stale lock and says why', (t) => {
   assert.equal(result.status, 0, result.stderr)
   assert.match(result.stderr, /ignoring stale instance lock/)
   assert.equal(readMarker(f.root), 'from-backup')
+})
+
+test('restore CLI reports where it preserved a conflicting backup recovery copy', (t) => {
+  const f = fixture(t)
+  const original = '{"seq":1,"items":['
+  fs.writeFileSync(path.join(f.root, 'reminders.json'), original)
+  readReminders(f.root, () => {})
+  const recoveryName = fs.readdirSync(f.root).find((name) => /^reminders\.recovery-[0-9a-f]+\.json$/.test(name))
+  assert.ok(recoveryName)
+  const saved = createBackup(f.root, { now: Date.parse('2026-11-05T01:02:03Z'), warn() {} })
+  fs.writeFileSync(path.join(f.root, recoveryName), '{"user":"different recovery copy"}\n')
+
+  const result = runCli(f, ['restore', saved.id, '--yes'])
+
+  assert.equal(result.status, 0, result.stderr)
+  const match = result.stdout.match(/backup copy saved to (.+)\r?\n/)
+  assert.ok(match, result.stdout)
+  assert.equal(fs.readFileSync(match[1].trim(), 'utf8'), original)
+  assert.match(result.stdout, new RegExp(`kept live recovery ${recoveryName.replaceAll('.', '\\.')}`))
+})
+
+test('restore CLI exits nonzero when a conflict copy cannot leave backup rotation', (t) => {
+  const f = fixture(t)
+  const original = '{"seq":2,"items":['
+  fs.writeFileSync(path.join(f.root, 'reminders.json'), original)
+  readReminders(f.root, () => {})
+  const recoveryName = fs.readdirSync(f.root).find((name) => /^reminders\.recovery-[0-9a-f]+\.json$/.test(name))
+  assert.ok(recoveryName)
+  const saved = createBackup(f.root, { now: Date.parse('2026-11-05T01:02:03Z'), warn() {} })
+  fs.writeFileSync(path.join(f.root, recoveryName), '{"user":"different recovery copy"}\n')
+
+  // The stamp has one-second precision. Pre-occupy the plausible restore
+  // destinations so the no-overwrite safety copy deterministically fails.
+  const now = Date.now()
+  for (let offset = -1; offset <= 20; offset += 1) {
+    const aside = path.join(backupsDir(f.root), `pre-restore-${stampFor(now + offset * 1_000)}`)
+    fs.mkdirSync(aside, { recursive: true })
+    fs.writeFileSync(path.join(aside, recoveryName), '{"occupied":true}\n')
+  }
+
+  const result = runCli(f, ['restore', saved.id, '--yes'])
+
+  assert.equal(result.status, 1, result.stderr)
+  assert.match(result.stderr, /but its backup copy was not preserved outside rotation/)
+  assert.match(result.stderr, /preservation error: EEXIST|preservation error: .*exist/i)
 })
 
 test('restore does not treat a missing lock as proof that DSH is stopped', (t) => {
