@@ -5,10 +5,13 @@ import path from 'node:path'
 import { setImmediate as tick } from 'node:timers/promises'
 import { Context } from '@deepseek-ai/cordis'
 import { apply } from '../../src/index.js'
+import { AgentBridge } from '../../src/agent-bridge.js'
 import { ILinkTransport } from '../../src/transport/ilink.js'
 import { ConfigController } from '../../src/config-remote.js'
 import { configureWeixinStateDir, configFile, stateDir } from '../../src/state.js'
 import { lockFile } from '../../src/instance-lock.js'
+import { readReminders, writeReminders } from '../../src/message/scheduler.js'
+import { readSubscriptions, writeSubscriptions } from '../../src/message/subscriptions.js'
 import { saveWeixinAccount, registerWeixinAccountId } from '../../vendor/openclaw-weixin/auth/accounts.js'
 
 const ACCOUNT = 'runtime-fixture'
@@ -25,10 +28,33 @@ async function until(predicate, label) {
   }
   assert.ok(predicate(), label)
 }
+async function untilEventually(predicate, label, timeoutMs = 3_000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (predicate()) return
+    await tick(10)
+  }
+  assert.ok(predicate(), label)
+}
+
+function seedSubscription(root, prompt) {
+  writeSubscriptions(root, {
+    seq: 1,
+    items: [{
+      id: 's1',
+      accountId: ACCOUNT,
+      conversationId: 'test-user',
+      prompt,
+      kind: 'once',
+      fireAt: Date.now() + 200,
+      createdAt: Date.now(),
+    }],
+  })
+}
 
 // Real Cordis services, persistence, apply(), AgentBridge and gateway wiring.
 // Only the external iLink boundary and host session factory are synthetic.
-function fixture(t, { enabled = false, baseEnabled = true, refresh, stop } = {}) {
+function fixture(t, { enabled = false, baseEnabled = true, refresh, stop, beforeApply, summarize } = {}) {
   const env = Object.fromEntries(['DSH_WEIXIN_STATE_DIR', 'OPENCLAW_STATE_DIR', 'CLAWDBOT_STATE_DIR'].map((key) => [key, process.env[key]]))
   const root = fs.mkdtempSync(path.join(stateDir(), 'runtime-'))
   process.env.DSH_WEIXIN_STATE_DIR = root
@@ -41,6 +67,7 @@ function fixture(t, { enabled = false, baseEnabled = true, refresh, stop } = {})
   const stopped = []
   const sessions = []
   const sent = []
+  if (summarize !== undefined) t.mock.method(AgentBridge.prototype, 'summarize', summarize)
   t.mock.method(ILinkTransport.prototype, 'refreshConfig', async function () {
     prepared.push(this)
     await refresh?.(this, prepared.length)
@@ -77,6 +104,7 @@ function fixture(t, { enabled = false, baseEnabled = true, refresh, stop } = {})
     }
     fs.rmSync(root, { recursive: true, force: true })
   })
+  beforeApply?.(root)
   apply(ctx, { enabled: baseEnabled, allowedSenders: ['test-user'], knowledgeEnabled: false, notifyEnabled: false, mediaEnabled: false, typingIndicator: false })
   const controller = ctx.get('configController')
   const login = ctx.get('weixinLoginController')
@@ -115,6 +143,255 @@ test('apply starts from saved disabled state; real save enables, disables and fe
   assert.equal(f.login.onAccountControlChange, undefined)
   assert.equal(f.login.onAccountBound, undefined)
   assert.equal(fs.existsSync(lockFile(f.root)), false)
+})
+
+test('a persisted due reminder survives missing startup transport and wakes when it becomes live', async (t) => {
+  const fireAt = Date.now() - 1
+  const f = fixture(t, {
+    beforeApply: (root) => writeReminders(root, {
+      seq: 1,
+      items: [{
+        id: 'r1',
+        accountId: ACCOUNT,
+        conversationId: 'test-user',
+        text: 'delayed startup',
+        fireAt,
+        createdAt: new Date(fireAt - 60_000).toISOString(),
+      }],
+    }),
+  })
+  await tick()
+  assert.equal(f.sent.length, 0)
+  assert.equal(readReminders(f.root).items[0].id, 'r1')
+
+  await saveEnabled(f.controller, true)
+  await until(() => f.sent.some((message) => message.text === '（提醒：delayed startup）'), 'reminder sent after transport starts')
+  await until(() => readReminders(f.root).items.length === 0, 'delivered reminder removed')
+})
+
+test('a reminder due while its account is paused is sent after resume', async (t) => {
+  const f = fixture(t, { enabled: true })
+  await until(() => f.started.length === 1, 'transport starts')
+  await f.login.pause(ACCOUNT)
+  assert.equal(f.started[0].testRunning, false)
+
+  const scheduled = f.login.remindersProvider.schedule({
+    accountId: ACCOUNT,
+    conversationId: 'test-user',
+    text: 'resume delivery',
+    fireAt: Date.now() - 1,
+  })
+  assert.equal(scheduled.id, 'r1')
+  await tick()
+  assert.equal(f.sent.length, 0)
+  assert.equal(readReminders(f.root).items[0].id, 'r1')
+
+  await f.login.resume(ACCOUNT)
+  await until(() => f.sent.some((message) => message.text === '（提醒：resume delivery）'), 'reminder sent after resume')
+  await until(() => readReminders(f.root).items.length === 0, 'resumed reminder removed')
+})
+
+test('fire entry rejects a committed pause before the transport removal callback', async (t) => {
+  let summaries = 0
+  const f = fixture(t, {
+    enabled: true,
+    summarize: async () => { summaries += 1; return { text: 'must not generate' } },
+  })
+  await until(() => f.started.length === 1 && f.login.subscriptionScheduler !== undefined, 'runtime starts')
+  const releaseControl = deferred()
+  const originalControl = f.login.onAccountControlChange
+  f.login.onAccountControlChange = async (accountId) => {
+    await releaseControl.promise
+    return originalControl?.(accountId)
+  }
+
+  await f.login.pause(ACCOUNT)
+  assert.equal(f.started[0].testRunning, true)
+  f.login.remindersProvider.schedule({
+    accountId: ACCOUNT,
+    conversationId: 'test-user',
+    text: 'paused entry',
+    fireAt: Date.now() - 1,
+  })
+  f.login.subscriptionScheduler.schedule({
+    accountId: ACCOUNT,
+    conversationId: 'test-user',
+    prompt: 'paused entry',
+    when: { ok: true, kind: 'once', fireAt: Date.now() - 1 },
+  })
+  await tick()
+  await tick()
+  assert.deepEqual(f.sent, [])
+  assert.equal(summaries, 0)
+  assert.equal(readReminders(f.root).items.length, 1)
+  assert.equal(readSubscriptions(f.root).items.length, 1)
+
+  releaseControl.resolve()
+  await until(() => f.started[0].testRunning === false, 'paused transport stops after callback release')
+  f.login.onAccountControlChange = originalControl
+})
+
+test('fire entry rejects committed disablement before the transport removal callback', async (t) => {
+  let summaries = 0
+  const f = fixture(t, {
+    enabled: true,
+    summarize: async () => { summaries += 1; return { text: 'must not generate' } },
+  })
+  await until(() => f.started.length === 1 && f.login.subscriptionScheduler !== undefined, 'runtime starts')
+  const configCommitted = deferred()
+  const releaseConfig = deferred()
+  const originalChanged = f.controller.onConfigChanged
+  f.controller.onConfigChanged = async () => {
+    configCommitted.resolve()
+    await releaseConfig.promise
+    return originalChanged?.()
+  }
+
+  const saving = saveEnabled(f.controller, false)
+  await configCommitted.promise
+  assert.equal(f.started[0].testRunning, true)
+  f.login.remindersProvider.schedule({
+    accountId: ACCOUNT,
+    conversationId: 'test-user',
+    text: 'disabled entry',
+    fireAt: Date.now() - 1,
+  })
+  f.login.subscriptionScheduler.schedule({
+    accountId: ACCOUNT,
+    conversationId: 'test-user',
+    prompt: 'disabled entry',
+    when: { ok: true, kind: 'once', fireAt: Date.now() - 1 },
+  })
+  await tick()
+  await tick()
+  assert.deepEqual(f.sent, [])
+  assert.equal(summaries, 0)
+  assert.equal(readReminders(f.root).items.length, 1)
+  assert.equal(readSubscriptions(f.root).items.length, 1)
+
+  releaseConfig.resolve()
+  await saving
+  f.controller.onConfigChanged = originalChanged
+})
+
+test('a subscription generated while its account pauses is not sent to the stopped transport', async (t) => {
+  const generated = deferred()
+  const released = deferred()
+  const summaries = []
+  const f = fixture(t, {
+    enabled: true,
+    beforeApply: (root) => seedSubscription(root, 'pause during generation'),
+    summarize: async () => {
+      summaries.push('summarize')
+      if (summaries.length === 1) {
+        generated.resolve()
+        await released.promise
+        return { text: 'stale generation' }
+      }
+      return { text: 'after resume' }
+    },
+  })
+  await until(() => f.started.length === 1, 'subscription runtime starts')
+  await generated.promise
+
+  await f.login.pause(ACCOUNT)
+  released.resolve()
+  await tick()
+  await tick()
+  assert.deepEqual(f.sent, [])
+  assert.equal(readSubscriptions(f.root).items.length, 1)
+
+  await f.login.resume(ACCOUNT)
+  await untilEventually(() => f.sent.some((message) => message.text === 'after resume'), 'subscription sends after resume')
+  assert.ok(f.sent.every((message) => message.text !== 'stale generation'))
+  assert.deepEqual(readSubscriptions(f.root).items, [])
+})
+
+test('a subscription generated while the gateway is disabled waits for re-enable', async (t) => {
+  const generated = deferred()
+  const released = deferred()
+  const summaries = []
+  const f = fixture(t, {
+    enabled: true,
+    beforeApply: (root) => seedSubscription(root, 'disable during generation'),
+    summarize: async () => {
+      summaries.push('summarize')
+      if (summaries.length === 1) {
+        generated.resolve()
+        await released.promise
+        return { text: 'disabled generation' }
+      }
+      return { text: 'after enable' }
+    },
+  })
+  await until(() => f.started.length === 1, 'subscription runtime starts')
+  await generated.promise
+
+  await saveEnabled(f.controller, false)
+  released.resolve()
+  await tick()
+  await tick()
+  assert.deepEqual(f.sent, [])
+  assert.equal(readSubscriptions(f.root).items.length, 1)
+
+  await saveEnabled(f.controller, true)
+  await untilEventually(() => f.sent.some((message) => message.text === 'after enable'), 'subscription sends after enable')
+  assert.ok(f.sent.every((message) => message.text !== 'disabled generation'))
+  assert.deepEqual(readSubscriptions(f.root).items, [])
+})
+
+test('a subscription generation cannot cross an account transport replacement', async (t) => {
+  const generated = deferred()
+  const released = deferred()
+  const summaries = []
+  const f = fixture(t, {
+    enabled: true,
+    beforeApply: (root) => seedSubscription(root, 'restart during generation'),
+    summarize: async () => {
+      summaries.push('summarize')
+      if (summaries.length === 1) {
+        generated.resolve()
+        await released.promise
+        return { text: 'stale generation' }
+      }
+      return { text: 'new transport' }
+    },
+  })
+  await until(() => f.started.length === 1, 'subscription runtime starts')
+  const oldTransport = f.started[0]
+  await generated.promise
+
+  await f.login.pause(ACCOUNT)
+  await f.login.resume(ACCOUNT)
+  await until(() => f.started.length === 2, 'replacement transport starts')
+  released.resolve()
+  await untilEventually(() => f.sent.some((message) => message.text === 'new transport'), 'subscription sends through replacement transport')
+  assert.equal(oldTransport.testRunning, false)
+  assert.ok(f.sent.every((message) => message.text !== 'stale generation'))
+  assert.deepEqual(readSubscriptions(f.root).items, [])
+})
+
+test('a subscription generation settling after plugin stop cannot send', async (t) => {
+  const generated = deferred()
+  const released = deferred()
+  const f = fixture(t, {
+    enabled: true,
+    beforeApply: (root) => seedSubscription(root, 'stop during generation'),
+    summarize: async () => {
+      generated.resolve()
+      await released.promise
+      return { text: 'late after stop' }
+    },
+  })
+  await until(() => f.started.length === 1, 'subscription runtime starts')
+  await generated.promise
+
+  await f.dispose()
+  released.resolve()
+  await tick()
+  await tick()
+  assert.deepEqual(f.sent, [])
+  assert.equal(readSubscriptions(f.root).items.length, 1)
 })
 
 test('real reset restores composition instead of saved disabled startup overlay', async (t) => {

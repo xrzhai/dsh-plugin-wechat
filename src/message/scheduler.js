@@ -28,6 +28,10 @@ export const MAX_DELAY_MS = 366 * 24 * 60 * 60 * 1000
 const MAX_DELAY_REASON = '定得太远：最多支持一年以内'
 const INVALID_HHMM_REASON = '时间格式应为 HH:mm，例如 09:30'
 
+/** Retry an undelivered reminder without spinning or abandoning it. */
+const RETRY_BASE_MS = 1_000
+const RETRY_MAX_MS = 30_000
+
 /**
  * Parse a `/remind` time spec. Supported forms, in the order they are tried:
  *
@@ -323,7 +327,7 @@ export class ReminderScheduler {
   /**
    * @param {object} options
    * @param {string} options.stateRoot
-   * @param {(reminder: Reminder) => Promise<void> | void} options.fire sends the text; must not throw into the timer
+   * @param {(reminder: Reminder) => Promise<void> | void} options.fire sends the text; rejection keeps the reminder pending
    * @param {(message: string) => void} [options.warn]
    * @param {(ms: number, callback: () => void) => unknown} [options.setTimeoutRef] injectable for tests
    * @param {(timer: unknown) => void} [options.clearTimeoutRef] injectable for tests
@@ -342,6 +346,12 @@ export class ReminderScheduler {
     this.nowRef = nowRef
     /** @type {Map<string, { cancel: () => void }>} reminder id -> timer controller */
     this.timers = new Map()
+    /** @type {Map<string, Promise<void>>} reminder id -> in-flight delivery */
+    this.inFlight = new Map()
+    /** @type {Map<string, number>} reminder id -> consecutive failed attempts */
+    this.retryAttempts = new Map()
+    /** @type {Set<string>} due callbacks that arrived while an attempt was in flight */
+    this.pendingAttempts = new Set()
     this.store = readReminders(stateRoot)
     this.stopped = false
     for (const reminder of this.store.items) this.#arm(reminder)
@@ -395,6 +405,8 @@ export class ReminderScheduler {
     if (this.store.items.length === before) return false
     writeReminders(this.stateRoot, this.store, this.warn)
     this.#clearTimer(id)
+    this.retryAttempts.delete(id)
+    this.pendingAttempts.delete(id)
     return true
   }
 
@@ -427,6 +439,7 @@ export class ReminderScheduler {
     if (item === undefined) return undefined
     const span = Math.max(1, Math.round(minutes)) * 60_000
     this.#clearTimer(item.id)
+    this.retryAttempts.delete(item.id)
     const base = Math.max(item.fireAt, now)
     item.fireAt = base + span
     if (item.recurrence !== undefined) item.scheduledFor = item.fireAt
@@ -448,6 +461,7 @@ export class ReminderScheduler {
     const base = item.scheduledFor ?? item.fireAt
     const next = nextRecurrenceAt(item.recurrence, Number(item.hour ?? 0), Number(item.minute ?? 0), base)
     this.#clearTimer(item.id)
+    this.retryAttempts.delete(item.id)
     item.scheduledFor = next
     item.fireAt = next
     writeReminders(this.stateRoot, this.store, this.warn)
@@ -464,11 +478,32 @@ export class ReminderScheduler {
     return items.sort((a, b) => a.fireAt - b.fireAt)
   }
 
-  /** Stop every timer. The store is untouched: a reload re-arms from disk. */
+  /**
+   * Retry every due item for an account immediately. Called after a transport
+   * becomes live so a startup or reconnect does not wait for the next backoff.
+   */
+  wake(accountId) {
+    if (this.stopped) return
+    const now = this.nowRef()
+    for (const item of this.store.items) {
+      if (item.accountId !== accountId || item.fireAt > now) continue
+      if (this.inFlight.has(item.id)) {
+        this.pendingAttempts.add(item.id)
+        continue
+      }
+      this.retryAttempts.delete(item.id)
+      this.#arm(item, now)
+    }
+  }
+
+  /** Stop every timer without waiting for an in-flight network/model call. */
   stop() {
     this.stopped = true
     for (const timer of this.timers.values()) timer.cancel()
     this.timers.clear()
+    this.retryAttempts.clear()
+    this.pendingAttempts.clear()
+    this.inFlight.clear()
   }
 
   #clearTimer(id) {
@@ -483,12 +518,12 @@ export class ReminderScheduler {
    * dropped: the host was probably down or reloading when their moment
    * passed, and the user asked for the message, not for its punctuality.
    */
-  #arm(reminder) {
+  #arm(reminder, dueAt = reminder.fireAt) {
     if (this.stopped) return
     this.#clearTimer(reminder.id)
     let timer
     timer = armLongTimer({
-      dueAt: reminder.fireAt,
+      dueAt,
       nowRef: this.nowRef,
       setTimeoutRef: this.setTimeoutRef,
       clearTimeoutRef: this.clearTimeoutRef,
@@ -506,28 +541,60 @@ export class ReminderScheduler {
           this.#arm(reminder)
           return
         }
-        if (reminder.recurrence !== undefined) {
-          // A repeat is never removed: the slot it just fired is behind us, so the
-          // store moves to the next occurrence and the timer re-arms for it. The
-          // next slot is computed from `scheduledFor` (the intended moment), not
-          // from a quiet-hours push, or a pushed reminder would skip a day.
-          const slot = reminder.scheduledFor ?? reminder.fireAt
-          const next = nextRecurrenceAt(reminder.recurrence, Number(reminder.hour ?? 0), Number(reminder.minute ?? 0), slot)
-          reminder.scheduledFor = next
-          reminder.fireAt = next
-          writeReminders(this.stateRoot, this.store, this.warn)
-          this.#arm(reminder)
-        } else {
-          this.store.items = this.store.items.filter((item) => item.id !== reminder.id)
-          writeReminders(this.stateRoot, this.store, this.warn)
-        }
-        // The send must never throw into the timer callback: a transport hiccup
-        // would otherwise leave the other timers unstarted for this tick.
-        Promise.resolve()
-          .then(() => this.fire(reminder))
-          .catch((error) => this.warn(`reminder ${reminder.id} send failed: ${String(error?.message ?? error)}`))
+        void this.#attempt(reminder)
       },
     })
     this.timers.set(reminder.id, timer)
+  }
+
+  async #attempt(reminder) {
+    if (this.stopped) return
+    if (this.inFlight.has(reminder.id)) {
+      this.pendingAttempts.add(reminder.id)
+      return
+    }
+    const attemptedFireAt = reminder.fireAt
+    const slot = reminder.scheduledFor ?? reminder.fireAt
+    const task = (async () => {
+      try {
+        await this.fire(reminder)
+      } catch (error) {
+        if (this.stopped) return
+        const current = this.store.items.find((item) => item.id === reminder.id)
+        if (current === undefined || current.fireAt !== attemptedFireAt) return
+        if (current.recurrence !== undefined && (current.scheduledFor ?? current.fireAt) !== slot) return
+        const attempts = (this.retryAttempts.get(reminder.id) ?? 0) + 1
+        this.retryAttempts.set(reminder.id, attempts)
+        const delay = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** Math.min(attempts - 1, 5))
+        this.warn(`reminder ${reminder.id} send failed; retrying in ${delay}ms: ${String(error?.message ?? error)}`)
+        this.#arm(current, this.nowRef() + delay)
+        return
+      }
+      if (this.stopped) return
+      this.retryAttempts.delete(reminder.id)
+      const current = this.store.items.find((item) => item.id === reminder.id)
+      if (current === undefined) return
+      if (current.fireAt !== attemptedFireAt) return
+      if (current.recurrence === undefined) {
+        // A snooze or skip during delivery changes fireAt; cancellation removes
+        // the row. In either case the user's newer state wins over this ack.
+        this.store.items = this.store.items.filter((item) => item.id !== reminder.id)
+        writeReminders(this.stateRoot, this.store, this.warn)
+        return
+      }
+      if ((current.scheduledFor ?? current.fireAt) !== slot) return
+      const next = nextRecurrenceAt(current.recurrence, Number(current.hour ?? 0), Number(current.minute ?? 0), slot)
+      current.scheduledFor = next
+      current.fireAt = next
+      writeReminders(this.stateRoot, this.store, this.warn)
+      this.#arm(current)
+    })().finally(() => {
+      if (this.inFlight.get(reminder.id) === task) this.inFlight.delete(reminder.id)
+      if (!this.pendingAttempts.delete(reminder.id) || this.stopped) return
+      const current = this.store.items.find((item) => item.id === reminder.id)
+      if (current !== undefined) this.#arm(current)
+    })
+    this.inFlight.set(reminder.id, task)
+    await task
   }
 }

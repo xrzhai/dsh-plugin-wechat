@@ -780,6 +780,7 @@ export function apply(ctx, config) {
         tempQuietDelay(now, stateRoot, accountId, { warn }),
       )
       quietGateFor = quietGate
+      const deliveryStillEnabled = (accountId) => !cancelled && gatewayEnabled() && !isAccountPaused(accountId)
 
       // Retention: state grows all day; a nightly sweep keeps it bounded. It
       // runs once shortly after start (a laptop is not up at 03:00) and then
@@ -831,10 +832,12 @@ export function apply(ctx, config) {
         warn,
         quiet: quietGate,
         fire: async (reminder) => {
+          if (!deliveryStillEnabled(reminder.accountId)) {
+            throw new Error(`delivery is disabled for ${reminder.accountId}`)
+          }
           const transport = transports.get(reminder.accountId)
           if (transport === undefined) {
-            warn(`reminder ${reminder.id} has no live transport for ${reminder.accountId}; dropped`)
-            return
+            throw new Error(`no live transport for ${reminder.accountId}`)
           }
           await sendChunked(transport, config, {
             conversationId: reminder.conversationId,
@@ -862,14 +865,15 @@ export function apply(ctx, config) {
         warn,
         quiet: quietGate,
         fire: async (item) => {
+          if (!deliveryStillEnabled(item.accountId)) {
+            throw new Error(`delivery is disabled for ${item.accountId}`)
+          }
           const transport = transports.get(item.accountId)
           if (transport === undefined) {
-            warn(`subscription ${item.id} has no live transport for ${item.accountId}; skipped`)
-            return
+            throw new Error(`no live transport for ${item.accountId}`)
           }
           if (subscriptionBusy.has(item.conversationId)) {
-            warn(`subscription ${item.id} skipped: another fire is running for ${item.conversationId}`)
-            return
+            throw new Error(`another subscription fire is running for ${item.conversationId}`)
           }
           subscriptionBusy.add(item.conversationId)
           try {
@@ -881,6 +885,9 @@ export function apply(ctx, config) {
               `</weixin_subscription>`,
             ].join('\n')
             const result = await bridge.summarize({ conversationId: item.conversationId, accountId: item.accountId, prompt, sessionPrefix: 'wx-sub-', route: sideRoute('report') })
+            if (!deliveryStillEnabled(item.accountId) || transports.get(item.accountId) !== transport) {
+              throw new Error(`subscription ${item.id} origin is no longer live`)
+            }
             const text = typeof result?.text === 'string' ? result.text.trim() : ''
             if (text === '' || text === '（已取消）') {
               log(`subscription ${item.id} produced nothing to send`)
@@ -893,6 +900,7 @@ export function apply(ctx, config) {
           }
         },
       })
+      if (loginController !== undefined) loginController.subscriptionScheduler = subscriptionScheduler
 
       // 本地通知桥: a loopback endpoint so a build, backup or cron job can push
       // one sentence to WeChat without a model turn. Off by default; the token
@@ -1145,6 +1153,8 @@ export function apply(ctx, config) {
         if (transports.get(account.accountId) === next) gateway.stopAccount(account.accountId)
         return
       }
+      reminderScheduler?.wake(account.accountId)
+      subscriptionScheduler?.wake(account.accountId)
       log(`listening as account ${account.accountId} (state: ${stateRoot})`)
     }
 
@@ -1217,10 +1227,12 @@ export function apply(ctx, config) {
 
     return async () => {
       cancelled = true
-      await gateway.sync()
+      // Stop scheduling before transports. A callback already in flight may
+      // finish, but its stopped scheduler will not commit or retry the result.
       await setup.catch(() => {})
       reminderScheduler?.stop()
       subscriptionScheduler?.stop()
+      await gateway.sync()
       await notifyBridge?.stop()
       if (awayTimer !== undefined) clearInterval(awayTimer)
       for (const off of offWebhook.splice(0)) off()
@@ -1238,6 +1250,9 @@ export function apply(ctx, config) {
       }
       if (loginController !== undefined && loginController.onAccountControlChange === onAccountControlChange) {
         loginController.onAccountControlChange = undefined
+      }
+      if (loginController !== undefined && loginController.subscriptionScheduler === subscriptionScheduler) {
+        loginController.subscriptionScheduler = undefined
       }
       if (configController !== undefined && configController.onConfigChanged === onConfigChanged) {
         configController.onConfigChanged = undefined
