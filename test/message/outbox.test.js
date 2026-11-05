@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import fs, { mkdtempSync, rmSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
 import { atomicWriteJson } from '../../src/atomic.js'
-import { createOutbox, outboxFile, BASE_RETRY_MS, CONTEXT_TOKEN_TTL_MS, MAX_ATTEMPTS, MAX_ITEMS } from '../../src/message/outbox.js'
+import { createOutbox, outboxFile, BASE_RETRY_MS, CONTEXT_TOKEN_TTL_MS, DEFAULT_OUTBOX_MAX_MESSAGE_LENGTH, MAX_ATTEMPTS, MAX_ITEMS } from '../../src/message/outbox.js'
 
 function deferred() {
   let resolve, reject
@@ -161,4 +161,159 @@ test('unexpected flush rejection releases single-flight guard for retry', async 
   await assert.rejects(outbox.flush(), /lookup failed/)
   await assert.rejects(outbox.flush(), /lookup failed/)
   assert.equal(outbox.pending().length, 1)
+})
+
+test('legacy text rows migrate and send within the default cap', async (t) => {
+  const calls = []
+  const f = fixture(t, async (message) => { calls.push(message.text) })
+  const longText = 'a'.repeat(DEFAULT_OUTBOX_MAX_MESSAGE_LENGTH + 7)
+  atomicWriteJson(outboxFile(f.stateRoot), {
+    schemaVersion: 1,
+    items: [{
+      id: 'legacy',
+      accountId: 'a',
+      conversationId: 'c',
+      text: longText,
+      createdAt: 1_000_000,
+      attempts: 0,
+      notBefore: 1_000_000,
+      lastError: '',
+    }],
+  })
+
+  const [item] = f.outbox.pending()
+  assert.equal(item.maxMessageLength, DEFAULT_OUTBOX_MAX_MESSAGE_LENGTH)
+  assert.deepEqual(item.segments.map((segment) => segment.length), [DEFAULT_OUTBOX_MAX_MESSAGE_LENGTH, 7])
+  assert.equal(f.outbox.pending()[0].nextSegment, 0)
+  assert.deepEqual(await f.outbox.flush(), { sent: 1, failed: 0, remaining: 0 })
+  assert.deepEqual(calls, ['a'.repeat(DEFAULT_OUTBOX_MAX_MESSAGE_LENGTH), 'a'.repeat(7)])
+})
+
+test('stored segments over a lower queue-time cap are split and progress is remapped', async (t) => {
+  const calls = []
+  const f = fixture(t, async (message) => { calls.push(message.text) })
+  atomicWriteJson(outboxFile(f.stateRoot), {
+    schemaVersion: 2,
+    items: [{
+      id: 'segmented-legacy',
+      accountId: 'a',
+      conversationId: 'c',
+      text: `${'x'.repeat(10)}${'y'.repeat(10)}`,
+      segments: ['x'.repeat(10), 'y'.repeat(10)],
+      nextSegment: 1,
+      maxMessageLength: 5,
+      createdAt: 1_000_000,
+      attempts: 0,
+      notBefore: 1_000_000,
+      lastError: '',
+    }],
+  })
+
+  const [item] = f.outbox.pending()
+  assert.equal(item.maxMessageLength, 5)
+  assert.deepEqual(item.segments.map((segment) => segment.length), [5, 5, 5, 5])
+  assert.equal(item.nextSegment, 2)
+  assert.deepEqual(await f.outbox.flush(), { sent: 1, failed: 0, remaining: 0 })
+  assert.deepEqual(calls, ['y'.repeat(5), 'y'.repeat(5)])
+})
+
+test('segmented send persists progress across a failed bubble and a restart', async (t) => {
+  const calls = []
+  let offline = true
+  const f = fixture(t, async (message) => {
+    calls.push(message.text)
+    if (message.text === 'middle' && offline) {
+      offline = false
+      throw new Error('offline')
+    }
+  })
+  f.outbox.enqueue({ accountId: 'a', conversationId: 'c', text: 'firstmiddletail', segments: ['first', 'middle', 'tail'] })
+
+  assert.deepEqual(await f.outbox.flush(), { sent: 0, failed: 1, remaining: 1 })
+  assert.deepEqual(f.outbox.pending()[0].segments, ['first', 'middle', 'tail'])
+  assert.equal(f.outbox.pending()[0].nextSegment, 1)
+
+  const afterRestart = createOutbox({ stateRoot: f.stateRoot, transportFor: () => ({ send: async (message) => { calls.push(message.text) } }) })
+  assert.deepEqual(await afterRestart.flush({ force: true }), { sent: 1, failed: 0, remaining: 0 })
+  assert.deepEqual(calls, ['first', 'middle', 'middle', 'tail'])
+})
+
+test('drop and enqueue during a segmented send keep the new row without releasing old suffixes', async (t) => {
+  const gate = deferred(), started = deferred(), calls = []
+  const f = fixture(t, async (message) => {
+    calls.push(message.text)
+    started.resolve()
+    await gate.promise
+  })
+  const old = f.outbox.enqueue({ accountId: 'a', conversationId: 'c', text: 'onetwothree', segments: ['one', 'two', 'three'] })
+  const flush = f.outbox.flush()
+  await started.promise
+  assert.equal(f.outbox.drop(old), true)
+  f.enqueue('new')
+  gate.resolve()
+
+  assert.deepEqual(await flush, { sent: 0, failed: 0, remaining: 1 })
+  assert.deepEqual(calls, ['one'])
+  await f.outbox.flush()
+  assert.deepEqual(calls, ['one', 'new'])
+  assert.deepEqual(f.outbox.pending(), [])
+})
+
+test('token expiry during a segmented retry strips the token without replaying the prefix', async (t) => {
+  const calls = []
+  let offline = true
+  const f = fixture(t, async (message) => {
+    calls.push({ text: message.text, contextToken: message.contextToken })
+    if (message.text === 'second' && offline) {
+      offline = false
+      throw new Error('token route failed')
+    }
+  })
+  f.outbox.enqueue({
+    accountId: 'a',
+    conversationId: 'c',
+    text: 'firstsecond',
+    segments: ['first', 'second'],
+    contextToken: 'synthetic-token',
+  })
+
+  assert.deepEqual(await f.outbox.flush(), { sent: 0, failed: 1, remaining: 1 })
+  f.advance(CONTEXT_TOKEN_TTL_MS)
+  assert.deepEqual(await f.outbox.flush({ force: true }), { sent: 1, failed: 0, remaining: 0 })
+  assert.deepEqual(calls, [
+    { text: 'first', contextToken: 'synthetic-token' },
+    { text: 'second', contextToken: 'synthetic-token' },
+    { text: 'second', contextToken: undefined },
+  ])
+})
+
+test('enqueue throws and does not report success when the queue cannot be persisted', (t) => {
+  const f = fixture(t)
+  const originalRename = fs.renameSync
+  t.mock.method(fs, 'renameSync', (from, to) => {
+    if (to === outboxFile(f.stateRoot)) throw new Error('simulated rename failure')
+    return originalRename(from, to)
+  })
+
+  assert.throws(() => f.enqueue('must persist'), /could not persist outbox\.json/)
+  assert.deepEqual(f.outbox.pending(), [])
+})
+
+test('queue persistence failure after a sent segment stops the flush before the next segment', async (t) => {
+  const calls = []
+  const f = fixture(t, async (message) => { calls.push(message.text) })
+  f.outbox.enqueue({ accountId: 'a', conversationId: 'c', text: 'onetwothree', segments: ['one', 'two', 'three'], maxMessageLength: 5 })
+  const originalRename = fs.renameSync
+  let renameAttempts = 0
+  t.mock.method(fs, 'renameSync', (from, to) => {
+    if (to === outboxFile(f.stateRoot)) {
+      renameAttempts += 1
+      throw new Error('simulated rename failure')
+    }
+    return originalRename(from, to)
+  })
+
+  await assert.rejects(f.outbox.flush(), /could not persist outbox\.json/)
+  assert.deepEqual(calls, ['one'])
+  assert.equal(renameAttempts, 1)
 })

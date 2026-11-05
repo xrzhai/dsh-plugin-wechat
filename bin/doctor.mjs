@@ -24,6 +24,7 @@ import { verifyAuditChain } from '../src/message/audit.js'
 import { backupsDir, listBackups, stampFor } from '../src/backup.js'
 import { describeHost, detectHostVersion, hostStatus } from '../src/host-compat.js'
 import { statePath } from '../src/state-layout.js'
+import { allowlistForAccount } from '../src/account-registry.js'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const results = []
@@ -50,14 +51,38 @@ function stateRoot() {
   return path.join(os.homedir(), '.dsh', 'weixin')
 }
 
-function checkNode() {
-  const major = Number(process.versions.node.split('.')[0])
-  if (major >= 20) ok(`node ${process.versions.node}`)
-  else bad(`node ${process.versions.node}`, 'the plugin needs Node 20 or newer')
+function parseMinimumNode(requirement) {
+  const match = typeof requirement === 'string' ? requirement.match(/(?:^|[^0-9])(\d+)\.(\d+)\.(\d+)/) : null
+  if (match === null) return null
+  return [Number(match[1]), Number(match[2]), Number(match[3])]
 }
 
-function checkPackage() {
-  const pkg = pkgJson()
+function versionAtLeast(actual, minimum) {
+  for (let index = 0; index < minimum.length; index += 1) {
+    if (actual[index] > minimum[index]) return true
+    if (actual[index] < minimum[index]) return false
+  }
+  return true
+}
+
+function checkNode(pkg) {
+  const requirement = pkg?.engines?.node
+  const minimum = parseMinimumNode(requirement)
+  if (minimum === null) {
+    return bad('node', 'package.json does not contain a usable engines.node minimum')
+  }
+  const actual = process.versions.node.split('.').map(Number)
+  if (versionAtLeast(actual, minimum)) {
+    ok(`node ${process.versions.node}`, `meets package.json engines.node ${requirement}`)
+  } else {
+    bad(
+      `node ${process.versions.node}`,
+      `package.json requires Node ${minimum.join('.')} or newer (${requirement})`,
+    )
+  }
+}
+
+function checkPackage(pkg = pkgJson()) {
   if (pkg.__error !== undefined) return bad('package.json', pkg.__error)
   ok(`installed version ${pkg.version}`)
   const deps = Object.keys(pkg.dependencies ?? {})
@@ -81,23 +106,68 @@ function checkStateDir(root) {
   }
 }
 
+function credentialAccounts(root) {
+  const dir = path.join(root, 'openclaw-weixin', 'accounts')
+  let names
+  try {
+    names = fs.readdirSync(dir)
+  } catch (error) {
+    return { dir, accounts: [], error: error?.code === 'ENOENT' ? undefined : error }
+  }
+  const accounts = names
+    .filter((name) => name.endsWith('.json') && name.endsWith('.sync.json') === false)
+    .flatMap((name) => {
+      const accountId = name.slice(0, -'.json'.length)
+      if (accountId === '' || path.basename(accountId) !== accountId) return []
+      const account = readJson(path.join(dir, name))
+      const token = typeof account.token === 'string' ? account.token : ''
+      return token === '' ? [] : [{ accountId, name, account }]
+    })
+  return { dir, accounts }
+}
+
+function senderCount(value) {
+  return Array.isArray(value)
+    ? value.filter((sender) => typeof sender === 'string' && sender.trim() !== '').length
+    : 0
+}
+
+function checkEffectiveAllowlist(root, config) {
+  const signedIn = credentialAccounts(root).accounts
+  if (signedIn.length === 0) {
+    return bad('allowed senders', 'no signed-in account — bind one before the allowlist can authorize messages')
+  }
+
+  // Reuse the runtime's account-level override resolution. In particular, a
+  // blank global list is not empty for an account whose first contact has
+  // already been enrolled; that enrollment lives in accounts-registry.json.
+  const effective = signedIn.map(({ accountId }) =>
+    senderCount(allowlistForAccount(accountId, config).allowedSenders))
+  const authorized = effective.filter((count) => count > 0).length
+  if (authorized === signedIn.length) {
+    const globalCount = senderCount(config.allowedSenders)
+    return ok(
+      'allowed senders',
+      `authorized for ${authorized} signed-in account(s)` +
+        (globalCount > 0 ? `; global list has ${globalCount} sender(s)` : '; account-level lists are in use'),
+    )
+  }
+  bad(
+    'allowed senders',
+    `${signedIn.length - authorized} of ${signedIn.length} signed-in account(s) have an empty effective allowlist`,
+  )
+}
+
 function checkConfig(root) {
   const file = path.join(root, 'config.json')
+  let config = {}
   if (fs.existsSync(file) !== true) {
     note('config', 'not written yet — defaults are in use until the settings card saves')
-    // No config means no allowlist, and an empty allowlist means the bot
-    // answers nobody. Saying that here is the whole point of the check.
-    bad('allowed senders', 'empty — the bot will answer nobody. Open the card, add your wxid and save.')
-    return undefined
-  }
-  const config = readJson(file)
-  if (config.__error !== undefined) return bad('config', `${file}: ${config.__error}`)
-  const allowed = Array.isArray(config.allowedSenders) ? config.allowedSenders : []
-  if (allowed.length === 0) {
-    bad('allowed senders', 'empty — the bot will answer nobody. Add your wxid in the settings card.')
   } else {
-    ok('allowed senders', `${allowed.length} sender(s)`)
+    config = readJson(file)
+    if (config.__error !== undefined) return bad('config', `${file}: ${config.__error}`)
   }
+  checkEffectiveAllowlist(root, config)
   if (config.asrEnabled === true) {
     const modelDir = typeof config.asrModelDir === 'string' ? config.asrModelDir : ''
     if (modelDir === '' || fs.existsSync(modelDir) !== true) {
@@ -110,17 +180,19 @@ function checkConfig(root) {
 }
 
 function checkAccounts(root) {
-  const dir = path.join(root, 'openclaw-weixin', 'accounts')
+  const { dir, accounts, error } = credentialAccounts(root)
+  if (error !== undefined) return bad('weixin account', `${dir}: ${String(error)}`)
   if (fs.existsSync(dir) !== true) return bad('weixin account', 'never logged in — open the card and scan the QR code')
   const files = fs.readdirSync(dir).filter((name) => name.endsWith('.json') && name.endsWith('.sync.json') === false)
   if (files.length === 0) return bad('weixin account', `${dir} has no account file — log in again`)
+  const withCredentials = new Set(accounts.map((account) => account.name))
   for (const name of files) {
     const file = path.join(dir, name)
     const account = readJson(file)
     if (account.__error !== undefined) { bad(`account ${name}`, account.__error); continue }
     const token = typeof account.token === 'string' ? account.token : ''
     if (token === '') bad(`account ${name}`, 'no token in the file — log in again')
-    else ok(`account ${name}`, `token present, saved ${account.savedAt ?? 'unknown'}`)
+    else if (withCredentials.has(name)) ok(`account ${name}`, `token present, saved ${account.savedAt ?? 'unknown'}`)
   }
 }
 
@@ -207,7 +279,8 @@ function checkHost() {
   note('host app', describeHost(version))
 }
 
-function checkRegistryVersion() {
+function checkRegistryVersion(offline) {
+  if (offline) return note('published version', 'skipped (--offline)')
   const pkg = pkgJson()
   if (pkg.__error !== undefined) return
   try {
@@ -249,7 +322,11 @@ const WALK_SKIP = new Set(['asr-models'])
 function parseArgs(argv) {
   const args = argv.slice(2)
   const dryRun = args.includes('--dry-run')
-  return { repairing: args.includes('--fix') || dryRun, dryRun }
+  return {
+    repairing: args.includes('--fix') || dryRun,
+    dryRun,
+    offline: args.includes('--offline') || process.env.DSH_WEIXIN_DOCTOR_OFFLINE === '1',
+  }
 }
 
 /** A `.broken-<stamp>` name no existing file is using, so a rename never overwrites. */
@@ -447,10 +524,11 @@ function printFixes({ changes, failed }, dryRun) {
 }
 
 function main() {
-  const { repairing, dryRun } = parseArgs(process.argv)
+  const { repairing, dryRun, offline } = parseArgs(process.argv)
   const root = stateRoot()
-  checkNode()
-  checkPackage()
+  const pkg = pkgJson()
+  checkNode(pkg)
+  checkPackage(pkg)
   checkStateDir(root)
   const config = checkConfig(root)
   checkAccounts(root)
@@ -460,7 +538,7 @@ function main() {
   checkBackups(root)
   checkHost()
   checkRecentErrors(root)
-  checkRegistryVersion()
+  checkRegistryVersion(offline)
   if (config !== undefined && config.voiceOutbound === true) {
     note('voice outbound', 'enabled — measured: the server accepts a bot voice item and does not deliver it')
   }

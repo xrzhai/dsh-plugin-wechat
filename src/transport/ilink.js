@@ -20,6 +20,7 @@ import { MessageItemType, MessageState, MessageType, TypingStatus } from '../../
 import { getSyncBufFilePath, loadGetUpdatesBuf, saveGetUpdatesBuf } from '../../vendor/openclaw-weixin/storage/sync-buf.js'
 import { CDN_BASE_URL as DEFAULT_CDN_BASE_URL } from '../../vendor/openclaw-weixin/auth/accounts.js'
 import { OutboundPacer } from '../message/rate-limit.js'
+import { createInboundPendingStore } from '../message/inbound-pending.js'
 import { parseQuote } from '../message/quote.js'
 
 /** Consecutive failures tolerated before the long backoff kicks in. */
@@ -270,11 +271,13 @@ export function normalizeInbound(raw) {
  * @param {(message: any) => Promise<void>} options.onMessage
  * @param {(line: string) => void} options.errLog
  * @param {(message: any) => boolean} [options.bypass]
+ * @param {(conversationId: string) => void} [options.onCapacity]
+ *   Called after one conversation has released scheduler capacity.
  */
-export function createInboundScheduler({ onMessage, errLog, bypass = () => false, maxQueuePerConversation = 0, onQueueFull }) {
+export function createInboundScheduler({ onMessage, errLog, bypass = () => false, maxQueuePerConversation = 0, onQueueFull, onCapacity }) {
   /** @type {Map<string, Promise<void>>} conversation id → tail of its chain */
   const chains = new Map()
-  /** @type {Map<string, number>} conversation id → queued handles (not counting a running one) */
+  /** @type {Map<string, number>} conversation id → admitted handles, including the running one */
   const queued = new Map()
   /** @type {Set<Promise<void>>} everything still running, for {@link drain} */
   const running = new Set()
@@ -306,9 +309,9 @@ export function createInboundScheduler({ onMessage, errLog, bypass = () => false
      */
     dispatch(message) {
       if (bypass(message) === true) return track(run(message))
-      // A full queue is refused, not grown: accepting the message would mean
-      // paying for a reply the user has moved on from, and the chain would keep
-      // the bot unresponsive for minutes.
+      // The scheduler refuses admission at the cap. The transport keeps the
+      // durable record in its per-conversation overflow FIFO and asks again
+      // when this conversation releases a slot.
       const waiting = queued.get(message.conversationId) ?? 0
       if (maxQueuePerConversation > 0 && waiting >= maxQueuePerConversation) {
         onQueueFull?.(message, waiting)
@@ -330,6 +333,11 @@ export function createInboundScheduler({ onMessage, errLog, bypass = () => false
         if (left <= 0) queued.delete(message.conversationId)
         else queued.set(message.conversationId, left)
         if (chains.get(message.conversationId) === next) chains.delete(message.conversationId)
+        try {
+          onCapacity?.(message.conversationId)
+        } catch (error) {
+          errLog(`inbound capacity callback failed: ${String(error)}`)
+        }
       }))
     },
 
@@ -338,7 +346,7 @@ export function createInboundScheduler({ onMessage, errLog, bypass = () => false
       return running.size
     },
 
-    /** How many messages are waiting behind a running turn for one conversation. */
+    /** How many admitted handles, including the running turn, one conversation owns. */
     queuedFor(conversationId) {
       return queued.get(conversationId) ?? 0
     },
@@ -382,6 +390,14 @@ export class ILinkTransport {
    * @param {boolean} [options.voiceOutbound]  Audio attachments go out as Weixin
    *   voice messages (SILK) instead of file attachments. Default true; a failed
    *   voice send falls back to the file path inside {@link sendMedia}.
+   * @param {ReturnType<typeof createInboundPendingStore>} [options.pendingStore]
+   *   Test seam for the crash-safe inbound ledger.
+   * @param {typeof notifyStart} [options.notifyStart]
+   * @param {typeof notifyStop} [options.notifyStop]
+   *   Test seams; the defaults are the vendor network calls.
+   * @param {number} [options.inboundRetryBaseMs]
+   *   Test seam for retrying a durable queued record whose `started` marker
+   *   could not be persisted. Production uses a one-second initial delay.
    */
   constructor(options) {
     this.accountId = options.accountId
@@ -411,6 +427,14 @@ export class ILinkTransport {
     this.#onSessionRejected = options.onSessionRejected
     this.#bypassQueue = options.bypassQueue ?? (() => false)
     this.syncBufPath = getSyncBufFilePath(this.accountId)
+    this.pendingStore = options.pendingStore ?? createInboundPendingStore({
+      accountId: this.accountId,
+      syncBufPath: this.syncBufPath,
+      warn: this.errLog,
+    })
+    this.#notifyStart = options.notifyStart ?? notifyStart
+    this.#notifyStop = options.notifyStop ?? notifyStop
+    this.inboundRetryBaseMs = Math.max(1, Number(options.inboundRetryBaseMs ?? 1_000))
     this.abort = new AbortController()
     this.running = false
     this.loopPromise = null
@@ -435,6 +459,20 @@ export class ILinkTransport {
   #bypassQueue
   /** @type {ReturnType<typeof createInboundScheduler> | undefined} */
   #scheduler
+  /** @type {typeof notifyStart} */
+  #notifyStart
+  /** @type {typeof notifyStop} */
+  #notifyStop
+  /** @type {WeakMap<object, { key: string, message: any }>} */
+  #messageRecords = new WeakMap()
+  /** @type {Set<string>} */
+  #scheduledRecords = new Set()
+  /** @type {Map<string, Array<{ key: string, message: any }>>} */
+  #overflow = new Map()
+  /** @type {Set<string>} */
+  #warnedRecords = new Set()
+  #recoveryBlocked = false
+  #recoveryFailureWarned = false
 
   /**
    * @param {(message: any) => Promise<void>} onMessage
@@ -443,6 +481,19 @@ export class ILinkTransport {
     if (this.running) return
     this.running = true
     this.abort = new AbortController()
+    this.#scheduler = createInboundScheduler({
+      onMessage: (message) => this.#runPersisted(message, onMessage),
+      errLog: this.errLog,
+      bypass: this.#bypassQueue,
+      maxQueuePerConversation: this.maxQueuePerConversation,
+      onCapacity: (conversationId) => this.#flushOverflow(conversationId),
+    })
+
+    // Recover before the first getUpdates call. Only records that never
+    // entered the handler are safe to replay; an interrupted engineering turn
+    // may already have produced files, commands, or remote side effects.
+    this.#attemptRecovery()
+
     // Best-effort startup notification; a failure here must not block polling.
     // Bounded: the vendor's own timeout is cleared the moment response HEADERS
     // arrive, so a server that stalls the body leaves notifyStart pending
@@ -450,19 +501,12 @@ export class ILinkTransport {
     // the whole transport dead (no poll, no watchdog) against exactly the kind
     // of server this file's watchdog exists for. Race it with a deadline; a
     // lost race just skips the notification.
-    const notified = notifyStart({ baseUrl: this.baseUrl, token: this.token })
+    const notified = this.#notifyStart({ baseUrl: this.baseUrl, token: this.token })
     const notifyDeadline = deadline(this.longPollTimeoutMs * 2 + 10_000).then(() => 'deadline')
     const outcome = await Promise.race([notified.then(() => 'notified', (error) => { this.log(`notifyStart failed (continuing): ${String(error)}`); return 'notified' }), notifyDeadline])
     if (outcome === 'deadline') {
       this.log(`notifyStart did not answer within ${this.longPollTimeoutMs * 2 + 10_000}ms (headers arrived, body never did); continuing without it`)
     }
-    this.#scheduler = createInboundScheduler({
-      onMessage,
-      errLog: this.errLog,
-      bypass: this.#bypassQueue,
-      maxQueuePerConversation: this.maxQueuePerConversation,
-      onQueueFull: (message, waiting) => this.errLog(`message ${message.id || '(no id)'} refused: ${waiting} already waiting for ${message.conversationId}`),
-    })
     // Even with the catch above, an escape from a future edit must degrade to a
     // log line, never to an unhandled rejection: the host treats one as fatal.
     this.loopPromise = this.#loop().catch((error) => {
@@ -470,9 +514,43 @@ export class ILinkTransport {
     })
   }
 
+  /** @returns {boolean} whether recovery state is readable */
+  #attemptRecovery() {
+    try {
+      const recovery = this.pendingStore.recover()
+      this.#recoveryBlocked = false
+      this.#recoveryFailureWarned = false
+      if (recovery.queued.length > 0) {
+        this.log(`recovering ${recovery.queued.length} inbound message(s) that were durably queued before restart`)
+        for (const record of recovery.queued) this.#scheduleRecord(record)
+      }
+      if (recovery.unresolved > 0) {
+        this.errLog(
+          `inbound recovery: ${recovery.unresolved} message(s) had started or have unreadable records; ` +
+          `not replaying them automatically because side effects cannot be ruled out (review ${this.pendingStore.dir})`,
+        )
+      }
+      return true
+    } catch (error) {
+      this.#recoveryBlocked = true
+      if (!this.#recoveryFailureWarned) {
+        this.#recoveryFailureWarned = true
+        this.errLog(
+          'inbound recovery could not read the pending ledger; cursor advancement is blocked ' +
+          `until it is repaired (retrying without consuming inbound messages): ${String(error)}`,
+        )
+      }
+      return false
+    }
+  }
+
   async #loop() {
     let consecutiveFailures = 0
     while (this.running && !this.abort.signal.aborted) {
+      if (this.#recoveryBlocked && !this.#attemptRecovery()) {
+        await interruptibleSleep(RETRY_DELAY_MS, () => this.running)
+        continue
+      }
       let buf = loadGetUpdatesBuf(this.syncBufPath)
       // The vendor's own timeout only covers the fetch() call — it is cleared
       // the moment response HEADERS arrive, and `res.text()` (the body read)
@@ -552,22 +630,35 @@ export class ILinkTransport {
           throw new SessionRejectedError(resp.errcode, resp.errmsg)
         }
         consecutiveFailures = 0
-        if (typeof resp.get_updates_buf === 'string' && resp.get_updates_buf !== buf) {
-          saveGetUpdatesBuf(this.syncBufPath, resp.get_updates_buf)
-        }
         // Honour a server-directed shorter poll interval.
         if (typeof resp.longpolling_timeout_ms === 'number' && resp.longpolling_timeout_ms > 0) {
           this.longPollTimeoutMs = resp.longpolling_timeout_ms
         }
         const msgs = Array.isArray(resp.msgs) ? resp.msgs : []
+        /** @type {Array<{ key: string, message: any }>} */
+        const staged = []
         for (const raw of msgs) {
           const message = normalizeInbound(raw)
           if (message === null) continue
-          // Hand off and move on. The scheduler keeps per-conversation order
-          // and lets `/cancel` jump the queue; awaiting here would park the
-          // loop inside the turn, so no later message (cancel included) could
-          // be read until it finished — the defect this replaced.
-          this.#scheduler?.dispatch(message)
+          const record = this.pendingStore.stage(message)
+          if (record.status === 'completed') continue
+          if (record.status === 'queued') {
+            staged.push({ key: record.key, message: record.message })
+          } else if (record.status === 'started' || record.status === 'uncertain') {
+            this.errLog(`message ${message.id || '(no id)'} is already ${record.status} in the inbound ledger; not replaying it`)
+          } else {
+            this.errLog(`message ${message.id || '(no id)'} has an unreadable inbound ledger record; not replaying it`)
+          }
+        }
+        // Every accepted message is fsynced above. Only now is it safe to
+        // tell the server that this batch has been consumed.
+        if (typeof resp.get_updates_buf === 'string' && resp.get_updates_buf !== buf) {
+          saveGetUpdatesBuf(this.syncBufPath, resp.get_updates_buf)
+        }
+        for (const record of staged) {
+          // Hand off after the cursor write. The scheduler keeps
+          // per-conversation order while `/cancel` can still jump the queue.
+          this.#scheduleRecord(record)
         }
       } catch (error) {
         // stop() flips `running` before aborting, so a watchdog abort on a
@@ -605,6 +696,142 @@ export class ILinkTransport {
         }
       }
     }
+  }
+
+  /**
+   * Durably cross the replay boundary before invoking the host pipeline.
+   * A process crash after this point leaves an ambiguous `started` record and
+   * recovery intentionally does not invoke the handler again.
+   *
+   * @param {any} message
+   * @param {(message: any) => Promise<void>} onMessage
+   */
+  async #runPersisted(message, onMessage) {
+    const record = this.#messageRecords.get(message)
+    if (record === undefined) throw new Error('inbound message has no persistence record')
+    let claimed
+    let claimAttempts = 0
+    while (true) {
+      try {
+        claimed = this.pendingStore.claim(record.key)
+        break
+      } catch {
+        // Keep this conversation's scheduler slot occupied until the durable
+        // `queued` record can cross the replay boundary. Returning here would
+        // let later messages from the same conversation overtake it.
+        claimAttempts += 1
+        const delay = Math.min(30_000, this.inboundRetryBaseMs * (2 ** Math.min(5, claimAttempts - 1)))
+        this.#warnOnce(
+          record,
+          `message ${message.id || '(no id)'} remains durably queued because its started marker could not be persisted; retrying in ${delay}ms without running the handler`,
+        )
+        await interruptibleSleep(delay, () => this.running)
+        if (!this.running) return
+      }
+    }
+    if (claimed.ok !== true) {
+      this.#warnOnce(
+        record,
+        `message ${message.id || '(no id)'} is not safely replayable (ledger state: ${claimed.state}); it remains visible but will not retry automatically`,
+      )
+      return
+    }
+    try {
+      await onMessage(message)
+    } catch (error) {
+      try {
+        this.pendingStore.markUncertain(record.key)
+      } catch (markError) {
+        this.errLog(`inbound message ${message.id || '(no id)'} failed and its uncertain state could not be updated: ${String(markError)}`)
+      }
+      this.errLog(`inbound message ${message.id || '(no id)'} failed after starting; it is retained and will not replay automatically`)
+      throw error
+    }
+    if (this.pendingStore.complete(record.key) !== true) {
+      throw new Error('inbound handler finished but its completion marker could not be persisted')
+    }
+    this.#warnedRecords.delete(record.key)
+  }
+
+  /** @param {{ key: string, message: any }} record */
+  #scheduleRecord(record) {
+    if (this.#scheduledRecords.has(record.key)) return
+    // A `/cancel` has to jump both the scheduler's chain and any durable
+    // overflow items, exactly as it jumped the in-memory queue before.
+    if (this.#bypassQueue(record.message)) {
+      this.#dispatchRecord(record)
+      return
+    }
+    const conversationId = String(record.message?.conversationId ?? '')
+    const overflow = this.#overflow.get(conversationId)
+    if (overflow !== undefined && overflow.length > 0) {
+      if (this.#appendOverflow(record, conversationId)) {
+        this.#warnOnce(
+          record,
+          `message ${record.message?.id || '(no id)'} remains durably queued for ${conversationId || '(no conversation)'}; it will retry when that conversation has capacity`,
+        )
+      }
+      this.#flushOverflow(conversationId)
+      return
+    }
+    if (this.#dispatchRecord(record)) return
+    this.#appendOverflow(record, conversationId)
+    this.#warnOnce(
+      record,
+      `message ${record.message?.id || '(no id)'} remains durably queued for ${conversationId || '(no conversation)'}; it will retry when that conversation has capacity`,
+    )
+  }
+
+  /** @param {{ key: string, message: any }} record */
+  #dispatchRecord(record) {
+    this.#scheduledRecords.add(record.key)
+    this.#messageRecords.set(record.message, { key: record.key, message: record.message })
+    const run = this.#scheduler?.dispatch(record.message)
+    if (run === undefined) {
+      this.#scheduledRecords.delete(record.key)
+      return false
+    }
+    void run.then(
+      () => this.#scheduledRecords.delete(record.key),
+      () => this.#scheduledRecords.delete(record.key),
+    )
+    return true
+  }
+
+  /** @param {{ key: string, message: any }} record @param {string} conversationId */
+  #appendOverflow(record, conversationId) {
+    const queue = this.#overflow.get(conversationId) ?? []
+    if (!queue.some((entry) => entry.key === record.key)) {
+      queue.push({ key: record.key, message: record.message })
+      this.#overflow.set(conversationId, queue)
+      return true
+    }
+    return false
+  }
+
+  /** @param {string} conversationId */
+  #flushOverflow(conversationId) {
+    if (!this.running) return
+    const queue = this.#overflow.get(conversationId)
+    if (queue === undefined || queue.length === 0) {
+      this.#overflow.delete(conversationId)
+      return
+    }
+    while (queue.length > 0) {
+      const head = queue[0]
+      if (!this.#dispatchRecord(head)) return
+      // Remove the entry that was actually dispatched by identity.
+      const dispatchedAt = queue.indexOf(head)
+      if (dispatchedAt >= 0) queue.splice(dispatchedAt, 1)
+    }
+    this.#overflow.delete(conversationId)
+  }
+
+  /** @param {{ key: string, message: any }} record @param {string} line */
+  #warnOnce(record, line) {
+    if (this.#warnedRecords.has(record.key)) return
+    this.#warnedRecords.add(record.key)
+    this.errLog(line)
   }
 
   /**
@@ -826,7 +1053,7 @@ export class ILinkTransport {
       // timeout is cleared at headers, so a body-stalling server would hang
       // shutdown forever. Best-effort either way.
       await Promise.race([
-        notifyStop({ baseUrl: this.baseUrl, token: this.token }),
+        this.#notifyStop({ baseUrl: this.baseUrl, token: this.token }),
         deadline(this.longPollTimeoutMs * 2 + 10_000),
       ])
     } catch {

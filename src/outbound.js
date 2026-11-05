@@ -159,11 +159,12 @@ export async function sendChunked(transport, config, message) {
       runtime.hooks?.emit(HOOK_POINTS.outboundSettled, { accountId: transport.accountId, conversationId: message.conversationId, sent: true })
     } catch (error) {
       // A send that fails here used to lose the text forever: the model had
-      // already written it and nothing held a copy. Queue it instead — the
-      // outbox retries with backoff and survives a restart. Only the first
-      // failing chunk is queued together with the rest, so a reply does not
-      // arrive half-delivered out of order later on.
-      const pending = chunks.slice(index).join('')
+      // already written it and nothing held a copy. Queue the exact unsent
+      // bubbles, not their concatenation: the outbox retries them one by one and
+      // records progress after each success, so neither a retry nor a restart
+      // can resend the successful prefix or create one oversized message.
+      const pendingChunks = chunks.slice(index)
+      const pending = pendingChunks.join('')
       // Ephemeral sends (progress notes, "still working" lines) must never
       // become durable dead letters: a "running: pwsh (13m)" note retried an
       // hour later is noise at best, and it rides an inbound context token that
@@ -181,7 +182,14 @@ export async function sendChunked(transport, config, message) {
         return
       }
       if (runtime.outbox !== undefined) {
-        runtime.outbox.enqueue({ accountId: transport.accountId, conversationId: message.conversationId, text: pending, contextToken: message.contextToken })
+        runtime.outbox.enqueue({
+          accountId: transport.accountId,
+          conversationId: message.conversationId,
+          text: pending,
+          segments: pendingChunks,
+          contextToken: message.contextToken,
+          maxMessageLength: config.maxMessageLength,
+        })
         runtime.hooks?.emit(HOOK_POINTS.outboundSettled, { accountId: transport.accountId, conversationId: message.conversationId, sent: false, queued: pending.length })
         runtime.warn(`send failed (${String(error?.message ?? error)}); queued ${pending.length} chars for retry`)
         return

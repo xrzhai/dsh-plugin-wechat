@@ -23,16 +23,14 @@ Send a message from WeChat on your phone to wake and steer DSH Agents running on
 
 ## 1. Positioning & Acknowledgment
 
-This project is an engineering-focused evolution of **[panqing0313](https://github.com/panqing0313)**'s pioneering open-source plugin [`dsh-plugin-weixin`](https://github.com/panqing0313/dsh-plugin-weixin).
+This project is an engineering-focused evolution of **[panqing0313](https://github.com/panqing0313)**'s pioneering open-source plugin [`dsh-plugin-weixin`](https://github.com/panqing0313/dsh-plugin-weixin). **This repository is a self-contained standalone package (bundling the plugin core, UI, installer, and vendored WeChat iLink transport) — you only need this repository and a configured DSH installation, without installing the upstream plugin first.**
 
-We extend our sincere gratitude to **panqing0313** for establishing the non-intrusive WeChat iLink Bot API transport bridge (vendored from Tencent's MIT-licensed `@tencent-weixin/openclaw-weixin`), multi-account polling, local Whisper ASR bridge, and the comprehensive multi-tab Settings Card UI.
+We extend our sincere gratitude to **panqing0313** for establishing the non-intrusive WeChat iLink Bot API transport bridge (vendored from Tencent's MIT-licensed `@tencent-weixin/openclaw-weixin`), multi-account polling, local Whisper ASR bridge, and the Settings Card UI.
 
 ### Why This Evolution? (Fork Positioning)
 
 - **Upstream ([`panqing0313/dsh-plugin-weixin`](https://github.com/panqing0313/dsh-plugin-weixin))**: Designed as a **full-featured companion chatbot**, complete with emotional memory injection, affinity curves, inferred life states, human-like bubble splitting delays, and character personas.
 - **This Repository ([`xrzhai/dsh-plugin-wechat`](https://github.com/xrzhai/dsh-plugin-wechat))**: Designed as a **production-grade remote engineering control surface** for developers and researchers running heavy workflows on DSH 0.2.2+.
-
-When DSH is used for long-running shell tasks, concurrent asynchronous Subagent orchestration, and multi-project parallel sessions, the gateway must guarantee **Zero Prompt Pollution**, **Zero Dropped Subagent Replies**, and **Safe Cross-Session Dispatching**:
 
 | Dimension | Upstream Companion Edition (`dsh-plugin-weixin`) | Engineering Control Edition (`dsh-plugin-wechat`) | Core Engineering Guarantee |
 | :--- | :--- | :--- | :--- |
@@ -41,14 +39,22 @@ When DSH is used for long-running shell tasks, concurrent asynchronous Subagent 
 | **Same-Turn Trailing Silent Recovery** | Checks only the final text of a turn | **`replyBeforeSilent` state-machine recovery** | Rescues a completed Step 1 reply (`finish(stop)`) when a subagent exit triggers a steered Step 2 `[SILENT]` within the same turn |
 | **Parallel Session Dispatch** | Bound to a single isolated WeChat session line | **`SessionDispatcher` (`list / query / dispatch`)** | Inspect and control other active desktop project sessions (`followup`, `steer`, `cancel`) from WeChat under strict dual allowlists |
 | **Code Block Delivery Fidelity** | Converts code blocks >1200 chars into file attachments | **Forces `richContent: false` plain-text chunking** | Ensures dispatched code & logs always arrive in full as text bubbles, never lost to CDN media upload failures |
-| **8-Min Token TTL & Outbox Self-Healing** | Retries expired `context_token`; transient notes pile up as dead letters | **`sendToken()` refresh + `durable:false` + `prune()`** | Refreshes typing ticket after 8m for long turns; drops failed progress notes immediately; prunes exhausted dead letters |
-| **Live Gateway Switch & Path Sandbox** | Toggling `enabled` may require restart; basic file checks | **`Live Gateway Switch` drain + `realpathSync` sandbox** | Hot-starts/stops polling on save while draining in-flight turns; blocks symlink traversal and deduplicates canonical paths |
+| **Inbound Durability & Crash Safety** | In-memory consumption; restarts can drop pending work | **`inbound-pending` journal before cursor advance** | Unstarted messages recover on restart; interrupted in-flight turns log a warning without auto-rerunning side-effecting commands |
+| **Outbound Breakpoint Resume & Token TTL** | Resends full text; retries expired `context_token`; transient notes pile up | **Segment resume (At-least-once) + 8m refresh + `durable:false`** | Tracks sent segments to resume from breakpoint; refreshes typing ticket after 8m; drops failed progress notes immediately |
+| **Control Panel & Live Gateway Switch** | 13 general tabs; RPC errors shown as logged-out | **Focused 4-Tab Engineering UI + `Live Gateway Switch`** | Focuses on Accounts, Sessions, Workspace Instructions (`AGENTS.md`), and Gateway Options; hot-starts/stops polling while draining turns |
 
 ---
 
-## 2. Quick Start
+## 2. Quick Start (Install, Bind, Upgrade & Uninstall)
 
-### Option A: Install into DSH Profile from Source
+### 2.1 Prerequisites
+1. Install and launch DSH at least once (default profile: `desktop`), configure a model, and verify desktop chat works.
+2. Install Git, Node.js **>= 22.13.0**, and `pnpm`.
+3. Finish active DSH tasks and exit DSH before installing or upgrading.
+
+### 2.2 Clone & Install
+
+In a directory where you intend to keep the checkout:
 
 ```bash
 git clone https://github.com/xrzhai/dsh-plugin-wechat.git
@@ -57,39 +63,32 @@ pnpm install
 node bin/install.mjs --profile desktop
 ```
 
-### Option B: Local Developer `link:` Mount
+The installer validates runtime dependencies, registers `dsh-plugin-wechat` (`link:` dependency + bundle entry) in the target profile, and cleans up legacy mounts (pass `--pin` if your profile uses a frozen lockfile).
 
-In `~/.dsh/profiles/desktop/package.json`:
+> **Seamless Migration**: The internal Cordis row ID remains `dsh-weixin` and the state directory remains `~/.dsh/weixin/` (`0600`). Migrating from `dsh-plugin-weixin` preserves all bound WeChat accounts, allowlists, session lines, and preferences without re-scanning QR codes.
 
-```json
-{
-  "dependencies": {
-    "dsh-plugin-wechat": "link:D:/Projects/dsh-plugin-wechat"
-  },
-  "dsh": {
-    "profile": {
-      "bundles": [
-        "@deepseek-ai/dsh-base",
-        "@deepseek-ai/dsh-web-app",
-        "dsh-plugin-wechat"
-      ]
-    }
-  }
-}
+### 2.3 Bind WeChat & Verify
+
+1. Reopen DSH and open **Settings → Plugins → WeChat BOT** (or click **WeChat BOT** in the left sidebar).
+2. In **Gateway Options**, set the default working directory (`cwd`) to your project path.
+3. In **WeChat Accounts**, click **Scan QR to Log In** (or run `npm run login` in terminal).
+4. **Send the first message yourself**: `allowedSenders` starts empty (deny-by-default). The sender of the first inbound message on a newly bound account is automatically enrolled as the owner. Send `/status` and a test question to verify connectivity.
+   - If the UI reports a connection error, click **Retry** or restart DSH; only rescan when it explicitly reports an expired session.
+
+```bash
+npm run onboard            # Readiness checklist
+npm run doctor -- --offline # 13-point offline health check
 ```
 
-> **Seamless Migration**: The internal Cordis row ID remains `dsh-weixin` and the state directory remains `~/.dsh/weixin/` (`0600`). Migrating from `dsh-plugin-weixin` preserves all logged-in WeChat accounts, allowlists, session lines, and preferences without re-scanning QR codes.
+### 2.4 Upgrade & Uninstall
 
-### Login & First-Contact Auto-Authorization
+```bash
+# Upgrade (exit DSH first)
+git pull && pnpm install && node bin/install.mjs --profile desktop
 
-1. Open **Settings → Plugins → WeChat BOT** (or click **WeChat BOT** in the left sidebar) and click **Scan QR to Log In** (or run `npm run login` in terminal). No host restart required.
-2. **Deny-by-default**: `allowedSenders` starts empty. The sender of the **first inbound message** on a newly bound account is automatically registered as the owner and allowed; all subsequent strangers are blocked until explicitly allowlisted.
-3. **Health Check**:
-   ```bash
-   npm run onboard          # Readiness checklist (exit code 0 = ready)
-   npm run doctor           # 13-point health check
-   npm run doctor -- --fix  # Auto-fix directory permissions and stale temp files
-   ```
+# Uninstall (unlinks from profile while keeping this checkout, credentials, and history)
+node bin/install.mjs --profile desktop --uninstall
+```
 
 ---
 
@@ -104,15 +103,21 @@ All slash commands are intercepted locally without spending model tokens (except
 - `/compact` — Trigger native DSH context compaction
 - `/status` — Show connection status, active session line, and allowlist source
 - `/diag` / `/diag export` — Self-diagnostic report / redacted troubleshooting bundle
-- `/outbox` / `/outbox retry` — Inspect or retry durable outbound queue
+- `/outbox` / `/outbox retry` — Inspect or retry durable outbound queue (resumes from unsent segments)
 - `/send <path>` — Send an allowed local file to WeChat
 
 ### Running the Test Suite
 
 ```bash
-npm test                     # Run all 148 isolated unit & integration tests
+npm test                     # Run all 196 sandboxed unit & integration tests
 npm run test:host-contract   # Verify host contract against installed DSH peer packages
+npm run check                # Static checks and dependency verification
 ```
+
+### Design Documentation
+- [Parallel Session Dispatcher (`docs/session-dispatcher.md`)](docs/session-dispatcher.md)
+- [Same-Turn Silent Reply Recovery (`docs/silent-reply-recovery.md`)](docs/silent-reply-recovery.md)
+- [Queue Concurrency, File Sandbox & Live Gateway Switch (`docs/validation-issues-23-25.md`)](docs/validation-issues-23-25.md)
 
 ## License
 

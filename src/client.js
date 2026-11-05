@@ -727,58 +727,6 @@ window.__ModuleLoader__.load({
 		const PICK_UNAVAILABLE = "unavailable";
 
 		/**
-		 * Where models may be downloaded from.
-		 *
-		 * The mirror first because the official site is unreachable on a
-		 * degraded international route while the mirror works — measured on this
-		 * machine: huggingface.co completes a TCP handshake and then transfers
-		 * nothing, and its weight CDN does not answer at all.
-		 *
-		 * `custom` carries no endpoint: it exists so the radio group can show
-		 * that an endpoint set elsewhere is in effect, and choosing it is a
-		 * no-op rather than a silent reset to a default.
-		 */
-		const SOURCE_CHOICES = [
-			{
-				id: "mirror",
-				endpoint: "https://hf-mirror.com",
-				labelZh: "国内镜像（推荐）",
-				labelEn: "Mirror (recommended)",
-			},
-			{
-				id: "official",
-				endpoint: "https://huggingface.co",
-				labelZh: "官方站 huggingface.co",
-				labelEn: "Official huggingface.co",
-			},
-			{ id: "custom", endpoint: "", labelZh: "自定义地址", labelEn: "Custom" },
-		];
-
-		/**
-		 * Whether the download goes through a proxy.
-		 *
-		 * `direct` is the default because it is what works on an unproxied
-		 * network; naming a proxy when there is none breaks a download that
-		 * would otherwise have succeeded.
-		 */
-		const PROXY_CHOICES = [
-			{
-				id: "direct",
-				labelZh: "直连",
-				labelEn: "Direct",
-				hintZh: "不使用代理",
-				hintEn: "No proxy",
-			},
-			{
-				id: "custom",
-				labelZh: "使用代理",
-				labelEn: "Use a proxy",
-				hintZh: "例如 http://127.0.0.1:7897",
-				hintEn: "e.g. http://127.0.0.1:7897",
-			},
-		];
-
-		/**
 		 * Open the host's native directory chooser.
 		 *
 		 * The shell mounts the workspace controller's `directoryPicker` Remote on
@@ -989,22 +937,6 @@ window.__ModuleLoader__.load({
 			lineHeight: "20px",
 		};
 
-		/**
-		 * A status dot.
-		 *
-		 * Color alone must not carry the meaning, so every caller pairs this with
-		 * a label; the dot is what makes the state scannable at a glance.
-		 */
-		function dotStyle(kind) {
-			return {
-				width: 9,
-				height: 9,
-				borderRadius: "50%",
-				flex: "0 0 auto",
-				background: kind === "ok" ? C.success : kind === "bad" ? C.danger : kind === "warn" ? C.warn : C.idle,
-			};
-		}
-
 		/** A small pill for a state worth calling out, e.g. "expired". */
 		function pillStyle(kind) {
 			const bad = kind === "bad";
@@ -1034,23 +966,6 @@ window.__ModuleLoader__.load({
 			color: C.labelPrimary,
 			fontSize: 13,
 			lineHeight: "20px",
-		};
-
-		// A determinate bar reads as measured progress; it is only rendered when
-		// the CLI actually reported a percentage, never as decoration.
-		const progressTrackStyle = {
-			height: 6,
-			borderRadius: RADIUS.pill,
-			background: C.surfaceSunken,
-			overflow: "hidden",
-			maxWidth: 320,
-		};
-
-		const progressFillStyle = {
-			height: "100%",
-			borderRadius: RADIUS.pill,
-			background: C.brand,
-			transition: "width 240ms ease",
 		};
 
 		//#endregion design vocabulary
@@ -1239,16 +1154,8 @@ window.__ModuleLoader__.load({
 				try {
 					const loaded = await require.async("./client.card.js");
 					cardModule = loaded.createCardModule({
-						// Names the card needs that also belong to the entry: the
-						// package id and version, the remote helper, and the ASR
-						// picker's option tables. Everything else it needs is a
-						// design token, passed below.
-						PKG,
-						PLUGIN_VERSION,
+						// Shared RPC helpers and design tokens for the settings card.
 						callRemote,
-						PICK_UNAVAILABLE,
-						SOURCE_CHOICES,
-						PROXY_CHOICES,
 						ctx,
 						t,
 						createElement,
@@ -1262,15 +1169,9 @@ window.__ModuleLoader__.load({
 						buttonStyleFor,
 						primaryButtonStyle,
 						inputStyle,
-						dotStyle,
 						pillStyle,
 						noticeStyle,
-						progressTrackStyle,
-						progressFillStyle,
-						unwrap,
-						isCancellation,
 						useLocaleText,
-						pickDirectory,
 					});
 				} catch (error) {
 					cardLoadError = String((error && error.message) || error);

@@ -24,6 +24,7 @@ import { statePath } from '../state-layout.js'
 import path from 'node:path'
 import { atomicWriteJson, readJsonFile } from '../atomic.js'
 import fs from 'node:fs'
+import { chunkText } from './chunker.js'
 
 /**
  * How long an inbound `context_token` is worth echoing.
@@ -49,6 +50,67 @@ export const MAX_RETRY_MS = 30 * 60_000
 export const MAX_ITEMS = 50
 /** Timer period. */
 export const FLUSH_INTERVAL_MS = 30_000
+/** Legacy queue rows predate a stored cap; match the plugin's config default. */
+export const DEFAULT_OUTBOX_MAX_MESSAGE_LENGTH = 1_500
+
+const OUTBOX_SCHEMA_VERSION = 3
+
+function normalizeMaxMessageLength(value) {
+  const limit = Math.floor(Number(value))
+  return Number.isFinite(limit) && limit > 0 ? limit : DEFAULT_OUTBOX_MAX_MESSAGE_LENGTH
+}
+
+function splitSegments(segments, maxMessageLength) {
+  return segments.flatMap((segment) => segment === '' ? [''] : chunkText(segment, maxMessageLength))
+}
+
+function persistOutboxFile(file, value, { warn }) {
+  if (!atomicWriteJson(file, value, { warn })) throw new Error(`could not persist ${path.basename(file)}`)
+  return true
+}
+
+/**
+ * Normalise current and legacy queue rows into the segmented in-memory shape.
+ * Legacy rows are split at the plugin's default cap. Current rows are
+ * defensively re-split if their segments exceed their queue-time cap.
+ *
+ * The cap is stored with each item. Config changes therefore apply to newly
+ * queued rows; already queued rows remain bounded by the cap they were created
+ * under, which is the only safe value available during a restart.
+ */
+function normalizeOutboxItem(item) {
+  if (item === null || typeof item !== 'object') return undefined
+  if (typeof item.conversationId !== 'string') return undefined
+  let sourceSegments
+  if (Array.isArray(item.segments) && item.segments.length > 0 && item.segments.every((segment) => typeof segment === 'string')) {
+    sourceSegments = [...item.segments]
+  } else if (typeof item.text === 'string') {
+    sourceSegments = [item.text]
+  } else {
+    return undefined
+  }
+  const candidateIndex = Number(item.nextSegment ?? 0)
+  const oldNextSegment = Number.isInteger(candidateIndex) && candidateIndex >= 0 ? candidateIndex : 0
+  if (oldNextSegment >= sourceSegments.length) return undefined
+  const maxMessageLength = normalizeMaxMessageLength(item.maxMessageLength)
+  const segments = []
+  let nextSegment = 0
+  for (let index = 0; index < sourceSegments.length; index += 1) {
+    const pieces = splitSegments([sourceSegments[index]], maxMessageLength)
+    if (index < oldNextSegment) nextSegment += pieces.length
+    segments.push(...pieces)
+  }
+  // A crash after recording the final successful segment but before deleting
+  // the row must not replay the whole reply on restart.
+  if (nextSegment >= segments.length) return undefined
+  return {
+    ...item,
+    text: typeof item.text === 'string' ? item.text : segments.join(''),
+    segments,
+    nextSegment,
+    maxMessageLength,
+  }
+}
 
 /** @param {string} stateRoot */
 export function outboxFile(stateRoot) {
@@ -61,11 +123,17 @@ export function outboxFile(stateRoot) {
  * @returns {{ items: any[] }}
  */
 export function readOutbox(stateRoot, { warn = () => {} } = {}) {
-  return readJsonFile(outboxFile(stateRoot), {
+  const file = outboxFile(stateRoot)
+  return readJsonFile(file, {
     warn,
-    version: 1,
+    version: OUTBOX_SCHEMA_VERSION,
     fallback: () => ({ items: [] }),
-    migrate: (parsed) => ({ items: Array.isArray(parsed.items) ? parsed.items.filter((item) => item && typeof item.text === 'string' && typeof item.conversationId === 'string') : [] }),
+    migrate: (parsed) => ({
+      items: Array.isArray(parsed.items)
+        ? parsed.items.map(normalizeOutboxItem).filter((item) => item !== undefined)
+        : [],
+    }),
+    persist: (stamped) => persistOutboxFile(file, stamped, { warn }),
   })
 }
 
@@ -104,21 +172,41 @@ export function retryDelayMs(attempts) {
  */
 export function createOutbox({ stateRoot, transportFor, warn = () => {}, log = () => {}, now = () => Date.now() }) {
   /** @param {{ items: any[] }} store */
-  const save = (store) => atomicWriteJson(outboxFile(stateRoot), { schemaVersion: 1, ...store }, { warn })
+  const file = outboxFile(stateRoot)
+  const save = (store) => persistOutboxFile(file, { schemaVersion: OUTBOX_SCHEMA_VERSION, ...store }, { warn })
 
   /**
    * Persist one undelivered text. Returns the item id.
    *
-   * @param {{ accountId: string, conversationId: string, text: string, contextToken?: string }} entry
+   * `segments` lets the sender preserve the exact messages that still need to
+   * go out. `text` remains the human-readable full body and is also the legacy
+   * one-segment input. The queue-time message cap is persisted so retries and
+   * restarts keep the same boundary even if live configuration later changes.
+   *
+   * @param {{ accountId: string, conversationId: string, text?: string, segments?: string[], contextToken?: string, maxMessageLength?: number }} entry
    */
   const enqueue = (entry) => {
+    let sourceSegments
+    if (Array.isArray(entry.segments) && entry.segments.length > 0 && entry.segments.every((segment) => typeof segment === 'string')) {
+      sourceSegments = [...entry.segments]
+    } else if (typeof entry.text === 'string') {
+      sourceSegments = [entry.text]
+    } else {
+      throw new TypeError('outbox entry needs text or non-empty string segments')
+    }
+    const maxMessageLength = normalizeMaxMessageLength(entry.maxMessageLength)
+    const segments = splitSegments(sourceSegments, maxMessageLength)
+    if (segments.length === 0) throw new TypeError('outbox entry did not contain any text')
     const store = readOutbox(stateRoot, { warn })
     const at = now()
     const item = {
       id: `${at.toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
       accountId: entry.accountId,
       conversationId: entry.conversationId,
-      text: entry.text,
+      text: typeof entry.text === 'string' ? entry.text : segments.join(''),
+      segments,
+      nextSegment: 0,
+      maxMessageLength,
       ...(entry.contextToken ? { contextToken: entry.contextToken } : {}),
       createdAt: at,
       attempts: 0,
@@ -157,12 +245,25 @@ export function createOutbox({ stateRoot, transportFor, warn = () => {}, log = (
 
   // Merge only the attempted entry into the latest durable queue. Never put
   // back an entry dropped (or evicted by MAX_ITEMS) while its send was pending.
-  const updateItem = (item) => {
+  const updateItem = (id, mutate) => {
     const store = readOutbox(stateRoot, { warn })
-    const index = store.items.findIndex((entry) => entry.id === item.id)
-    if (index === -1) return
-    store.items[index] = item
+    const item = store.items.find((entry) => entry.id === id)
+    if (item === undefined) return false
+    mutate(item)
     save(store)
+    return true
+  }
+
+  const freshItem = (id) => readOutbox(stateRoot, { warn }).items.find((entry) => entry.id === id)
+
+  const withoutExpiredToken = (id) => {
+    const item = freshItem(id)
+    if (item === undefined || !tokenExpired(item, now())) return item
+    updateItem(id, (current) => {
+      delete current.contextToken
+      current.lastError = 'context token expired; retrying without it'
+    })
+    return freshItem(id)
   }
 
   /**
@@ -178,7 +279,6 @@ export function createOutbox({ stateRoot, transportFor, warn = () => {}, log = (
     prune()
     const store = readOutbox(stateRoot, { warn })
     if (store.items.length === 0) return { sent: 0, failed: 0, remaining: 0 }
-    const at = now()
     let sent = 0
     let failed = 0
     // Grouped by conversation so one conversation's stuck item does not let the
@@ -195,7 +295,7 @@ export function createOutbox({ stateRoot, transportFor, warn = () => {}, log = (
         if (blocked) continue
         // A previous send yielded to enqueue/drop/prune. Only send entries that
         // still exist; the snapshot determines this pass's order, not its state.
-        const item = readOutbox(stateRoot, { warn }).items.find((entry) => entry.id === candidate.id)
+        let item = freshItem(candidate.id)
         if (item === undefined) continue
         // A reply riding an expired context token can no longer be routed by it
         // — iLink answers `prepare failed` (issue #9/#21). The text is still
@@ -203,38 +303,71 @@ export function createOutbox({ stateRoot, transportFor, warn = () => {}, log = (
         // path (the account's typing ticket, or the bare conversation route).
         // Only an item that is ALSO out of retries is a genuine dead letter, and
         // `prune()` has already removed those above.
-        if (tokenExpired(item, at)) {
-          delete item.contextToken
-          item.lastError = 'context token expired; retrying without it'
-        }
+        item = withoutExpiredToken(candidate.id)
+        if (item === undefined) continue
         if (item.attempts >= MAX_ATTEMPTS) {
-          updateItem(item)
           blocked = false
           continue
         }
-        if (options.force !== true && Number(item.notBefore ?? 0) > at) {
-          updateItem(item)
+        if (options.force !== true && Number(item.notBefore ?? 0) > now()) {
           blocked = true
           continue
         }
         const transport = transportFor(item.accountId)
         if (transport === undefined) {
-          item.lastError = 'no live transport'
-          updateItem(item)
+          updateItem(item.id, (current) => {
+            current.lastError = 'no live transport'
+          })
           blocked = true
           continue
         }
-        try {
-          await transport.send({ conversationId: item.conversationId, type: 'text', text: item.text, contextToken: item.contextToken })
+        let completed = false
+        for (let segmentIndex = item.nextSegment; segmentIndex < item.segments.length; segmentIndex += 1) {
+          // Re-read before each segment. A concurrent drop must stop delivery;
+          // a concurrent enqueue can update the file without being overwritten
+          // by this older snapshot.
+          item = withoutExpiredToken(candidate.id)
+          if (item === undefined) break
+          if (item.nextSegment !== segmentIndex) {
+            segmentIndex = item.nextSegment - 1
+            continue
+          }
+          try {
+            await transport.send({
+              conversationId: item.conversationId,
+              type: 'text',
+              text: item.segments[segmentIndex],
+              contextToken: item.contextToken,
+            })
+          } catch (error) {
+            const failedAt = now()
+            updateItem(item.id, (current) => {
+              current.attempts = Number(current.attempts ?? 0) + 1
+              current.lastError = String(error?.message ?? error)
+              current.notBefore = failedAt + retryDelayMs(current.attempts)
+            })
+            failed += 1
+            blocked = true
+            break
+          }
+
+          const finalSegment = segmentIndex === item.segments.length - 1
+          const saved = updateItem(item.id, (current) => {
+            if (current.nextSegment === segmentIndex) current.nextSegment = segmentIndex + 1
+            current.lastError = ''
+          })
+          if (!saved) {
+            // The item was dropped while this segment was in flight. The
+            // current bubble did go out, but there is no durable row to revive;
+            // never continue with the following segments.
+            if (finalSegment) completed = true
+            break
+          }
+          if (finalSegment) completed = true
+        }
+        if (completed) {
           drop(item.id)
           sent += 1
-        } catch (error) {
-          item.attempts = Number(item.attempts ?? 0) + 1
-          item.lastError = String(error?.message ?? error)
-          item.notBefore = at + retryDelayMs(item.attempts)
-          updateItem(item)
-          failed += 1
-          blocked = true
         }
       }
     }

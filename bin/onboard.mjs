@@ -5,20 +5,18 @@
 // 「我现在该做什么」。两者不能共用一套输出——前者按「最可能出错的东西」排序，
 // 后者必须按「先做什么」排序，而且没做的不该显示成红的。
 //
-// 这个脚本**只读**：它不改配置、不写状态、不登录。唯一的副作用是把自己必须存在
-// 的目录建出来（知识库与备份目录），这样用户下一步就有地方放文件。
+// 这个脚本**只读**：它不改配置、不写状态、不登录，也不创建知识库等可选功能目录。
 //
-// 退出码：0 就算「能用了」（前三项必须项都完成），1 表示还有事没做——这样它也能
-// 放进 CI 或安装脚本里当门槛用。
+// 退出码：0 表示绑定与授权两项必要配置完成，1 表示本地前置条件还缺；真实收发
+// 仍需要用户在手机上验证，不能由这个退出码代替。
 
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
 import { detectHostVersion, hostStatus } from '../src/host-compat.js'
-import { listKnowledgeSources } from '../src/message/knowledge.js'
 import { buildOnboardingChecklist, describeNextStep, quickstartLines } from '../src/onboarding.js'
-import { allowlistForAccount, readRegistry } from '../src/account-registry.js'
+import { allowlistForAccount } from '../src/account-registry.js'
 import { accountsDir, readSavedConfig } from '../src/state.js'
 
 /** 与插件、doctor 用同一套数据目录约定。 */
@@ -36,33 +34,44 @@ function readConfig() {
   }
 }
 
-function accounts() {
+function credentialAccountIds() {
   try {
-    // The registry is keyed by accountId (not a list), so its keys are the
-    // accounts. Both reads take the config so an account-level allowlist counts
-    // too: someone who only configured per-account should not be told forever
-    // that they have not configured anything.
-    const registry = readRegistry()
-    const config = readConfig()
-    return Object.keys(registry).map((accountId) => ({
-      accountId,
-      allowedSenders: allowlistForAccount(accountId, config).allowedSenders,
-    }))
+    return fs.readdirSync(accountsDir())
+      .filter((name) => name.endsWith('.json') && name.endsWith('.sync.json') === false)
+      .flatMap((name) => {
+        const accountId = name.slice(0, -'.json'.length)
+        // Account ids are filenames; never let a malformed registry entry turn
+        // into a path traversal when looking for the credential file.
+        if (accountId === '' || path.basename(accountId) !== accountId) return []
+        try {
+          const credential = JSON.parse(fs.readFileSync(path.join(accountsDir(), name), 'utf8'))
+          return typeof credential.token === 'string' && credential.token !== '' ? [accountId] : []
+        } catch {
+          return []
+        }
+      })
   } catch {
     return []
   }
 }
 
-function knowledgeCount(root, accountIds) {
-  let total = 0
-  for (const id of accountIds) {
-    try {
-      total += listKnowledgeSources(path.join(root, 'knowledge', id)).length
-    } catch {
-      // 目录不存在就是 0 份文件。
-    }
+function accounts(accountIds, config) {
+  // The credential files decide whether an account is signed in. The registry is
+  // only metadata used to resolve an account-level allowlist; a registry-only
+  // record must never be reported as a logged-in account.
+  return accountIds.map((accountId) => ({
+    accountId,
+    allowedSenders: allowlistForAccount(accountId, config).allowedSenders,
+  }))
+}
+
+function directoryExists(value) {
+  if (typeof value !== 'string' || value.trim() === '') return false
+  try {
+    return fs.statSync(value).isDirectory()
+  } catch {
+    return false
   }
-  return total
 }
 
 /**
@@ -79,7 +88,8 @@ function main() {
   guardStdout()
   const root = stateRoot()
   const config = readConfig()
-  const list = accounts()
+  const loggedInIds = credentialAccountIds()
+  const list = accounts(loggedInIds, config)
   // `DSH_HOST_PLIST` lets a test (and an unusual install) point at the app it
   // actually has; an explicitly empty value means "do not claim a host".
   const plistFromEnv = process.env.DSH_HOST_PLIST
@@ -87,40 +97,16 @@ function main() {
     typeof plistFromEnv === 'string'
       ? detectHostVersion(plistFromEnv === '' ? { plistPath: '/nonexistent/Info.plist' } : { plistPath: plistFromEnv })
       : detectHostVersion()
-  // 注册表里的账号只是「这台机器记得的账号」，真正的凭据在
-  // `openclaw-weixin/accounts/<id>.json`。注册表是元数据，删掉凭据不会删它，
-  // 所以「登录过」必须看凭据文件，否则一个删了账号的人会看到「已完成」。
-  // The credential path comes from the host's own helper instead of being
-  // re-derived here: a second copy of "where do accounts live" is how the two
-  // drift apart (the first draft of this script guessed the wrong directory and
-  // reported a logged-in account as missing).
-  const loggedIn = new Set(list.map((account) => account.accountId).filter((id) => {
-    try {
-      return fs.statSync(path.join(accountsDir(), `${id}.json`)).isFile()
-    } catch {
-      return false
-    }
-  }))
-
-  // 建目录：用户看完清单的第一件事就是「把文件放哪」，所以要有个现成的路径可复制。
-  for (const id of loggedIn) {
-    try {
-      fs.mkdirSync(path.join(root, 'knowledge', id), { recursive: true })
-    } catch {
-      // 建不出来不影响清单本身，后面的提示里会说出问题。
-    }
-  }
+  const workingDirectory = typeof config.cwd === 'string' ? config.cwd.trim() : ''
 
   const checklist = buildOnboardingChecklist({
-    accounts: list.filter((account) => loggedIn.has(account.accountId)),
-    accountCount: loggedIn.size,
+    accounts: list,
+    accountCount: loggedInIds.length,
     hostVersion,
     hostTested: hostStatus(hostVersion).status === 'tested',
     allowedSenders: Array.isArray(config.allowedSenders) ? config.allowedSenders : [],
-    personaDefaultMode: typeof config.personaDefaultMode === 'string' && config.personaDefaultMode !== '' && config.personaDefaultMode !== 'default',
-    proactiveEnabled: config.proactiveEnabled === true,
-    knowledgeEnabled: config.knowledgeEnabled !== false,
-    knowledgeFiles: knowledgeCount(root, [...loggedIn]),
+    workingDirectory,
+    workingDirectoryExists: directoryExists(workingDirectory),
     backupEnabled: config.backupEnabled === true,
   })
 
@@ -138,8 +124,8 @@ function main() {
 
   process.stdout.write(`微信BOT 上手清单  数据目录：${root}\n\n`)
   for (const step of checklist.steps) {
-    // An unverifiable host is a note, not an unfinished task: showing □ next to
-    // "2/7 步已就绪、没有必须做的了" reads like a bug.
+    // An unverifiable host is a note, not an unfinished task; it must never be
+    // rendered as verified merely because no better version could be detected.
     const mark = step.id === 'host' && noHostToCheck ? icon.note : icon[step.state]
     process.stdout.write(`${mark} ${step.title}${' '.repeat(width - columns(step.title))}  ${step.detail}\n`)
     if (step.state === 'todo' || step.state === 'blocked') {
@@ -156,7 +142,7 @@ function main() {
   }
 
   if (noHostToCheck) {
-    process.stdout.write('\n没有检测到 DSH 宿主：这一步等你装上 DSH 再回来跑一次就行，其余照上面做。\n')
+    process.stdout.write('\n未检测到明确的宿主版本，建议在桌面端验证实际收发。\n')
   }
 
   // Exit 0 exactly when the required steps are done. The host is a note either
