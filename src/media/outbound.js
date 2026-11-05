@@ -126,18 +126,26 @@ export async function resolveAllowedPath(filePath, roots) {
   // Trying each root in order (rather than only the first) keeps a deployment
   // that allows several directories working: the reference resolves inside
   // whichever one actually holds the file.
-  const isAbsolute = path.isAbsolute(filePath)
+  // Expand the home shorthand before `path.isAbsolute` and before joining it to
+  // a root. Doing this later turns `~/shot.png` into `<root>/~/shot.png`, so the
+  // shorthand can never match again. Expansion only changes the spelling: the
+  // resulting absolute path still has to pass the same containment check below,
+  // which means an allowed root must explicitly include that home path.
+  const expandedFilePath = filePath === '~'
+    ? os.homedir()
+    : filePath.startsWith('~/')
+      ? path.join(os.homedir(), filePath.slice(2))
+      : filePath
+  const isAbsolute = path.isAbsolute(expandedFilePath)
   // The `..`-escape verdict must be read off the reference the agent WROTE.
   // `path.join(root, 'sub/../../x')` collapses the `..` on the way in, so a
   // containment check against the joined string can no longer tell a climb from
   // a path that was simply never inside — and the user gets "outside the
   // allowed directories" for a mistake that was actually a bad relative path.
   const escapedWithDotDot = /(^|[/\\])\.\.([/\\]|$)/.test(filePath)
-  const candidates = isAbsolute ? [filePath] : roots.map((root) => path.join(root, filePath))
-  // `~` is what an agent writes when it means the home directory.
-  const expandedCandidates = candidates.map((candidate) =>
-    candidate.startsWith('~/') ? path.join(os.homedir(), candidate.slice(2)) : candidate,
-  )
+  const expandedCandidates = isAbsolute
+    ? [expandedFilePath]
+    : roots.map((root) => path.join(root, expandedFilePath))
 
   const refusals = []
   /** A contained candidate whose file is not there; a later root may still have it. */
