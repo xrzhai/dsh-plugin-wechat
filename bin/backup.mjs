@@ -17,7 +17,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
-import { createBackup, listBackups, pruneBackups, restoreBackup, verifyBackup, backupsDir } from '../src/backup.js'
+import { createBackup, listBackups, restoreBackup, verifyBackup, backupsDir } from '../src/backup.js'
 import { openState, restoreSealed, sealState } from '../src/backup-crypto.js'
 import { stateDir } from '../src/state.js'
 

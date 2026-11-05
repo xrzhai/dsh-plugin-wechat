@@ -11,8 +11,8 @@
 // so a reviewer sees the diff.
 import fs from 'node:fs'
 import path from 'node:path'
-import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
+import { hashVendorFile } from './lib/vendor-hash.mjs'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const VENDOR = path.join(ROOT, 'vendor', 'openclaw-weixin')
@@ -27,15 +27,11 @@ function walk(dir, out = []) {
   return out
 }
 
-function hash(file) {
-  return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')
-}
-
-export function collect() {
-  if (fs.existsSync(VENDOR) !== true) return {}
+export function collect(vendorDir = VENDOR) {
+  if (fs.existsSync(vendorDir) !== true) return {}
   const files = {}
-  for (const file of walk(VENDOR).sort()) {
-    files[path.relative(VENDOR, file).split(path.sep).join('/')] = hash(file)
+  for (const file of walk(vendorDir).sort()) {
+    files[path.relative(vendorDir, file).split(path.sep).join('/')] = hashVendorFile(file)
   }
   return files
 }
@@ -54,33 +50,52 @@ export function diff(current, recorded) {
   return { changed, added, removed }
 }
 
-function readManifest() {
-  try { return JSON.parse(fs.readFileSync(MANIFEST, 'utf8')) } catch { return undefined }
+export function readManifest(manifestPath = MANIFEST) {
+  try { return JSON.parse(fs.readFileSync(manifestPath, 'utf8')) } catch { return undefined }
+}
+
+export function checkVendor(vendorDir = VENDOR, manifestPath = MANIFEST) {
+  const current = collect(vendorDir)
+  const count = Object.keys(current).length
+  const manifest = readManifest(manifestPath)
+  if (manifest === undefined) return { count, current, manifest }
+  return { count, current, manifest, ...diff(current, manifest.files) }
+}
+
+export function run({
+  argv = process.argv.slice(2),
+  vendorDir = VENDOR,
+  manifestPath = MANIFEST,
+  stdout = process.stdout,
+} = {}) {
+  if (argv.includes('--write')) {
+    const current = collect(vendorDir)
+    const count = Object.keys(current).length
+    const pkg = JSON.parse(fs.readFileSync(path.join(vendorDir, 'package.json'), 'utf8'))
+    fs.writeFileSync(manifestPath, `${JSON.stringify({ name: pkg.name, version: pkg.version, files: current }, null, 2)}\n`, 'utf8')
+    stdout.write(`recorded ${count} files from ${pkg.name}@${pkg.version}\n`)
+    return 0
+  }
+
+  const result = checkVendor(vendorDir, manifestPath)
+  if (result.manifest === undefined) {
+    stdout.write('no manifest yet — run `node bin/vendor-manifest.mjs --write`\n')
+    return 1
+  }
+
+  const { changed, added, removed, count, manifest } = result
+  if (changed.length + added.length + removed.length === 0) {
+    stdout.write(`✓ vendor/ matches the manifest (${count} files, ${manifest.name}@${manifest.version})\n`)
+    return 0
+  }
+
+  for (const name of changed) stdout.write(`~ ${name}\n`)
+  for (const name of added) stdout.write(`+ ${name}\n`)
+  for (const name of removed) stdout.write(`- ${name}\n`)
+  stdout.write(`\nvendor/ drifted from ${manifest.name}@${manifest.version}. Either re-vendor and re-record, or document the patch in docs/progress.md.\n`)
+  return 1
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const current = collect()
-  const count = Object.keys(current).length
-  if (process.argv.includes('--write')) {
-    const pkg = JSON.parse(fs.readFileSync(path.join(VENDOR, 'package.json'), 'utf8'))
-    fs.writeFileSync(MANIFEST, `${JSON.stringify({ name: pkg.name, version: pkg.version, files: current }, null, 2)}\n`, 'utf8')
-    process.stdout.write(`recorded ${count} files from ${pkg.name}@${pkg.version}\n`)
-    process.exit(0)
-  }
-  const manifest = readManifest()
-  if (manifest === undefined) {
-    process.stdout.write('no manifest yet — run `node bin/vendor-manifest.mjs --write`\n')
-    process.exitCode = 1
-  } else {
-    const { changed, added, removed } = diff(current, manifest.files)
-    if (changed.length + added.length + removed.length === 0) {
-      process.stdout.write(`✓ vendor/ matches the manifest (${count} files, ${manifest.name}@${manifest.version})\n`)
-    } else {
-      for (const name of changed) process.stdout.write(`~ ${name}\n`)
-      for (const name of added) process.stdout.write(`+ ${name}\n`)
-      for (const name of removed) process.stdout.write(`- ${name}\n`)
-      process.stdout.write(`\nvendor/ drifted from ${manifest.name}@${manifest.version}. Either re-vendor and re-record, or document the patch in docs/progress.md.\n`)
-      process.exitCode = 1
-    }
-  }
+  process.exitCode = run()
 }

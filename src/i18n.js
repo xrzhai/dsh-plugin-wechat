@@ -26,6 +26,8 @@ export const DEFAULT_LOCALE = 'zh'
  * it, so a key cannot be added in one language only.
  */
 export const CATALOG = Object.freeze({
+    'error.processing': { zh: '（处理失败：{reason}）', en: '(Processing failed: {reason})' },
+    'notice.longRunning': { zh: '（这条消息处理时间较长，先回复别的消息不影响它；结果出来后会直接发到这里）', en: '(This task is taking longer. You can send other messages; its result will arrive here when ready.)' },
     // --- command help -------------------------------------------------------
     'help.header': { zh: '会话指令（发 /help 或 /帮助 可再看一遍）：', en: 'Session commands (send /help to see this again):' },
     'help.new': { zh: '/new 开一条新会话（当前这条会保留，之后可以切回来）', en: '/new start a new session (this one is kept, you can switch back)' },

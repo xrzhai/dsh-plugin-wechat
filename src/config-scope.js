@@ -14,7 +14,6 @@
 // this list can widen who may talk to the bot.
 
 import { statePath } from './state-layout.js'
-import path from 'node:path';
 
 import { atomicWriteJson, readJsonFile } from './atomic.js';
 

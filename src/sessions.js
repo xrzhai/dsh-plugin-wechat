@@ -32,7 +32,7 @@
  * @module dsh-weixin/src/sessions
  */
 import fs from 'node:fs'
-import { createTranslator, translate } from './i18n.js'
+import { translate } from './i18n.js'
 import path from 'node:path'
 
 import { stateDir } from './state.js'

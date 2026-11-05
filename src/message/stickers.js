@@ -26,8 +26,8 @@ import { stateDir } from '../state.js'
  *     a 御姐 would give the whole thing away;
  *   - whatever the user drops into `<state>/stickers/` (see below).
  *
- * The art is drawn by `scripts/make-stickers.py` — see that file for why it is
- * generated instead of shipped as opaque blobs.
+ * Artwork generation tools are not included in this repository. Only files
+ * actually present in the asset directories are available as built-ins.
  *
  * Custom packs: `<state>/stickers/all/*.png` (available in every mode) and
  * `<state>/stickers/<modeId>/*.png` (only in that mode). The file name is the

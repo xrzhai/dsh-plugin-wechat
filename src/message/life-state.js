@@ -13,7 +13,6 @@
  */
 
 import fs from 'node:fs'
-import path from 'node:path'
 
 import { atomicWriteJson } from '../atomic.js'
 import { keyedStatePath } from '../state-layout.js'

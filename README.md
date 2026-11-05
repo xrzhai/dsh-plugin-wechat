@@ -83,6 +83,7 @@
 > **Agent 指令说明**：当用户让你安装、更新或卸载本插件时，请直接按以下步骤在终端执行，无需用户手动操作。
 
 ### 1. 环境与目录选择
+- 开发验证和文案基线规则见 [开发检查](docs/development-checks.md)；安装前可用 `node bin/install.mjs --help` 查看参数，或追加 `--dry-run` 预览变更。
 - 确认本机具备 `git`、`node`（需 `>= 22.13.0`）与 `pnpm`。
 - **重要**：安装脚本会将用户的 DSH Profile 通过软链接（`link:`）指向本仓库目录。因此**请勿将仓库克隆在 `/tmp` 或临时目录**，请克隆在用户固定的项目目录（例如 `~/Projects/dsh-plugin-wechat` 或 `D:\Projects\dsh-plugin-wechat`）或 `~/.dsh/plugins/dsh-plugin-wechat`。
 

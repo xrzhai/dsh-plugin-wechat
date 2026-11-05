@@ -1,0 +1,3 @@
+# Keep vendored text canonical so byte manifests match on every OS.
+# text=auto continues to treat binary files as binary; eol applies only to text.
+vendor/openclaw-weixin/** text=auto eol=lf

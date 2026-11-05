@@ -124,6 +124,12 @@ export async function sendProducedFiles(params) {
 export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 export async function sendChunked(transport, config, message) {
+  // SILENT is a host control reply, not a user-facing message. Ordinary and
+  // late replies share this boundary but bypass the spontaneous-turn filter.
+  // Check the whole raw body before splitting, journaling, or retry enqueue;
+  // prose that merely mentions the marker must remain intact.
+  if (/^\[SILENT\]$/i.test((message.text ?? '').trim())) return
+
   // Rich replies (C17). Weixin has one body kind — plain text — so the useful
   // move is not to "support Markdown" but to stop losing what Markdown carried:
   // a long code block becomes a real file attachment (indentation, language and
