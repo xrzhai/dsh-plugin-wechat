@@ -29,6 +29,10 @@ export const CATALOG = Object.freeze({
     'error.processing': { zh: '（处理失败：{reason}）', en: '(Processing failed: {reason})' },
     'error.accountPauseWrite': { zh: '无法保存账号暂停状态；连接状态未改变', en: 'Could not save the account pause state; the connection was left unchanged' },
     'error.accountResumeWrite': { zh: '无法保存账号恢复状态；连接状态未改变', en: 'Could not save the account resume state; the connection was left unchanged' },
+    'error.reminderInvalidTime': { zh: '提醒时间无效', en: 'Invalid reminder time' },
+    'error.reminderStorageReadOnly': { zh: '提醒存储当前只读：{reason}', en: 'Reminder storage is read-only: {reason}' },
+    'error.reminderSequenceExhausted': { zh: '提醒编号已耗尽，无法继续安排', en: 'Reminder IDs are exhausted; no more reminders can be scheduled' },
+    'error.reminderWriteFailed': { zh: '提醒写盘失败，未安排；原提醒文件保持不变', en: 'The reminder could not be saved, so it was not scheduled; the existing reminder file was left unchanged' },
     'notice.longRunning': { zh: '（这条消息处理时间较长，先回复别的消息不影响它；结果出来后会直接发到这里）', en: '(This task is taking longer. You can send other messages; its result will arrive here when ready.)' },
     'onboarding.loginPanel': { zh: '打开 DSH → 左侧边栏「大肥鱼」→「微信账号」→「扫码登录微信」', en: 'Open DSH → WeChat in the sidebar → WeChat Account → Scan QR code to log in' },
     // --- command help -------------------------------------------------------
