@@ -5,9 +5,10 @@
  *   node bin/backup.mjs create [--label before-upgrade]
  *   node bin/backup.mjs list
  *   node bin/backup.mjs verify <id>
- *   node bin/backup.mjs restore <id> [--yes]
+ *   node bin/backup.mjs restore <id> [--yes]  # exit the agent harness, then confirm with --yes
  *   DSH_WEIXIN_BACKUP_PASSPHRASE=… node bin/backup.mjs seal <file.enc> [--no-media]
  *   DSH_WEIXIN_BACKUP_PASSPHRASE=… node bin/backup.mjs open <file.enc> [--dry-run] [--yes]
+ *     # a write requires exiting the agent harness first, then confirming with --yes
  *
  * Written as a CLI rather than a remote method because the interesting moments
  * (upgrading, moving to another machine, "I think I deleted the wrong thing")
@@ -16,9 +17,9 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
-import { spawnSync } from 'node:child_process'
 import { createBackup, listBackups, restoreBackup, verifyBackup, backupsDir } from '../src/backup.js'
 import { openState, restoreSealed, sealState } from '../src/backup-crypto.js'
+import { inspectInstanceLock } from '../src/instance-lock.js'
 import { stateDir } from '../src/state.js'
 
 const argv = process.argv.slice(2)
@@ -37,6 +38,50 @@ function human(bytes) {
 
 function warn(line) {
   process.stderr.write(`! ${line}\n`)
+}
+
+const EXIT_HARNESS_THEN_YES = 'Exit the DSH agent harness, then rerun with --yes to confirm.'
+
+/**
+ * A missing courtesy lock is not evidence that DSH is stopped: the plugin gets
+ * the lock only after a long enabled startup and continues even if it cannot
+ * write one. Only an OS-confirmed dead holder proceeds automatically; a live
+ * holder or any indeterminate state requires the operator's explicit --yes.
+ *
+ * @returns {boolean} whether the restore may continue
+ */
+function restoreTargetIsSafe() {
+  const inspection = inspectInstanceLock(root)
+  if (inspection.state === 'running') {
+    if (yes) {
+      warn(`DSH instance pid ${inspection.holder.pid} appears to be running; continuing because --yes was passed`)
+      return true
+    }
+    console.error(
+      `✗ DSH instance pid ${inspection.holder.pid} appears to be running. ${EXIT_HARNESS_THEN_YES}`,
+    )
+    return false
+  }
+
+  if (inspection.state === 'stale') {
+    warn(
+      `ignoring stale instance lock for pid ${inspection.holder.pid} ` +
+        '(the operating system says that process no longer exists)',
+    )
+    return true
+  }
+
+  const reason = inspection.state === 'missing'
+    ? 'no instance lock is present (normal after a clean agent-harness exit)'
+    : inspection.reason
+  if (yes) {
+    warn(`cannot confirm DSH is stopped (${reason}); continuing because --yes was passed`)
+    return true
+  }
+  console.error(
+    `✗ cannot confirm DSH is stopped (${reason}). ${EXIT_HARNESS_THEN_YES}`,
+  )
+  return false
 }
 
 switch (command) {
@@ -82,6 +127,7 @@ switch (command) {
     const [id] = rest
     if (id === undefined) {
       console.error('usage: node bin/backup.mjs restore <id> [--yes]')
+      console.error('       normal exits have no instance lock; exit the agent harness, then pass --yes')
       process.exitCode = 1
       break
     }
@@ -93,9 +139,7 @@ switch (command) {
     }
     // Restoring under a live instance is the one thing that silently undoes
     // itself: the running plugin rewrites its in-memory state over the files.
-    const running = spawnSync('pgrep', ['-f', 'dsh-plugin-weixin'], { encoding: 'utf8' })
-    if (running.status === 0 && !yes) {
-      console.error('✗ DSH looks like it is running. Quit it first, or pass --yes if you know better.')
+    if (!restoreTargetIsSafe()) {
       process.exitCode = 1
       break
     }
@@ -136,6 +180,7 @@ switch (command) {
     const file = rest[0]
     if (!file) {
       console.error('usage: DSH_WEIXIN_BACKUP_PASSPHRASE=… node bin/backup.mjs open <file.enc> [--dry-run] [--yes]')
+      console.error('       a write requires exiting the agent harness first, then passing --yes')
       process.exitCode = 1
       break
     }
@@ -150,12 +195,6 @@ switch (command) {
       opened = openState(path.resolve(file), { passphrase })
     } catch (error) {
       console.error(`✗ ${error.message}`)
-      process.exitCode = 1
-      break
-    }
-    const running = spawnSync('pgrep', ['-f', 'dsh-plugin-weixin'], { encoding: 'utf8' })
-    if (running.status === 0 && !yes) {
-      console.error('✗ DSH looks like it is running. Quit it first, or pass --yes if you know better.')
       process.exitCode = 1
       break
     }
@@ -176,6 +215,10 @@ switch (command) {
       if (rows.length > 40) console.log(`  …and ${rows.length - 40} more`)
       break
     }
+    if (!restoreTargetIsSafe()) {
+      process.exitCode = 1
+      break
+    }
     const result = restoreSealed(root, opened.files, { warn })
     console.log(`✓ restored ${result.restored} file(s) from ${file}`)
     console.log('  restart DSH to load the restored state')
@@ -187,9 +230,9 @@ switch (command) {
   node bin/backup.mjs create [--label <name>] [--with-media]   take a backup (keeps the newest few)
   node bin/backup.mjs list                      what backups exist
   node bin/backup.mjs verify <id>               is this one intact
-  node bin/backup.mjs restore <id> [--yes]      copy it back over the live state
+  node bin/backup.mjs restore <id> [--yes]      exit the agent harness, then pass --yes to confirm
   node bin/backup.mjs seal <file.enc> [--no-media]  encrypt the whole state into one file
-  node bin/backup.mjs open <file.enc> [--dry-run] [--yes]  list, then decrypt and restore it
+  node bin/backup.mjs open <file.enc> [--dry-run] [--yes]  exit the harness, then pass --yes to write
 
 state: ${root}
 backups: ${backupsDir(root)}`)
