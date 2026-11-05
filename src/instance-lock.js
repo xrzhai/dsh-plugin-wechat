@@ -28,16 +28,94 @@ export function lockFile(stateRoot) {
   return statePath(stateRoot, 'instanceLock')
 }
 
-/** @param {number} pid */
-function alive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false
+/**
+ * Ask the operating system whether a pid exists. Signal 0 performs the access
+ * check without sending a signal on both POSIX systems and Windows.
+ *
+ * @param {number} pid
+ * @param {(pid: number, signal: number) => void} kill
+ * @returns {{ state: 'alive' | 'dead' | 'unknown', reason?: string }}
+ */
+function probeProcess(pid, kill = (target, signal) => process.kill(target, signal)) {
+  if (!Number.isInteger(pid) || pid <= 0) return { state: 'dead', reason: 'invalid pid' }
   try {
-    process.kill(pid, 0)
-    return true
+    kill(pid, 0)
+    return { state: 'alive' }
   } catch (error) {
     // EPERM means the process exists and belongs to someone else.
-    return error?.code === 'EPERM'
+    if (error?.code === 'EPERM') return { state: 'alive' }
+    if (error?.code === 'ESRCH') return { state: 'dead' }
+    return { state: 'unknown', reason: String(error?.message ?? error) }
   }
+}
+
+/** @param {number} pid */
+function alive(pid) {
+  return probeProcess(pid).state === 'alive'
+}
+
+/**
+ * Read the lock without throwing away *why* it could not be read. The normal
+ * runtime path deliberately treats every failure as "no holder" because the
+ * lock is advisory; restore is different and must distinguish a confirmed
+ * stale holder from a missing, corrupt or unreadable file.
+ *
+ * @param {string} stateRoot
+ * @param {{
+ *   statSync?: typeof fs.statSync,
+ *   readFileSync?: typeof fs.readFileSync,
+ * }} [options]
+ */
+function readLockRecord(stateRoot, options = {}) {
+  const statSync = options.statSync ?? fs.statSync
+  const readFileSync = options.readFileSync ?? fs.readFileSync
+  const file = lockFile(stateRoot)
+  let stat
+  try {
+    stat = statSync(file)
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { state: 'missing', file }
+    return {
+      state: 'unreadable',
+      file,
+      code: error?.code,
+      reason: `could not inspect the instance lock: ${String(error?.message ?? error)}`,
+    }
+  }
+
+  let text
+  try {
+    text = readFileSync(file, 'utf8')
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { state: 'missing', file }
+    return {
+      state: 'unreadable',
+      file,
+      code: error?.code,
+      reason: `could not read the instance lock: ${String(error?.message ?? error)}`,
+    }
+  }
+
+  let parsed
+  try {
+    parsed = JSON.parse(text)
+  } catch (error) {
+    return {
+      state: 'malformed',
+      file,
+      reason: `the instance lock is not valid JSON: ${String(error?.message ?? error)}`,
+    }
+  }
+  if (!Number.isInteger(parsed?.pid) || parsed.pid <= 0) {
+    return { state: 'malformed', file, reason: 'the instance lock does not contain a positive integer pid' }
+  }
+
+  const holder = {
+    pid: parsed.pid,
+    startedAt: Number.isFinite(Number(parsed.startedAt)) ? Number(parsed.startedAt) : 0,
+    at: stat.mtimeMs,
+  }
+  return { state: 'holder', file, holder }
 }
 
 /**
@@ -47,14 +125,43 @@ function alive(pid) {
  * @returns {{ pid: number, startedAt: number, at: number } | undefined}
  */
 export function readHolder(stateRoot) {
-  const file = lockFile(stateRoot)
-  try {
-    const stat = fs.statSync(file)
-    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'))
-    if (typeof parsed?.pid !== 'number') return undefined
-    return { pid: parsed.pid, startedAt: Number(parsed.startedAt ?? 0), at: stat.mtimeMs }
-  } catch {
-    return undefined
+  const record = readLockRecord(stateRoot)
+  return record.state === 'holder' ? record.holder : undefined
+}
+
+/**
+ * Inspect the courtesy lock for a destructive restore.
+ *
+ * Heartbeat age is deliberately absent from the decision: a live pid means an
+ * instance may still be running even if its event loop is blocked long enough
+ * for the heartbeat to become stale. Only an OS-confirmed dead pid is stale.
+ * A missing, malformed, unreadable or otherwise indeterminate lock is not
+ * evidence that no instance is running.
+ *
+ * @param {string} stateRoot
+ * @param {{
+ *   statSync?: typeof fs.statSync,
+ *   readFileSync?: typeof fs.readFileSync,
+ *   kill?: (pid: number, signal: number) => void,
+ * }} [options]
+ * @returns {
+ *   { state: 'running' | 'stale', file: string, holder: { pid: number, startedAt: number, at: number } } |
+ *   { state: 'missing', file: string } |
+ *   { state: 'malformed' | 'unreadable' | 'unknown', file: string, reason: string, code?: string, holder?: { pid: number, startedAt: number, at: number } }
+ * }
+ */
+export function inspectInstanceLock(stateRoot, options = {}) {
+  const record = readLockRecord(stateRoot, options)
+  if (record.state !== 'holder') return record
+
+  const processState = probeProcess(record.holder.pid, options.kill)
+  if (processState.state === 'alive') return { state: 'running', file: record.file, holder: record.holder }
+  if (processState.state === 'dead') return { state: 'stale', file: record.file, holder: record.holder }
+  return {
+    state: 'unknown',
+    file: record.file,
+    holder: record.holder,
+    reason: `could not determine whether pid ${record.holder.pid} is running: ${processState.reason}`,
   }
 }
 
