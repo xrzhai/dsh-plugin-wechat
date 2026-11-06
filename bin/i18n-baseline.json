@@ -3,7 +3,7 @@
   "files": {
     "src/client.card.js": 121,
     "src/index.js": 70,
-    "src/sessions.js": 91,
+    "src/sessions.js": 89,
     "src/config-remote.js": 55,
     "src/message/scheduler.js": 51,
     "src/message/diag-export.js": 48,

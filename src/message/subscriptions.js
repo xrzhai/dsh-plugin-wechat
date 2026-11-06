@@ -10,6 +10,7 @@
 import { statePath } from '../state-layout.js'
 import fs from 'node:fs'
 import { atomicWriteJson } from '../atomic.js'
+import { translate } from '../i18n.js'
 import { parseWhen } from './scheduler.js'
 import { armLongTimer } from './long-timer.js'
 
@@ -21,6 +22,7 @@ export const MAX_SUBSCRIPTION_PROMPT_CHARS = 500
 /** Retry an undelivered subscription without spinning or abandoning it. */
 const RETRY_BASE_MS = 1_000
 const RETRY_MAX_MS = 30_000
+const READ_ERROR = Symbol('subscription read error')
 
 const WEEKDAY_ALIASES = { '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '日': 7, '天': 7 }
 const WEEKDAY_NAMES = { 1: '一', 2: '二', 3: '三', 4: '四', 5: '五', 6: '六', 7: '日' }
@@ -99,22 +101,30 @@ export function readSubscriptions(stateRoot, warn = () => {}) {
     try {
         parsed = JSON.parse(fs.readFileSync(storePath(stateRoot), 'utf8'))
     } catch (error) {
-        if (error.code !== 'ENOENT') warn(`subscriptions.json unreadable, starting from an empty list: ${error.message}`)
-        return { seq: 0, items: [] }
+        if (error.code === 'ENOENT') return { seq: 0, items: [] }
+        warn(`subscriptions.json unreadable; preserving the file: ${error.message}`)
+        return { seq: 0, items: [], [READ_ERROR]: true }
     }
-    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return { seq: 0, items: [] }
-    const items = Array.isArray(parsed.items) ? parsed.items.filter((item) => (
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed) || !Array.isArray(parsed.items)) {
+        warn('subscriptions.json has an invalid structure; preserving the file')
+        return { seq: 0, items: [], [READ_ERROR]: true }
+    }
+    const items = parsed.items.filter((item) => (
         typeof item?.id === 'string'
         && typeof item?.accountId === 'string'
         && typeof item?.conversationId === 'string'
         && typeof item?.prompt === 'string'
         && (item.kind === 'daily' || item.kind === 'weekly' || item.kind === 'once')
-    )) : []
-    return { seq: typeof parsed.seq === 'number' ? parsed.seq : items.length, items }
+    ))
+    if (items.length !== parsed.items.length) {
+        warn('subscriptions.json contains unreadable entries; preserving the file')
+        return { seq: typeof parsed.seq === 'number' ? parsed.seq : items.length, items, [READ_ERROR]: true }
+    }
+    return { ...parsed, seq: typeof parsed.seq === 'number' ? parsed.seq : items.length, items }
 }
 
 export function writeSubscriptions(stateRoot, store, warn = () => {}) {
-    atomicWriteJson(storePath(stateRoot), { schemaVersion: 1, ...store }, { warn: (message) => warn(`subscriptions.json write failed: ${message}`) })
+    return atomicWriteJson(storePath(stateRoot), { schemaVersion: 1, ...store }, { warn: (message) => warn(`subscriptions.json write failed: ${message}`) })
 }
 
 /**
@@ -151,7 +161,7 @@ export class SubscriptionScheduler {
         this.pendingAttempts = new Set()
         this.stopped = false
         const now = this.nowRef()
-        for (const item of this.store.items) this.#reconcile(item, now)
+        if (!this.store[READ_ERROR]) for (const item of this.store.items) this.#reconcile(item, now)
     }
 
     /**
@@ -195,7 +205,7 @@ export class SubscriptionScheduler {
     }
 
     #arm(item, dueAt = item.fireAt) {
-        if (this.stopped) return
+        if (this.stopped || this.store[READ_ERROR]) return
         this.#clearTimer(item.id)
         let timer
         timer = armLongTimer({
@@ -275,6 +285,7 @@ export class SubscriptionScheduler {
      * @returns {object | { error: string }}
      */
     schedule(plan) {
+        if (this.store[READ_ERROR]) return { error: translate('error.timedMessageWriteFailed') }
         const prompt = String(plan.prompt ?? '').trim()
         if (prompt === '') return { error: '要定时说的话不能为空' }
         if (prompt.length > MAX_SUBSCRIPTION_PROMPT_CHARS) return { error: `主题太长（最多 ${MAX_SUBSCRIPTION_PROMPT_CHARS} 字）` }
@@ -282,7 +293,8 @@ export class SubscriptionScheduler {
         if (!when?.ok) return { error: when?.reason ?? '时间看不懂' }
         const pending = this.store.items.filter((item) => item.accountId === plan.accountId)
         if (pending.length >= MAX_SUBSCRIPTIONS_PER_ACCOUNT) return { error: `这个账号的定时消息太多了（最多 ${MAX_SUBSCRIPTIONS_PER_ACCOUNT} 条），先用 /subscribelist 看，/subscribecancel 删掉一些` }
-        const id = `s${++this.store.seq}`
+        const seq = this.store.seq + 1
+        const id = `s${seq}`
         const item = {
             id,
             accountId: plan.accountId,
@@ -294,21 +306,27 @@ export class SubscriptionScheduler {
             fireAt: when.kind === 'once' ? when.fireAt : nextFireAt({ kind: when.kind, time: when.time, weekday: when.weekday }, this.nowRef()),
             createdAt: this.nowRef(),
         }
-        this.store.items.push(item)
-        writeSubscriptions(this.stateRoot, this.store, this.warn)
+        const next = { ...this.store, seq, items: [...this.store.items, item] }
+        if (!writeSubscriptions(this.stateRoot, next, this.warn)) return { error: translate('error.timedMessageWriteFailed') }
+        this.store = next
         this.#arm(item)
         return item
     }
 
-    /** Remove one subscription by id (as shown by /subscribelist). */
-    cancel(id) {
-        if (this.#remove(id)) {
-            this.retryAttempts.delete(id)
-            this.pendingAttempts.delete(id)
-            writeSubscriptions(this.stateRoot, this.store, this.warn)
-            return true
-        }
-        return false
+    /** Remove one subscription by id, optionally scoped to a WeChat account. */
+    cancel(id, accountId) {
+        if (this.store[READ_ERROR]) return false
+        const index = this.store.items.findIndex((item) => item.id === id && (accountId === undefined || item.accountId === accountId))
+        if (index === -1) return false
+        const items = this.store.items.slice()
+        items.splice(index, 1)
+        const next = { ...this.store, items }
+        if (!writeSubscriptions(this.stateRoot, next, this.warn)) return false
+        this.store = next
+        this.#clearTimer(id)
+        this.retryAttempts.delete(id)
+        this.pendingAttempts.delete(id)
+        return true
     }
 
     #remove(id) {
