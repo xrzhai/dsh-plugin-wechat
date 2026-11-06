@@ -109,7 +109,7 @@ test('a timed-out transport frees the shared flush without acknowledging the seg
   const enqueue = conversationId => outbox.enqueue({ accountId: 'test', conversationId, text: 'sample' })
   const id = enqueue('one')
   const first = outbox.flush()
-  assert.equal(first, outbox.flush({ force: true }))
+  assert.equal(first, outbox.flush())
   await nextTurn()
   assert.equal(f.bodyReads, 1)
   t.mock.timers.tick(15_000) // sendMessage's production deadline
