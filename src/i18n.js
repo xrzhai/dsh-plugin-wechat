@@ -26,6 +26,11 @@ export const DEFAULT_LOCALE = 'zh'
  * it, so a key cannot be added in one language only.
  */
 export const CATALOG = Object.freeze({
+    'turn.aborted': { zh: '当前会话的回复已停止；任务是否完成请核查。', en: 'The current session reply stopped; check whether the task completed.' },
+    'turn.blocked': { zh: '当前会话的回复受阻，任务尚未确认完成；请查看会话后再决定下一步。', en: 'The current session reply was blocked. Task completion is unconfirmed; check the session before proceeding.' },
+    'turn.error': { zh: '当前会话的回复失败，任务尚未确认完成；请查看会话后再决定下一步。', en: 'The current session reply failed. Task completion is unconfirmed; check the session before proceeding.' },
+    'turn.unknown': { zh: '当前会话的回复已结束，但任务状态无法确认；请查看会话后再决定下一步。', en: 'The current session reply ended, but the task status is unknown. Check the session before proceeding.' },
+    'turn.unobserved': { zh: '未能等到当前会话的结束事件，任务状态无法确认；请查看会话后再决定下一步。', en: 'No terminal event was observed for the current session. Check the session before proceeding; the task status is unknown.' },
     'error.processing': { zh: '（处理失败：{reason}）', en: '(Processing failed: {reason})' },
     'error.accountPauseWrite': { zh: '无法保存账号暂停状态；连接状态未改变', en: 'Could not save the account pause state; the connection was left unchanged' },
     'error.accountResumeWrite': { zh: '无法保存账号恢复状态；连接状态未改变', en: 'Could not save the account resume state; the connection was left unchanged' },
