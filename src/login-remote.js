@@ -29,7 +29,7 @@ import { buildOnboardingChecklist } from "./onboarding.js";
 import { qrDataUrl } from "./qr-png.js";
 import fs from "node:fs";
 import path from "node:path";
-import { SessionLines, conversationSlug } from "./sessions.js";
+import { SessionLines, accountScope } from "./sessions.js";
 import { readJournal, DEFAULT_JOURNAL_LIMIT } from "./message/journal.js";
 import { readJournalRange, renderChatMarkdown } from "./message/chat-export.js";
 import { computeStats, buildHealth } from "./message/stats.js";
@@ -1039,14 +1039,12 @@ export class WeixinLoginController extends TypertRemoteService {
             // An unreadable index must not take the settings page down.
         }
         // The card must be able to tell accounts apart, so resolve each store
-        // key's account prefix back to a label. Keys are either
-        // `<accountSlug>:<conversationId>` (scoped) or a bare conversationId
-        // (pre-multi-account history). Matching by slug, not by prefix string,
-        // keeps the mapping honest even if an account id contains a colon.
+        // key's account prefix back to a label. Account digests retain the
+        // distinction between IDs that have the same readable slug.
         const registry = readRegistry();
-        const accountBySlug = new Map(
+        const accountByScope = new Map(
             Object.keys(registry).map((id) => [
-                conversationSlug(id),
+                accountScope(id),
                 { id, label: typeof registry[id]?.label === "string" ? registry[id].label : null },
             ]),
         );
@@ -1055,13 +1053,14 @@ export class WeixinLoginController extends TypertRemoteService {
             const lines = Array.isArray(entry?.lines) ? entry.lines : [];
             if (lines.length === 0) continue;
             const sep = conversationId.indexOf(":");
-            const account = sep > 0 ? accountBySlug.get(conversationId.slice(0, sep)) ?? null : null;
+            const account = sep > 0 ? accountByScope.get(conversationId.slice(0, sep)) : undefined;
+            // Older unscoped entries remain on disk but cannot control a new scoped conversation.
+            if (account === undefined) continue;
             conversations.push({
                 conversationId,
-                // Both null for a pre-multi-account bare key; the card shows no
-                // account chip for those.
-                accountId: account?.id ?? null,
-                accountLabel: account?.label ?? null,
+                conversationLabel: conversationId.slice(sep + 1),
+                accountId: account.id,
+                accountLabel: account.label,
                 active: typeof entry.active === "string" ? entry.active : lines[0].sessionId,
                 lines: lines.map((line) => ({
                     sessionId: String(line.sessionId ?? ""),

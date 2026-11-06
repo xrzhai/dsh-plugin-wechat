@@ -606,12 +606,17 @@ export function apply(ctx, config) {
         },
         onSpontaneousReply: async ({ accountId: targetAccountId, conversationId: targetConvId, text: spontaneousText }) => {
           if (!spontaneousText || !String(spontaneousText).trim()) return
-          const liveTransport = (targetAccountId ? transports.get(targetAccountId) : undefined) ?? [...transports.values()][0]
-          if (!liveTransport) return
+          const liveTransport = targetAccountId ? transports.get(targetAccountId) : undefined
+          if (!liveTransport || cancelled || !gatewayEnabled() || isAccountPaused(targetAccountId)) {
+            throw new Error('the originating account is unavailable for the reply')
+          }
           const liveCfg = withSavedConfig(config)
           try {
             await liveTransport.refreshConfig()
           } catch {}
+          if (cancelled || !gatewayEnabled() || isAccountPaused(targetAccountId) || transports.get(targetAccountId) !== liveTransport) {
+            throw new Error('the originating account became unavailable for the reply')
+          }
           const outbound = await resolveOutboundReply({
             config: liveCfg,
             transport: liveTransport,
@@ -2026,30 +2031,6 @@ ${neutralizeTags(ocr.text)}
             contextToken: await sendToken(),
             durable: false,
           })
-        },
-        onSpontaneousReply: async ({ conversationId: targetConvId, text: spontaneousText }) => {
-          if (!spontaneousText || !String(spontaneousText).trim()) return
-          try {
-            await transport.refreshConfig()
-          } catch {}
-          const outbound = await resolveOutboundReply({
-            config: effectiveConfig.current,
-            transport,
-            mediaDirs,
-            stateRoot,
-            reply: spontaneousText,
-            conversationId: targetConvId,
-            contextToken: '',
-            warn,
-            fileLog,
-          })
-          await sendChunked(transport, effectiveConfig.current, {
-            conversationId: targetConvId,
-            text: outbound.text,
-            contextToken: '',
-          })
-          log(`spontaneous reply (e.g. subagent completion) delivered to ${targetConvId}`)
-          fileLog.info(`spontaneous reply delivered to ${targetConvId}`)
         },
         // A turn that outlives the wait still owes the user its answer: the
         // notice goes out through the caller's context token, and the late

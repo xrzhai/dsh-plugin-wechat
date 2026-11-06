@@ -143,6 +143,35 @@ test('a recent unrelated file is not sent, while a referenced result still is', 
   assert.equal(f.media[0].filePath, fs.realpathSync(path.join(f.root, 'unrelated.pdf')))
 })
 
+test('later results use the originating account and stop if it is paused during refresh', async (t) => {
+  const refreshing = deferred()
+  const continueRefresh = deferred()
+  let holdRefresh = false
+  let bridge
+  const f = fixture(t, {
+    enabled: true,
+    async refresh() {
+      if (holdRefresh) { refreshing.resolve(); await continueRefresh.promise }
+    },
+    async deliver() { bridge = this; return { text: '[SILENT]' } },
+  })
+  t.after(() => continueRefresh.resolve())
+  await until(() => f.started.length === 1, 'transport starts')
+  await f.started[0].testInbound(f.message('capture-bridge'))
+  await assert.rejects(bridge.onSpontaneousReply({ accountId: 'another-account', conversationId: 'test-user', text: 'wrong account' }), /originating account/)
+  assert.deepEqual(f.sent, [])
+  await bridge.onSpontaneousReply({ accountId: ACCOUNT, conversationId: 'test-user', text: 'right account' })
+  assert.deepEqual(f.sent.map((message) => message.text), ['right account'])
+
+  holdRefresh = true
+  const pending = bridge.onSpontaneousReply({ accountId: ACCOUNT, conversationId: 'test-user', text: 'too late' })
+  await refreshing.promise
+  await f.login.pause(ACCOUNT)
+  continueRefresh.resolve()
+  await assert.rejects(pending, /originating account/)
+  assert.deepEqual(f.sent.map((message) => message.text), ['right account'])
+})
+
 test('retired away state cannot intercept private messages or be rewritten by the gateway', async (t) => {
   const contents = JSON.stringify({
     schemaVersion: 1,

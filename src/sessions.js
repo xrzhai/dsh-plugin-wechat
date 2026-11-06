@@ -25,13 +25,13 @@
  * still there, which is what makes `/list` + `/use` useful rather than a
  * one-way reset.
  *
- * The first line keeps the historical deterministic id, so a conversation that
- * existed before this feature was added carries its context forward instead of
- * appearing to lose it on upgrade.
+ * New conversations use a deterministic id based on both the account and the
+ * original conversation id, so different sources cannot share a host session.
  *
  * @module dsh-weixin/src/sessions
  */
 import fs from 'node:fs'
+import { createHash } from 'node:crypto'
 import { translate } from './i18n.js'
 import path from 'node:path'
 
@@ -53,55 +53,42 @@ const LINES_FILE = 'sessions.json'
 export const LIST_LIMIT = 10
 
 /**
- * Fold an arbitrary conversation id into a filesystem- and URL-safe slug.
- *
- * Kept byte-identical to the historical {@link sessionIdFor} behavior: the
- * first line's id must not change on upgrade, or every existing conversation
- * would start from an empty context.
- *
- * @param {string} conversationId
- * @returns {string}
- */
-export function conversationSlug(conversationId) {
-  const slug = String(conversationId ?? '')
-    .replace(/[^a-zA-Z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-  return slug || 'default'
-}
-
-/**
  * Store key for one conversation under one account.
  *
  * Accounts are separated at the store level: two bots that somehow report the
  * same conversation id must never share a line list, or a message meant for
- * one account could land in the other's session. The slug is the same fold
- * used for session ids, so the key stays readable even though it is only ever
- * a JSON key.
+ * one account could land in the other's session. The account digest preserves
+ * the distinction between IDs that differ only in punctuation.
  *
- * With no account (or a blank one) the bare conversation id is used, which
- * keeps pre-multi-account entries working unchanged.
+ * With no account (or a blank one) the bare key is used by the settings card.
  *
  * @param {string | undefined} accountId
  * @param {string} conversationId
  * @returns {string}
  */
+export function accountScope(accountId) {
+  return createHash('sha256').update(String(accountId)).digest('hex')
+}
+
 export function scopedLineKey(accountId, conversationId) {
-  const slug = String(accountId ?? '').trim()
-  if (slug === '') return conversationId
-  return `${conversationSlug(slug)}:${conversationId}`
+  const account = String(accountId ?? '').trim()
+  if (account === '') return conversationId
+  return `${accountScope(account)}:${conversationId}`
 }
 
 /**
  * Session id for the FIRST line of a conversation.
  *
- * This is the historical id and must stay stable forever: it is what every
- * session created before session lines existed is named.
+ * Account and conversation are encoded together before hashing: punctuation
+ * folding alone cannot distinguish all valid source IDs.
  *
  * @param {string} conversationId
+ * @param {string} [accountId]
  * @returns {string}
  */
-export function baseSessionIdFor(conversationId) {
-  return `weixin-${conversationSlug(conversationId)}`
+export function baseSessionIdFor(conversationId, accountId) {
+  const source = JSON.stringify([String(accountId ?? '').trim(), String(conversationId ?? '')])
+  return `weixin-${createHash('sha256').update(source).digest('hex')}`
 }
 
 /**
@@ -113,11 +100,12 @@ export function baseSessionIdFor(conversationId) {
  *
  * @param {string} conversationId
  * @param {number} [now]
+ * @param {string} [accountId]
  * @returns {string}
  */
-export function newSessionIdFor(conversationId, now = Date.now()) {
+export function newSessionIdFor(conversationId, now = Date.now(), accountId) {
   const suffix = Math.random().toString(36).slice(2, 8)
-  return `${baseSessionIdFor(conversationId)}--${now.toString(36)}${suffix}`
+  return `${baseSessionIdFor(conversationId, accountId)}--${now.toString(36)}${suffix}`
 }
 
 /** Absolute path of the line store. */
@@ -171,7 +159,7 @@ export function readLines() {
 export function mostRecentConversationId(accountId, store = readLines()) {
   const account = String(accountId ?? '').trim()
   if (account === '') return undefined
-  const prefix = `${conversationSlug(account)}:`
+  const prefix = `${accountScope(account)}:`
   let best
   for (const [key, entry] of Object.entries(store)) {
     if (!key.startsWith(prefix) || key.length === prefix.length) continue
@@ -300,7 +288,7 @@ export class SessionLines {
    * Lines recorded for a conversation, oldest first.
    *
    * A conversation that has never been seen reports its first line as
-   * existing-but-unrecorded, so the caller attaches the historical id without
+   * existing-but-unrecorded, so the caller attaches a stable id without
    * writing anything to disk. Persisting on read would create an entry for
    * every conversation that ever merely sent a message, including ones whose
    * allowlist check later refused them.
@@ -313,7 +301,7 @@ export class SessionLines {
     const key = scopedLineKey(accountId, conversationId)
     const entry = this.store[key]
     if (entry === undefined || !Array.isArray(entry.lines) || entry.lines.length === 0) {
-      return [{ sessionId: baseSessionIdFor(conversationId), title: undefined }]
+      return [{ sessionId: baseSessionIdFor(conversationId, accountId), title: undefined }]
     }
     return entry.lines
   }
@@ -358,11 +346,11 @@ export class SessionLines {
    */
   clear(conversationId, accountId) {
     // Write the fresh line directly rather than going through create(): the
-    // empty list would make list() synthesize the historical base id and
+    // empty list would make list() synthesize the default base id and
     // create() would push onto it, silently resurrecting the line /clear was
     // asked to remove.
     const now = new Date().toISOString()
-    const sessionId = newSessionIdFor(conversationId)
+    const sessionId = newSessionIdFor(conversationId, Date.now(), accountId)
     this.#set(scopedLineKey(accountId, conversationId), { lines: [{ sessionId, createdAt: now, lastUsedAt: now }], active: sessionId })
     return sessionId
   }
@@ -377,7 +365,7 @@ export class SessionLines {
    */
   create(conversationId, accountId) {
     const now = new Date().toISOString()
-    const sessionId = newSessionIdFor(conversationId)
+    const sessionId = newSessionIdFor(conversationId, Date.now(), accountId)
     const lines = this.list(conversationId, accountId).slice()
     lines.push({ sessionId, createdAt: now, lastUsedAt: now })
     this.#set(scopedLineKey(accountId, conversationId), { lines, active: sessionId })

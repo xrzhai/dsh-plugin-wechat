@@ -1103,7 +1103,7 @@ window.__ModuleLoader__.load({
 									? conversation.accountLabel
 									: conversation.accountId)
 							: null,
-						createElement("span", null, conversation.conversationId)),
+						createElement("span", null, conversation.conversationLabel ?? conversation.conversationId)),
 					createElement("div", { style: { display: "flex", flexDirection: "column", gap: 6 } },
 						...conversation.lines.map((line, index) => {
 							const isActive = line.sessionId === conversation.active;

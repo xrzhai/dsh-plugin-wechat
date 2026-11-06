@@ -3,10 +3,11 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { mostRecentConversationId, runSessionCommand, SessionLines } from '../src/sessions.js'
+import { mostRecentConversationId, runSessionCommand, scopedLineKey, SessionLines } from '../src/sessions.js'
 import { WeixinLoginController } from '../src/login-remote.js'
 import { ConfigController } from '../src/config-remote.js'
 import { configFile } from '../src/state.js'
+import { writeRegistry } from '../src/account-registry.js'
 
 function sessionLines() {
   return {
@@ -101,16 +102,16 @@ test('/new distinguishes a bare command from an explicit title using real sessio
 
 test('notify target is the latest same-account conversation and respects ISO offsets', () => {
   const store = {
-    'account-a:old@im': {
+    [scopedLineKey('account-a', 'old@im')]: {
       lines: [{ sessionId: 'old', lastUsedAt: '2026-11-05T00:00:00.000Z' }],
     },
-    'account-b:newest@im': {
+    [scopedLineKey('account-b', 'newest@im')]: {
       lines: [{ sessionId: 'other', lastUsedAt: '2026-11-05T10:00:00.000Z' }],
     },
-    'account-a:offset@im': {
+    [scopedLineKey('account-a', 'offset@im')]: {
       lines: [{ sessionId: 'offset', lastUsedAt: '2026-11-05T17:00:00+08:00' }],
     },
-    'account-a:fallback@im': {
+    [scopedLineKey('account-a', 'fallback@im')]: {
       lines: [
         { sessionId: 'first', lastUsedAt: 'not-a-date', createdAt: '2026-11-05T08:30:00.000Z' },
         { sessionId: 'second', createdAt: '2026-11-05T01:00:00.000Z' },
@@ -122,5 +123,30 @@ test('notify target is the latest same-account conversation and respects ISO off
   assert.equal(mostRecentConversationId('account-b', store), 'newest@im')
   assert.equal(mostRecentConversationId('missing-account', store), undefined)
   assert.equal(mostRecentConversationId('account-a', {}), undefined)
-  assert.equal(mostRecentConversationId('account-a', { 'account-a:': { lines: [{ lastUsedAt: '2026-11-05T10:00:00Z' }] } }), undefined)
+  assert.equal(mostRecentConversationId('account-a', { [scopedLineKey('account-a', '')]: { lines: [{ lastUsedAt: '2026-11-05T10:00:00Z' }] } }), undefined)
+})
+
+test('the topic card shows the real chat while its actions use the account-scoped key', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'weixin-topic-scope-'))
+  const previous = process.env.DSH_WEIXIN_STATE_DIR
+  process.env.DSH_WEIXIN_STATE_DIR = root
+  t.after(() => {
+    if (previous === undefined) delete process.env.DSH_WEIXIN_STATE_DIR
+    else process.env.DSH_WEIXIN_STATE_DIR = previous
+    fs.rmSync(root, { recursive: true, force: true })
+  })
+  writeRegistry({ 'bot-A': { label: 'first' }, 'bot@A': { label: 'second' } })
+  const lines = new SessionLines()
+  lines.create('shared:chat', 'bot-A')
+  lines.create('shared:chat', 'bot@A')
+  const oldSession = lines.create('legacy-chat')
+  const { conversations } = await WeixinLoginController.prototype.sessions.call({})
+  assert.equal(conversations.length, 2)
+  assert.deepEqual(new Set(conversations.map((row) => row.accountId)), new Set(['bot-A', 'bot@A']))
+  assert.ok(conversations.every((row) => row.conversationLabel === 'shared:chat'))
+  const first = conversations.find((row) => row.accountId === 'bot-A')
+  const result = await WeixinLoginController.prototype.useSession.call({}, first.conversationId, 1)
+  assert.equal(result.switched, true)
+  assert.equal(new SessionLines().active('shared:chat', 'bot-A'), first.lines[0].sessionId)
+  assert.equal(new SessionLines().active('legacy-chat'), oldSession)
 })

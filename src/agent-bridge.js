@@ -72,16 +72,16 @@ async function loadInstallModelSelection() {
  *
  * Stable across restarts so the conversation survives a plugin reload, and
  * prefixed so a session can be recognized as Weixin-owned in the GUI.
- * Non-alphanumerics are folded to `-` to keep the id filesystem- and
- * URL-safe.
+ * The source account and original conversation id are hashed together so
+ * the id is filesystem-safe without folding distinct conversations together.
  *
  * This is now the id of a conversation's FIRST session line; see
- * `src/sessions.js` for why a conversation can have several and why this id
- * must never change.
+ * `src/sessions.js` for how a conversation can have several.
  * @param {string} conversationId
+ * @param {string} [accountId]
  */
-export function sessionIdFor(conversationId) {
-  return baseSessionIdFor(conversationId)
+export function sessionIdFor(conversationId, accountId) {
+  return baseSessionIdFor(conversationId, accountId)
 }
 
 /**
@@ -756,7 +756,7 @@ export class AgentBridge {
         // turn this delivery did not start, so return immediately with a
         // receipt. The steered turn's eventual reply belongs to the turn's
         // own delivery wait.
-        return { text: '（已把补充指令插入正在进行的回复中）', sessionId: record.agent.session?.id ?? sessionId ?? baseSessionIdFor(conversationId) }
+        return { text: '（已把补充指令插入正在进行的回复中）', sessionId: record.agent.session?.id ?? sessionId ?? baseSessionIdFor(conversationId, accountId) }
       }
       // queue (default): FIFO tail drained when the running turn settles.
       return await this.#enqueue({ record, conversationId, accountId, text, onProgress, signal, onLateReply, onSpontaneousReply, senderId })
@@ -865,7 +865,7 @@ export class AgentBridge {
    * reply path once the turn runs.
    */
   async #enqueue({ record, conversationId, accountId, text, onProgress, signal, onLateReply, onSpontaneousReply, senderId }) {
-    const sessionId = record.agent.session?.id ?? this.conversationTargets.get(scopedLineKey(accountId, conversationId)) ?? baseSessionIdFor(conversationId)
+    const sessionId = record.agent.session?.id ?? this.conversationTargets.get(scopedLineKey(accountId, conversationId)) ?? baseSessionIdFor(conversationId, accountId)
     const entry = { text, onProgress, signal, onLateReply, onSpontaneousReply, senderId, accountId, conversationId }
     entry.done = new Promise((resolve) => { entry.resolveDone = resolve })
     record.queue.push(entry)
