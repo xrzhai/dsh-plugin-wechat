@@ -10,6 +10,7 @@ import { HOOK_POINTS } from './hooks.js'
 import { chunkText } from './message/chunker.js'
 import { markdownToPlainText, resolveMarkdownMode } from './message/markdown.js'
 import { planRichContent, writeSnippets } from './message/rich-content.js'
+import { createTranslator } from './i18n.js'
 
 /** Wired in setup; every field defaults so a test can exercise one sender. */
 const runtime = {
@@ -66,6 +67,25 @@ export async function sendChunked(transport, config, message) {
     text,
   })
   const chunks = chunkText(text, config.maxMessageLength)
+  const sent = await sendTextChunks(transport, config, message, chunks, plan.files)
+  if (sent && plan.files.length > 0) {
+    const failed = await sendSnippets(transport, message, plan.files)
+    if (failed.length > 0) {
+      const fallback = snippetFallback(config, failed)
+      runtime.journal?.({ accountId: transport.accountId, conversationId: message.conversationId, text: fallback })
+      await sendTextChunks(transport, config, message, chunkText(fallback, config.maxMessageLength))
+    }
+  }
+}
+
+/** Inline original code without applying Markdown or table conversion. */
+function snippetFallback(config, files) {
+  const t = createTranslator(config.locale).t
+  return files.map((file) => `\n\n${t('notice.snippetFallback', { name: file.name })}\n${file.body}`).join('')
+}
+
+/** Send exact chunks and persist only the unsent suffix, including code fallback. */
+async function sendTextChunks(transport, config, message, chunks, pendingFiles = []) {
   for (let index = 0; index < chunks.length; index += 1) {
     // Everything downstream of here talks to a Channel, not a transport: the
     // shape of a text send lives in one place (src/channel.js) instead of being
@@ -83,6 +103,9 @@ export async function sendChunked(transport, config, message) {
       // records progress after each success, so neither a retry nor a restart
       // can resend the successful prefix or create one oversized message.
       const pendingChunks = chunks.slice(index)
+      if (pendingFiles.length > 0) {
+        pendingChunks.push(...chunkText(snippetFallback(config, pendingFiles), config.maxMessageLength))
+      }
       const pending = pendingChunks.join('')
       // Ephemeral sends (progress notes, "still working" lines) must never
       // become durable dead letters: a "running: pwsh (13m)" note retried an
@@ -98,7 +121,7 @@ export async function sendChunked(transport, config, message) {
           dropped: pending.length,
         })
         runtime.warn(`ephemeral send failed (${String(error?.message ?? error)}); dropped ${pending.length} chars`)
-        return
+        return false
       }
       if (runtime.outbox !== undefined) {
         runtime.outbox.enqueue({
@@ -111,41 +134,48 @@ export async function sendChunked(transport, config, message) {
         })
         runtime.hooks?.emit(HOOK_POINTS.outboundSettled, { accountId: transport.accountId, conversationId: message.conversationId, sent: false, queued: pending.length })
         runtime.warn(`send failed (${String(error?.message ?? error)}); queued ${pending.length} chars for retry`)
-        return
+        return false
       }
       throw error
     }
   }
-  if (plan.files.length > 0) await sendSnippets(transport, message, plan.files)
+  return true
 }
 
 /**
  * Attach the snippet files a rich reply planned.
  *
- * A file that cannot be written or sent costs one log line: the note in the
- * text already told the reader a file was sent, but losing the whole reply over
- * a pretty-printed code block would be worse.
+ * Return failed files so their unmodified bodies can be sent as text instead.
  */
 async function sendSnippets(transport, message, files) {
+  const channel = channelFor(transport)
+  if (channel === undefined || channel.capabilities?.media !== true) return files
   const dir = runtime.snippetsDir
   if (dir === '') {
-    runtime.warn('rich reply produced snippet files but no snippet directory is configured; sending them inline is not possible at this point')
-    return
+    runtime.warn('rich reply produced snippet files but no snippet directory is configured')
+    return files
   }
   const { written } = writeSnippets(files, dir, { warn: runtime.warn })
-  const channel = channelFor(transport)
-  if (channel === undefined || channel.capabilities?.media !== true) return
-  for (const file of written) {
+  const byName = new Map(written.map((file) => [file.name, file]))
+  const failed = []
+  for (const file of files) {
+    const output = byName.get(file.name)
+    if (output === undefined) {
+      failed.push(file)
+      continue
+    }
     try {
       await channel.sendMedia({
         conversationId: message.conversationId,
-        filePath: file.path,
+        filePath: output.path,
         text: '',
         contextToken: message.contextToken,
       })
     } catch (error) {
       runtime.warn(`snippet ${file.name} could not be sent: ${String(error?.message ?? error)}`)
+      failed.push(file)
     }
   }
+  return failed
 }
 

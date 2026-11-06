@@ -29,7 +29,7 @@
     "src/session-dispatcher.js": 5,
     "bin/onboard.mjs": 4,
     "src/message/chat-export.js": 4,
-    "src/message/rich-content.js": 4,
+    "src/message/rich-content.js": 3,
     "bin/release.mjs": 2,
     "src/host-compat.js": 2,
     "src/media/document.js": 2,
