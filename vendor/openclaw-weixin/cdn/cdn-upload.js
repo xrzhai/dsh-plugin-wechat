@@ -1,9 +1,11 @@
+import { isRequestTimeout, withRequestDeadline } from "../util/request-deadline.js";
 import { encryptAesEcb } from "./aes-ecb.js";
 import { buildCdnUploadUrl } from "./cdn-url.js";
 import { logger } from "../util/logger.js";
 import { redactUrl } from "../util/redact.js";
 /** Maximum retry attempts for CDN upload. */
 const UPLOAD_MAX_RETRIES = 3;
+const UPLOAD_TIMEOUT_MS = 120_000;
 /**
  * Upload one buffer to the Weixin CDN with AES-128-ECB encryption.
  * Returns the download encrypted_query_param from the CDN response.
@@ -28,20 +30,31 @@ export async function uploadBufferToCdn(params) {
     let lastError;
     for (let attempt = 1; attempt <= UPLOAD_MAX_RETRIES; attempt++) {
         try {
-            const res = await fetch(cdnUrl, {
-                method: "POST",
-                headers: { "Content-Type": "application/octet-stream" },
-                body: new Uint8Array(ciphertext),
+            const { res, errMsg } = await withRequestDeadline({
+                label: "CDN upload",
+                timeoutMs: params.timeoutMs ?? UPLOAD_TIMEOUT_MS,
+            }, async (signal) => {
+                const res = await fetch(cdnUrl, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/octet-stream" },
+                    body: new Uint8Array(ciphertext),
+                    signal,
+                });
+                // Success metadata is in headers. Only read a diagnostic body when needed.
+                const errMsg = res.headers.get("x-error-message");
+                if (res.status >= 400 && res.status < 500 && errMsg == null)
+                    return { res, errMsg: await res.text() };
+                void res.body?.cancel().catch(() => {});
+                return { res, errMsg };
             });
             if (res.status >= 400 && res.status < 500) {
-                const errMsg = res.headers.get("x-error-message") ?? (await res.text());
                 logger.error(`${label}: CDN client error attempt=${attempt} status=${res.status} errMsg=${errMsg}`);
                 throw new Error(`CDN upload client error ${res.status}: ${errMsg}`);
             }
             if (res.status !== 200) {
-                const errMsg = res.headers.get("x-error-message") ?? `status ${res.status}`;
-                logger.error(`${label}: CDN server error attempt=${attempt} status=${res.status} errMsg=${errMsg}`);
-                throw new Error(`CDN upload server error: ${errMsg}`);
+                const detail = errMsg ?? `status ${res.status}`;
+                logger.error(`${label}: CDN server error attempt=${attempt} status=${res.status} errMsg=${detail}`);
+                throw new Error(`CDN upload server error: ${detail}`);
             }
             downloadParam = res.headers.get("x-encrypted-param") ?? undefined;
             if (!downloadParam) {
@@ -52,6 +65,8 @@ export async function uploadBufferToCdn(params) {
             break;
         }
         catch (err) {
+            if (isRequestTimeout(err))
+                throw err;
             lastError = err;
             if (err instanceof Error && err.message.includes("client error"))
                 throw err;
