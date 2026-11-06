@@ -1,3 +1,4 @@
+import { isRequestTimeout, withRequestDeadline } from "../util/request-deadline.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -210,7 +211,7 @@ function buildHeaders(opts) {
  * This does NOT cover HTTP-level errors (4xx/5xx) — those are thrown separately.
  */
 export function classifyFetchError(err) {
-    if (err instanceof Error && err.name === "AbortError") {
+    if (err instanceof Error && (err.name === "AbortError" || err.name === "TimeoutError")) {
         return { type: "timeout", description: "request timeout" };
     }
     const cause = err?.cause;
@@ -287,30 +288,6 @@ export async function apiGetFetch(params) {
     }
 }
 /**
- * Combine an internal timeout controller with an optional external abort signal.
- * This lets gateway channel-stop aborts cancel in-flight long-poll requests
- * immediately while preserving the existing timeout-driven AbortError path.
- */
-function combineAbortSignals(params) {
-    const { internal, external } = params;
-    if (!external) {
-        return { signal: internal?.signal, cleanup: () => { } };
-    }
-    if (!internal) {
-        return { signal: external, cleanup: () => { } };
-    }
-    if (external.aborted) {
-        internal.abort();
-        return { signal: internal.signal, cleanup: () => { } };
-    }
-    const onExternalAbort = () => internal.abort();
-    external.addEventListener("abort", onExternalAbort, { once: true });
-    return {
-        signal: internal.signal,
-        cleanup: () => external.removeEventListener("abort", onExternalAbort),
-    };
-}
-/**
  * Common fetch wrapper: POST JSON to a Weixin API endpoint.
  * When `timeoutMs` is provided, the request is aborted after that many milliseconds.
  * When omitted, no client-side timeout is applied (relies on OS/TCP stack).
@@ -324,24 +301,16 @@ export async function apiPostFetch(params) {
     const url = new URL(params.endpoint, base);
     const hdrs = buildHeaders({ token: params.token });
     logger.debug(`POST ${redactUrl(url.toString())} body=${redactBody(params.body)}`);
-    const controller = params.timeoutMs !== undefined ? new AbortController() : undefined;
-    const t = controller != null && params.timeoutMs !== undefined
-        ? setTimeout(() => controller.abort(), params.timeoutMs)
-        : undefined;
-    const { signal, cleanup } = combineAbortSignals({
-        internal: controller,
-        external: params.abortSignal,
-    });
     try {
-        const res = await fetch(url.toString(), {
-            method: "POST",
-            headers: hdrs,
-            body: params.body,
-            ...(signal ? { signal } : {}),
+        const { res, rawText } = await withRequestDeadline(params, async (signal) => {
+            const res = await fetch(url.toString(), {
+                method: "POST",
+                headers: hdrs,
+                body: params.body,
+                ...(signal ? { signal } : {}),
+            });
+            return { res, rawText: await res.text() };
         });
-        if (t !== undefined)
-            clearTimeout(t);
-        const rawText = await res.text();
         logger.debug(`${params.label} status=${res.status} raw=${redactBody(rawText)}`);
         if (!res.ok) {
             throw new Error(`${params.label} ${res.status}: ${rawText}`);
@@ -349,14 +318,9 @@ export async function apiPostFetch(params) {
         return rawText;
     }
     catch (err) {
-        if (t !== undefined)
-            clearTimeout(t);
         const classified = classifyFetchError(err);
         logger.error(`${params.label}: POST fetch failed url=${redactUrl(url.toString())} timeoutMs=${params.timeoutMs ?? "none"} type=${classified.type} description=${classified.description}${classified.code ? ` code=${classified.code}` : ""} error=${String(err)}`);
         throw err;
-    }
-    finally {
-        cleanup();
     }
 }
 /**
@@ -386,7 +350,7 @@ export async function getUpdates(params) {
     catch (err) {
         // Long-poll timeout or external abort are both normal control-flow exits.
         // The monitor loop checks abortSignal after return and exits when needed.
-        if (err instanceof Error && err.name === "AbortError") {
+        if (err instanceof Error && (err.name === "AbortError" || err.name === "TimeoutError")) {
             if (params.abortSignal?.aborted) {
                 logger.debug(`getUpdates: aborted by external signal`);
             }
@@ -506,14 +470,23 @@ export class SendMessageRejectedError extends Error {
 }
 /** Send a single message downstream and return the server-assigned message ID. */
 export async function sendMessage(params) {
-    const rawText = await apiPostFetch({
-        baseUrl: params.baseUrl,
-        endpoint: "ilink/bot/sendmessage",
-        body: JSON.stringify({ ...params.body, base_info: buildBaseInfo() }),
-        token: params.token,
-        timeoutMs: params.timeoutMs ?? DEFAULT_API_TIMEOUT_MS,
-        label: "sendMessage",
-    });
+    let rawText;
+    try {
+        rawText = await apiPostFetch({
+            baseUrl: params.baseUrl,
+            endpoint: "ilink/bot/sendmessage",
+            body: JSON.stringify({ ...params.body, base_info: buildBaseInfo() }),
+            token: params.token,
+            timeoutMs: params.timeoutMs ?? DEFAULT_API_TIMEOUT_MS,
+            label: "sendMessage",
+        });
+    }
+    catch (err) {
+        // Neither missing headers nor an incomplete body proves the POST failed.
+        if (isRequestTimeout(err))
+            err.deliveryUncertain = true;
+        throw err;
+    }
     const resp = parseWeixinApiJson(rawText);
     if (resp.ret && resp.ret !== 0) {
         throw new SendMessageRejectedError(resp.ret, resp.errmsg);
