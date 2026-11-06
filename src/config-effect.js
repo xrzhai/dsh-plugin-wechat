@@ -58,7 +58,7 @@ export const CONFIG_EFFECTS = Object.freeze({
   'toolAudit': 'restart', 'markdownMode': 'restart', 'sourceContext': 'restart', 'readLinks': 'restart',
   'progressAfterMs': 'restart', 'progressToolAfterMs': 'restart', 'progressEveryMs': 'restart',
   'maxTurnWaitMs': 'restart', 'eventPollMs': 'restart',
-  'typingIndicator': 'restart', 'mediaEnabled': 'restart', 'autoSendFiles': 'restart',
+  'typingIndicator': 'restart', 'mediaEnabled': 'restart',
   'maxMediaBytes': 'restart', 'maxInboundMediaBytes': 'restart', 'cdnBaseUrl': 'restart',
   'asr': 'restart',
 })

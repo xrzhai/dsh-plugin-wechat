@@ -46,7 +46,7 @@ import { DEFAULT_KEEP, createBackup } from './backup.js'
 import { HEARTBEAT_MS, acquireInstanceLock, heartbeatInstanceLock, releaseInstanceLock } from './instance-lock.js'
 import { createOutbox, formatOutbox, CONTEXT_TOKEN_TTL_MS } from './message/outbox.js'
 import { createGatewayControl } from './gateway-control.js'
-import { configureOutbound, sendChunked, sendProducedFiles } from './outbound.js'
+import { configureOutbound, sendChunked } from './outbound.js'
 import { HOOK_POINTS, createHooks } from './hooks.js'
 import { createMetrics, exportMetricsSnapshot } from './metrics.js'
 import { ensureSecretModes, redactSecrets } from './credentials.js'
@@ -260,7 +260,6 @@ export const Config = z.object({
   // `groupReplyWhen` above.
   typingIndicator: z.boolean().default(true).description('Show a typing indicator while the agent works, when a typing ticket is available.'),
   mediaEnabled: z.boolean().default(true).description('Send local files the agent references in its reply as Weixin images/videos/file attachments.'),
-  autoSendFiles: z.boolean().default(false).description('Also deliver files the agent wrote into its working directory during a turn, even when the reply text never references them.'),
   maxMediaBytes: z.number().default(DEFAULT_MAX_MEDIA_BYTES).description('Largest referenced file that will be uploaded to the Weixin CDN.'),
   maxInboundMediaBytes: z
     .number()
@@ -1049,10 +1048,6 @@ export function apply(ctx, config) {
         // Resolved once: the allowlist is a property of the deployment, not of
         // the message, and re-resolving per reply would re-stat every directory.
         mediaDirs: allowedMediaDirs({ cwd, stateDir: stateRoot }),
-        // The directory produced-file delivery scans after a turn (see
-        // sendProducedFiles). The same value the agent bridge registers as the
-        // workspace, so "what the agent wrote" is well defined.
-        agentCwd: cwd,
         reminderScheduler,
         subscriptionScheduler,
         journalInbound: (entry) => appendJournal(stateRoot, { dir: 'in', ...entry }, { warn }),
@@ -1394,7 +1389,7 @@ export function weixinSourceBlock(message) {
   return `<weixin_source ${fields.join(' ')} />`
 }
 
-function createInboundHandler({ config, accountId, transport, bridge, asrBridge, seen, log, warn, fileLog, stateRoot, mediaDirs, agentCwd, reminderScheduler, subscriptionScheduler, journalInbound, senderGate, senderDailyGate }) {
+function createInboundHandler({ config, accountId, transport, bridge, asrBridge, seen, log, warn, fileLog, stateRoot, mediaDirs, reminderScheduler, subscriptionScheduler, journalInbound, senderGate, senderDailyGate }) {
   // The effective allowlist is per account: an account-level override in the
   // registry narrows (or replaces) the global list.
   // `accountId` is always set here (bringUpAccount passes it), but the
@@ -2087,18 +2082,6 @@ ${neutralizeTags(ocr.text)}
             text: outbound.text,
             contextToken: '',
           })
-          await sendProducedFiles({
-            config,
-            transport,
-            mediaDirs,
-            agentCwd,
-            sinceMs: startedAt,
-            alreadySent: outbound.sent,
-            conversationId: message.conversationId,
-            contextToken: '',
-            warn,
-            fileLog,
-          })
           log(`late reply delivered for ${message.conversationId}`)
           fileLog.info(`late reply delivered to ${message.conversationId} after the wait gave up`)
         },
@@ -2141,18 +2124,6 @@ ${neutralizeTags(ocr.text)}
         conversationId: message.conversationId,
         text: outbound.text,
         contextToken: replyToken,
-      })
-      await sendProducedFiles({
-        config,
-        transport,
-        mediaDirs,
-        agentCwd,
-        sinceMs: startedAt,
-        alreadySent: outbound.sent,
-        conversationId: message.conversationId,
-        contextToken: replyToken,
-        warn,
-        fileLog,
       })
     } catch (error) {
       warn(`turn failed: ${String(error)}`)

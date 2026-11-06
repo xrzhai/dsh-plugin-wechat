@@ -55,7 +55,7 @@ function seedSubscription(root, prompt) {
 
 // Real Cordis services, persistence, apply(), AgentBridge and gateway wiring.
 // Only the external iLink boundary and host session factory are synthetic.
-function fixture(t, { enabled = false, baseEnabled = true, allowedSenders = ['test-user'], allowedChats = [], refresh, stop, beforeApply, summarize } = {}) {
+function fixture(t, { enabled = false, baseEnabled = true, allowedSenders = ['test-user'], allowedChats = [], refresh, stop, beforeApply, summarize, deliver, configOverrides } = {}) {
   const env = Object.fromEntries(['DSH_WEIXIN_STATE_DIR', 'OPENCLAW_STATE_DIR', 'CLAWDBOT_STATE_DIR'].map((key) => [key, process.env[key]]))
   const root = fs.mkdtempSync(path.join(stateDir(), 'runtime-'))
   process.env.DSH_WEIXIN_STATE_DIR = root
@@ -68,7 +68,9 @@ function fixture(t, { enabled = false, baseEnabled = true, allowedSenders = ['te
   const stopped = []
   const sessions = []
   const sent = []
+  const media = []
   if (summarize !== undefined) t.mock.method(AgentBridge.prototype, 'summarize', summarize)
+  if (deliver !== undefined) t.mock.method(AgentBridge.prototype, 'deliver', deliver)
   t.mock.method(ILinkTransport.prototype, 'refreshConfig', async function () {
     prepared.push(this)
     await refresh?.(this, prepared.length)
@@ -84,6 +86,7 @@ function fixture(t, { enabled = false, baseEnabled = true, allowedSenders = ['te
     return Promise.resolve(stop?.(this))
   })
   t.mock.method(ILinkTransport.prototype, 'send', async function (message) { sent.push(message) })
+  t.mock.method(ILinkTransport.prototype, 'sendMedia', async function (message) { media.push(message) })
   const ctx = new Context()
   ctx.provide('agents', {
     create: async (options) => {
@@ -106,15 +109,39 @@ function fixture(t, { enabled = false, baseEnabled = true, allowedSenders = ['te
     fs.rmSync(root, { recursive: true, force: true })
   })
   beforeApply?.(root)
-  apply(ctx, { enabled: baseEnabled, allowedSenders, allowedChats, notifyEnabled: false, mediaEnabled: false, typingIndicator: false })
+  apply(ctx, { enabled: baseEnabled, allowedSenders, allowedChats, notifyEnabled: false, mediaEnabled: false, typingIndicator: false, ...configOverrides?.(root) })
   const controller = ctx.get('configController')
   const login = ctx.get('weixinLoginController')
   assert.ok(controller instanceof ConfigController)
   assert.equal(typeof controller.onConfigChanged, 'function')
   assert.equal(typeof login.onAccountControlChange, 'function')
   const message = (id) => ({ id, type: 'text', text: 'Hello', senderId: 'test-user', conversationId: 'test-user', contextToken: 'synthetic-context', timestamp: Date.now() })
-  return { root, ctx, controller, login, prepared, started, stopped, sessions, sent, dispose, message }
+  return { root, ctx, controller, login, prepared, started, stopped, sessions, sent, media, dispose, message }
 }
+
+test('a recent unrelated file is not sent, while a referenced result still is', async (t) => {
+  const f = fixture(t, {
+    enabled: true,
+    beforeApply(root) { fs.writeFileSync(path.join(root, 'unrelated.pdf'), 'unrelated') },
+    configOverrides(root) { return { cwd: root, mediaEnabled: true, autoSendFiles: true } },
+    async deliver({ text, onLateReply }) {
+      if (text === 'late') {
+        await onLateReply({ kind: 'reply', text: '[SILENT]' })
+        return { late: true }
+      }
+      return { text: text === 'explicit' ? path.join(f.root, 'unrelated.pdf') : '[SILENT]' }
+    },
+  })
+  await until(() => f.started.length === 1, 'transport starts')
+  for (const text of ['silent', 'late']) {
+    await f.started[0].testInbound({ ...f.message(text), text })
+  }
+  assert.deepEqual(f.media, [])
+  assert.deepEqual(f.sent, [])
+  await f.started[0].testInbound({ ...f.message('explicit'), text: 'explicit' })
+  assert.equal(f.media.length, 1)
+  assert.equal(f.media[0].filePath, fs.realpathSync(path.join(f.root, 'unrelated.pdf')))
+})
 
 test('retired away state cannot intercept private messages or be rewritten by the gateway', async (t) => {
   const contents = JSON.stringify({
