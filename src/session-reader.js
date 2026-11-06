@@ -149,10 +149,7 @@ export function readAssistantReply({ events, afterSeq = -1, messageId, claimedTu
           turnErrorCode = typeof reason.error?.code === 'string' ? reason.error.code : undefined
         }
         turnSettled = reason?.kind === 'completed'
-        if (turnSettled && isPureSilent(text)) {
-          const recovered = replyBeforeSilent(turnEvents)
-          if (recovered !== undefined) text = recovered.text
-        }
+        if (turnSettled) text = completedTurnReply(turnEvents, text).text
         break
       }
       case 'user/message':
@@ -192,6 +189,36 @@ export function readAssistantReply({ events, afterSeq = -1, messageId, claimedTu
   return { text, settledSeq, pendingTools: [...pending.values()], sawTurnBoundary, turnError, turnErrorCode, turnSettled, turnReason }
 }
 
+function completeMessage(events, index, before = events.length) {
+  const event = events[index], data = event.data, message = data?.message
+  if (event.type !== 'assistant/message' || data?.interrupted === true
+    || event.surfaceOp !== 'append'
+    || !Number.isSafeInteger(event.seq)
+    || !Number.isSafeInteger(data?.turn) || !Number.isSafeInteger(data?.step)
+    || events[0]?.type !== 'turn/start' || events[0].data?.turn !== data.turn
+    || message?.role !== 'assistant' || message.source?.kind !== 'model'
+    || !Array.isArray(message.content) || message.content.some(block => block?.type === 'tool-call')) return false
+  // Both representations must agree before replaying an earlier response.
+  const text = messageText(message)
+  const streamedText = streamText(data.stream)
+  if (text === '' || (streamedText !== '' && streamedText !== text)) return false
+  const stream = data.stream
+  if (!Array.isArray(stream) || stream.at(-1)?.type !== 'chunk'
+    || stream.at(-1)?.chunk?.type !== 'finish' || stream.at(-1).chunk.reason?.kind !== 'stop') return false
+  if (stream.some(record => record?.type === 'tool-call-chunks'
+    || record?.chunk?.type === 'tool-call-delta'
+    || record?.chunk?.blockType === 'tool-call' || record?.chunk?.block?.type === 'tool-call')) return false
+  const sameStep = item => item.data?.turn === data.turn && item.data?.step === data.step
+  const start = events.findLastIndex((item, i) => i < index && item.type === 'step/start')
+  const end = events.findIndex((item, i) => i > index && (item.type === 'step/start' || item.type === 'step/end' || item.type === 'turn/end'))
+  if (start < 0 || !sameStep(events[start]) || end < 0 || end >= before
+    || events[end].type !== 'step/end' || !sameStep(events[end])) return false
+  const stepEvents = events.slice(start + 1, end)
+  return stepEvents.filter(item => item.type === 'assistant/message').length === 1
+    && !stepEvents.some(item => item.type === 'assistant/attempt' || item.type === 'tool/call' || item.type === 'tool/result')
+}
+
+
 /**
  * A successful model step can finish before a newly injected notice keeps the
  * SAME host turn running. Recover only its last complete reply when later steps
@@ -209,38 +236,9 @@ export function replyBeforeSilent(events, afterSeq = -1) {
   const last = outputIndexes.at(-1)
   if (last === undefined || !isPureSilent(body(events[last]))) return undefined
 
-  function completeMessage(index) {
-    const event = events[index], data = event.data, message = data?.message
-    if (event.type !== 'assistant/message' || data?.interrupted === true
-      || event.surfaceOp !== 'append'
-      || !Number.isSafeInteger(event.seq)
-      || !Number.isSafeInteger(data?.turn) || !Number.isSafeInteger(data?.step)
-      || events[0]?.type !== 'turn/start' || events[0].data?.turn !== data.turn
-      || message?.role !== 'assistant' || message.source?.kind !== 'model'
-      || !Array.isArray(message.content) || message.content.some(block => block?.type === 'tool-call')) return false
-    // Both representations must agree before replaying an earlier response.
-    const text = messageText(message)
-    const streamedText = streamText(data.stream)
-    if (text === '' || (streamedText !== '' && streamedText !== text)) return false
-    const stream = data.stream
-    if (!Array.isArray(stream) || stream.at(-1)?.type !== 'chunk'
-      || stream.at(-1)?.chunk?.type !== 'finish' || stream.at(-1).chunk.reason?.kind !== 'stop') return false
-    if (stream.some(record => record?.type === 'tool-call-chunks'
-      || record?.chunk?.type === 'tool-call-delta'
-      || record?.chunk?.blockType === 'tool-call' || record?.chunk?.block?.type === 'tool-call')) return false
-    const sameStep = item => item.data?.turn === data.turn && item.data?.step === data.step
-    const start = events.findLastIndex((item, i) => i < index && item.type === 'step/start')
-    const end = events.findIndex((item, i) => i > index && (item.type === 'step/start' || item.type === 'step/end' || item.type === 'turn/end'))
-    if (start < 0 || !sameStep(events[start]) || end < 0
-      || events[end].type !== 'step/end' || !sameStep(events[end])) return false
-    const stepEvents = events.slice(start + 1, end)
-    return stepEvents.filter(item => item.type === 'assistant/message').length === 1
-      && !stepEvents.some(item => item.type === 'assistant/attempt' || item.type === 'tool/call' || item.type === 'tool/result')
-  }
-
-  if (!completeMessage(last)) return undefined
+  if (!completeMessage(events, last)) return undefined
   const candidate = outputIndexes.findLast(index => index < last && !isPureSilent(body(events[index])))
-  if (candidate === undefined || events[candidate].seq <= afterSeq || !completeMessage(candidate)) return undefined
+  if (candidate === undefined || events[candidate].seq <= afterSeq || !completeMessage(events, candidate)) return undefined
   // A later human instruction may retract the earlier answer. Do not walk past
   // tool work, failed attempts, or an unverified silent step to resurrect it.
   for (let i = candidate + 1; i < events.length; i++) {
@@ -248,9 +246,44 @@ export function replyBeforeSilent(events, afterSeq = -1) {
     if (event.type === 'assistant/attempt' || event.type === 'tool/call' || event.type === 'tool/result'
       || (event.type === 'user/message' && isReplyBoundary(event.data?.source))
       || (event.type !== 'system/message' && event.surfaceOp !== null && typeof event.surfaceOp === 'object')) return undefined
-    if (event.type === 'assistant/message' && (!isPureSilent(body(event)) || !completeMessage(i))) return undefined
+    if (event.type === 'assistant/message' && (!isPureSilent(body(event)) || !completeMessage(events, i))) return undefined
   }
   return { text: messageText(events[candidate].data.message), seq: events[candidate].seq }
+}
+
+// A notice starts another piece of work within the same host turn. Save the
+// preceding completed step there, before the notice's tools can clear it.
+export function completedTurnReply(events, text, afterSeq = -1) {
+  const silent = isPureSilent(text) ? replyBeforeSilent(events, afterSeq) : undefined
+  const saved = []
+  let candidate = -1
+  for (const [i, event] of events.entries()) {
+    if (event.seq <= afterSeq) continue
+    const source = event.data?.source
+    if ((event.type === 'user/message' && isReplyBoundary(source))
+      || (event.type !== 'system/message' && event.surfaceOp && typeof event.surfaceOp === 'object')) {
+      candidate = -1
+      saved.length = 0
+    } else if (event.type === 'user/message' && (source?.form === 'notice' || source?.kind === 'subagent-settled')) {
+      if (candidate >= 0 && completeMessage(events, candidate, i)) {
+        const body = messageText(events[candidate].data.message)
+        if (!isControlReply(body)) saved.push({ text: body, seq: events[candidate].seq })
+      }
+      candidate = -1
+    } else if (event.type === 'assistant/message') candidate = i
+    else if (['tool/call', 'tool/result', 'assistant/attempt'].includes(event.type)) candidate = -1
+  }
+  if (!saved.length || (candidate >= 0 && !completeMessage(events, candidate))) {
+    return { text: silent?.text ?? text, silentRecoveredFromSeq: silent?.seq }
+  }
+  const tail = silent?.text ?? text
+  const tailSeq = silent?.seq ?? events[candidate]?.seq
+  if (tailSeq > saved.at(-1).seq && !isControlReply(tail) && tail.trim()) saved.push({ text: tail, seq: tailSeq })
+  return { text: saved.map(part => part.text).join('\n\n'), silentRecoveredFromSeq: isPureSilent(text) ? saved[0].seq : undefined }
+}
+
+function isControlReply(text) {
+  return /^(?:\[SILENT\]|HEARTBEAT_OK|（已取消）|（静默）)/i.test(text.trim())
 }
 
 /**
@@ -323,11 +356,10 @@ export function readSettledTurns({ events, afterSeq = -1 }) {
         if (typeof event.seq === 'number' && event.seq > current.settledSeq) {
           current.settledSeq = event.seq
         }
-        const recovered = reason?.kind === 'completed' && isPureSilent(current.text)
-          ? replyBeforeSilent(current.events) : undefined
+        const reply = current.turnSettled ? completedTurnReply(current.events, current.text) : { text: current.text }
         turns.push({
-          text: recovered?.text ?? current.text,
-          ...(recovered ? { silentRecoveredFromSeq: recovered.seq } : {}),
+          text: reply.text,
+          ...(reply.silentRecoveredFromSeq !== undefined ? { silentRecoveredFromSeq: reply.silentRecoveredFromSeq } : {}),
           settledSeq: current.settledSeq,
           turn: event.data?.turn,
           inputIds: inputs.map(input => input.id),

@@ -1,6 +1,6 @@
 // Dispatch readers deliberately do not use the gateway's latest-reply reader:
 // several turns can settle between polls, and only the marked turn belongs to us.
-import { isIndependentInstruction, isReplyBoundary, replyBeforeSilent, streamText } from './session-reader.js'
+import { isIndependentInstruction, isReplyBoundary, completedTurnReply, streamText } from './session-reader.js'
 
 export const clip = (value, max = 2000) => {
   const text = typeof value === 'string' ? value : ''
@@ -62,8 +62,8 @@ export function dispatchedTurn(events, job) {
       const reason = event.data?.reason
       if (superseded) return { done: true, ok: false, replyText: '', toolsExecuted: [...tools].filter(Boolean).slice(0, 50), notice: 'A later instruction superseded this dispatch before its result settled.' }
       const ok = action === 'cancel' ? reason?.kind === 'aborted' && reason.reason?.kind === 'user' : reason?.kind === 'completed'
-      if (ok && action !== 'cancel' && /^\[SILENT\]$/i.test(text.trim())) {
-        text = replyBeforeSilent(turnEvents, Math.max(afterSeq, job.claimedAfterSeq ?? afterSeq))?.text ?? text
+      if (ok && action !== 'cancel') {
+        text = completedTurnReply(turnEvents, text, Math.max(afterSeq, job.claimedAfterSeq ?? afterSeq)).text
       }
       return { done: true, ok, replyText: clip(ok ? text : '', 8000), toolsExecuted: [...tools].filter(Boolean).slice(0, 50),
         ...(ok ? (action === 'cancel' ? { notice: 'Target turn cancelled; queued inbox was preserved.' } : {}) : { notice: `Target turn ended: ${reason?.kind ?? 'unknown'}.` }) }
