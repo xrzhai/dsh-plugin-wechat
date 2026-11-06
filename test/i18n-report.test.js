@@ -63,7 +63,7 @@ test('live command help includes English /compact and omits retired commands', (
     'help.recall', 'help.summary', 'help.bad', 'help.good', 'help.style', 'help.digest',
     'help.more', 'help.remind', 'help.remindlist', 'help.remindcancel', 'help.subscribe',
     'help.subscribelist', 'help.subscribecancel', 'help.config', 'help.export', 'help.diag',
-    'help.outbox', 'help.quiet', 'help.snooze', 'help.media', 'help.usage',
+    'help.quiet', 'help.snooze', 'help.media', 'help.usage',
     'error.reminderInvalidTime', 'error.reminderStorageReadOnly', 'error.reminderSequenceExhausted',
     'error.reminderWriteFailed', 'error.reminderServiceUnavailable', 'error.reminderChangeUnclear',
     'error.timedMessageServiceUnavailable', 'error.timedMessageWriteFailed', 'error.timedMessageCancelUnclear',

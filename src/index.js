@@ -1081,7 +1081,10 @@ function createInboundHandler({ config, accountId, transport, bridge, seen, log,
         const t = createTranslator(effectiveConfig.current.locale).t
         const conversationId = message.conversationId
         if (!accountId || !conversationId || !outbox) return t('error.featureUnavailable')
-        if (retry) return t('outbox.result', await outbox.flush({ force: true, accountId, conversationId }))
+        if (retry) {
+          const result = await outbox.flush({ force: true, accountId, conversationId })
+          return t('outbox.result', { unavailable: 0, ...result })
+        }
         const count = outbox.pending().filter(item => item.accountId === accountId && item.conversationId === conversationId).length
         return t('outbox.pending', { count })
       },

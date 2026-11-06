@@ -28,7 +28,7 @@ export const DEFAULT_LOCALE = 'zh'
 export const CATALOG = Object.freeze({
     'help.outbox': { zh: '/outbox 查看本聊天的待发数量；/outbox retry 手动重试', en: '/outbox show pending replies here; /outbox retry retries them' },
     'outbox.pending': { zh: '本聊天待发 {count} 条。请先检查微信是否已收到；/outbox retry 会重试，回执丢失的消息可能重复。', en: '{count} pending in this chat. Check what arrived before using /outbox retry: a lost acknowledgement can mean a duplicate.' },
-    'outbox.result': { zh: '本次确认送达 {sent} 条，失败 {failed} 条，仍保留 {remaining} 条待发。', en: 'Confirmed: {sent}. Failed: {failed}. Still pending: {remaining}.' },
+    'outbox.result': { zh: '本次确认送达 {sent} 条，发送未确认 {failed} 条，无可用连接 {unavailable} 条。仍保留 {remaining} 条待发。', en: 'Confirmed: {sent}. Send unconfirmed: {failed}. No connection: {unavailable}. Still pending: {remaining}.' },
     'turn.aborted': { zh: '当前会话的回复已停止；任务是否完成请核查。', en: 'The current session reply stopped; check whether the task completed.' },
     'turn.blocked': { zh: '当前会话的回复受阻，任务尚未确认完成；请查看会话后再决定下一步。', en: 'The current session reply was blocked. Task completion is unconfirmed; check the session before proceeding.' },
     'turn.error': { zh: '当前会话的回复失败，任务尚未确认完成；请查看会话后再决定下一步。', en: 'The current session reply failed. Task completion is unconfirmed; check the session before proceeding.' },
