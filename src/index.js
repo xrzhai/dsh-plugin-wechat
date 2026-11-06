@@ -79,6 +79,7 @@ let metricsTimer
 const unknownItemSeen = new Set()
 let outbox
 import { MessageDeduper } from './message/dedupe.js'
+import { INBOUND_NOT_ACCEPTED } from './message/inbound-pending.js'
 import { extractUrls, fetchLinkText, describeLinkResults } from './message/links.js'
 import { ReminderScheduler, parseWhen } from './message/scheduler.js'
 import { createWebhookSender } from './webhook.js'
@@ -1589,14 +1590,6 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
     }
   }
   return async (message) => {
-    // ④ A passive listener for shapes the vendored client does not know: it cannot
-    // render a link card, it can only tell us whether the server sends them.
-    for (const line of describeUnknownItems(message)) {
-      if (firstSighting(unknownItemSeen, line, `${message.conversationId}|${line}`)) {
-        fileLog.info(`unfamiliar inbound shape: ${line}`)
-        appendToolAudit(stateRoot, { tool: 'weixin/unknown-item', ok: true, summary: line })
-      }
-    }
     const journaledAt = Date.now()
     // iLink only honours an inbound `context_token` for about ten minutes after
     // the message arrives (issue #9); reusing it past that is answered with
@@ -1636,7 +1629,16 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
       })
       warn(`refused message from ${message.senderId}: account authorization registry is unreadable at ${registryFile()}; restore or repair it before retrying (${detail})`)
       fileLog.info(`refused message from ${message.senderId}: account authorization registry is unreadable at ${registryFile()}; restore or repair it before retrying (${detail})`)
-      return
+      // Nothing has been processed yet. The transport can release its claim
+      // back to the durable queue under the gateway's existing contract.
+      return INBOUND_NOT_ACCEPTED
+    }
+    // ④ Observe unfamiliar shapes only after the replay-safe authorization read.
+    for (const line of describeUnknownItems(message)) {
+      if (firstSighting(unknownItemSeen, line, `${message.conversationId}|${line}`)) {
+        fileLog.info(`unfamiliar inbound shape: ${line}`)
+        appendToolAudit(stateRoot, { tool: 'weixin/unknown-item', ok: true, summary: line })
+      }
     }
     if (config.messageJournal === true && message.type === 'text') {
       journalInbound?.({
@@ -1758,7 +1760,7 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
       let enrolled = false
       if (accountId && allowedSenders.length === 0 && (allowedChats.length === 0 || allowedChats.includes(message.conversationId))) {
         const hasOverride = () => {
-          const entry = readRegistry({ failClosed: true })[accountId]
+          const entry = readRegistry({ failClosed: true, accountId })[accountId]
           return (Array.isArray(entry?.allowedSenders) && entry.allowedSenders.length > 0) || Boolean(entry?.firstContactEnrolledAt)
         }
         try {
@@ -1770,7 +1772,9 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
           if (!(error instanceof RegistryReadError)) throw error
           warn(error.message)
           fileLog.info(error.message)
-          return
+          // The handler may already have journaled this message. Preserve it as
+          // uncertain rather than acknowledge it or replay possible side effects.
+          throw error
         }
         if (enrolled) {
           // Re-resolve the effective config so the rest of this message runs
@@ -1827,7 +1831,9 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
       if (!(error instanceof RegistryReadError)) throw error
       warn(error.message)
       fileLog.info(error.message)
-      return
+      // Dedupe and possibly journaling have already run, so this cannot be
+      // safely released for automatic replay.
+      throw error
     }
 
     // 4. Session-control commands (`/new`, `/list`, `/use`) are answered by the

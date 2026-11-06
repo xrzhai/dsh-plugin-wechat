@@ -14,6 +14,7 @@ import { lockFile } from '../../src/instance-lock.js'
 import { readReminders, writeReminders } from '../../src/message/scheduler.js'
 import { readSubscriptions, writeSubscriptions } from '../../src/message/subscriptions.js'
 import { createOutbox } from '../../src/message/outbox.js'
+import { INBOUND_NOT_ACCEPTED } from '../../src/message/inbound-pending.js'
 import { saveWeixinAccount, registerWeixinAccountId } from '../../vendor/openclaw-weixin/auth/accounts.js'
 
 const ACCOUNT = 'runtime-fixture'
@@ -331,6 +332,73 @@ test('settings operations report a corrupt registry without changing the file or
   }
   assert.equal(f.started.length, 1)
   assert.equal(f.started[0].testRunning, true)
+})
+
+test('a malformed account is isolated from another account in runtime and settings', async (t) => {
+  const badId = 'synthetic-bad-account'
+  const badEntry = { allowedSenders: 'invalid', extra: { keep: true } }
+  const f = fixture(t, {
+    enabled: true,
+    beforeApply: (root) => {
+      saveWeixinAccount(badId, { token: 'synthetic-token', userId: 'other', baseUrl: 'https://example.invalid' })
+      registerWeixinAccountId(badId)
+      fs.writeFileSync(path.join(root, 'accounts-registry.json'), JSON.stringify({
+        [ACCOUNT]: { allowedSenders: ['test-user'], paused: false },
+        [badId]: badEntry,
+      }))
+    },
+  })
+  await until(() => f.started.length === 1, 'healthy transport starts')
+  assert.equal(f.started[0].accountId, ACCOUNT)
+  const status = await f.login.status()
+  assert.equal(status.accounts.length, 2)
+  const healthy = status.accounts.find((entry) => entry.accountId === ACCOUNT)
+  const bad = status.accounts.find((entry) => entry.accountId === badId)
+  assert.deepEqual(healthy.allowedSenders, ['test-user'])
+  assert.equal(healthy.paused, false)
+  assert.equal(healthy.registryError, undefined)
+  assert.equal(bad.paused, null)
+  assert.match(bad.registryError, /accounts-registry\.json/)
+  await f.login.label(ACCOUNT, 'healthy updated')
+  await assert.rejects(f.login.label(badId, 'blocked'), { code: 'registry_unreadable' })
+  await f.started[0].testInbound(f.message('healthy-despite-other-account'))
+  assert.equal(f.sessions.length, 1)
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(f.root, 'accounts-registry.json'), 'utf8'))[badId], badEntry)
+})
+
+test('a registry failure before message processing releases the durable claim', async (t) => {
+  const f = fixture(t, { enabled: true, beforeApply: () => setAccountAllowlist(ACCOUNT, ['test-user']) })
+  await until(() => f.started.length === 1, 'transport starts')
+  const file = path.join(f.root, 'accounts-registry.json')
+  let reads = 0
+  const originalStat = fs.statSync
+  const mock = t.mock.method(fs, 'statSync', function (target, ...args) {
+    if (String(target) === file && ++reads === 2) throw Object.assign(new Error('synthetic read failure'), { code: 'EIO' })
+    return originalStat.call(this, target, ...args)
+  })
+  const message = f.message('registry-early-read-failure')
+  const result = await f.started[0].testInbound(message)
+  assert.equal(result, INBOUND_NOT_ACCEPTED)
+  assert.equal(f.sessions.length, 0)
+  assert.deepEqual(f.sent, [])
+  mock.mock.restore()
+  await f.started[0].testInbound(message)
+  assert.equal(f.sessions.length, 1, 'the refused message was not marked as a duplicate')
+})
+
+test('a registry failure after dedupe is reported as uncertain, not completed', async (t) => {
+  const f = fixture(t, { enabled: true, beforeApply: () => setAccountAllowlist(ACCOUNT, ['test-user']) })
+  await until(() => f.started.length === 1, 'transport starts')
+  const file = path.join(f.root, 'accounts-registry.json')
+  let reads = 0
+  const originalStat = fs.statSync
+  t.mock.method(fs, 'statSync', function (target, ...args) {
+    if (String(target) === file && ++reads === 3) throw Object.assign(new Error('synthetic read failure'), { code: 'EIO' })
+    return originalStat.call(this, target, ...args)
+  })
+  await assert.rejects(f.started[0].testInbound(f.message('registry-late-read-failure')), { code: 'ACCOUNT_REGISTRY_UNREADABLE' })
+  assert.equal(f.sessions.length, 0)
+  assert.deepEqual(f.sent, [])
 })
 
 test('an unreadable registry at startup does not start an account transport', async (t) => {

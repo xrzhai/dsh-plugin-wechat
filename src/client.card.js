@@ -766,6 +766,7 @@ window.__ModuleLoader__.load({
 				? createElement("div", { style: { display: "flex", flexDirection: "column", gap: 6 } },
 						accounts.map((account) => {
 							const busy = busyAccount === account.accountId;
+							const registryError = typeof account.registryError === "string" && account.registryError !== "";
 							const seen = seenText(account.lastSeenAt);
 							return createElement("div", {
 									key: account.accountId,
@@ -783,18 +784,20 @@ window.__ModuleLoader__.load({
 								account.label ? createElement("span", {
 									style: { fontSize: 12, color: C.labelSecondary },
 								}, account.accountId) : null,
+								registryError ? createElement("span", { role: "alert", style: noticeStyle }, account.registryError) : null,
 								account.paused ? createElement("span", { style: pillStyle("idle") }, t("paused", "已暂停")) : null,
 								account.sessionExpired === true ? createElement("span", { style: pillStyle("bad") }, t("session expired", "登录已过期")) : null,
 								seen ? createElement("span", { style: { fontSize: 12, color: C.labelSecondary } }, seen) : null,
 								createElement("span", { style: { flex: 1 } }),
 								createElement("button", {
 									onClick: () => renameAccount(account),
-									style: buttonStyleFor(false),
+									disabled: registryError,
+									style: buttonStyleFor(registryError),
 								}, t("Rename", "改名称")),
 								createElement("button", {
 									onClick: () => setPausedFor(account, !account.paused),
-									disabled: busy,
-									style: buttonStyleFor(busy),
+									disabled: busy || registryError,
+									style: buttonStyleFor(busy || registryError),
 								}, account.paused
 									? t("Resume", "恢复")
 									: busy ? t("Pausing…", "正在暂停…") : t("Pause", "暂停")),
@@ -803,7 +806,7 @@ window.__ModuleLoader__.load({
 									disabled: busy,
 									style: buttonStyleFor(busy),
 								}, busy ? t("Logging out…", "正在退出…") : t("Log out", "退出登录")),
-								editing?.accountId === account.accountId
+								!registryError && editing?.accountId === account.accountId
 									? createElement("div", {
 											style: { display: "flex", alignItems: "center", gap: 6, flexBasis: "100%" },
 										},

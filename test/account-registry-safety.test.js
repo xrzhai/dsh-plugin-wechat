@@ -4,7 +4,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import {
-  enrolFirstContact, isAccountPaused, readRegistry, registryFile, resetTouchThrottle,
+  allowlistForAccount, enrolFirstContact, isAccountPaused, readRegistry, registryFile, resetTouchThrottle,
   setAccountAllowlist, setAccountLabel, setAccountPaused, touchAccount,
 } from '../src/account-registry.js'
 
@@ -20,6 +20,25 @@ function fixture(t) {
     fs.rmSync(root, { recursive: true, force: true })
   })
   return registryFile()
+}
+
+for (const other of [null, ['broken'], { allowedSenders: 'invalid', extra: { keep: true } }, { paused: 'invalid' }]) {
+  test(`an unrelated malformed account is preserved while the current account works: ${JSON.stringify(other)}`, (t) => {
+    const file = fixture(t)
+    fs.writeFileSync(file, JSON.stringify({ 'other-account': other, 'synthetic-account': { allowedSenders: ['owner'], paused: false } }))
+    assert.equal(isAccountPaused('synthetic-account'), false)
+    assert.deepEqual(allowlistForAccount('synthetic-account', { allowedSenders: ['global'] }, { failClosed: true }).allowedSenders, ['owner'])
+    assert.equal(setAccountLabel('synthetic-account', 'updated'), true)
+    assert.equal(setAccountAllowlist('synthetic-account', ['owner-2']), true)
+    assert.equal(setAccountPaused('synthetic-account', true), true)
+    assert.equal(setAccountPaused('synthetic-account', false), true)
+    assert.equal(touchAccount('synthetic-account', () => {}, { throttleMs: 0 }), true)
+    assert.equal(enrolFirstContact('new-account', 'first-contact', () => false), true)
+    assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8'))['other-account'], other)
+    assert.equal(isAccountPaused('other-account'), true)
+    assert.throws(() => setAccountLabel('other-account', 'must fail'), { code: 'ACCOUNT_REGISTRY_UNREADABLE' })
+    assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8'))['other-account'], other)
+  })
 }
 
 const mutations = [

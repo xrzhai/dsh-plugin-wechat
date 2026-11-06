@@ -18,7 +18,7 @@ import {
 } from "../vendor/openclaw-weixin/auth/accounts.js";
 import { logger } from "../vendor/openclaw-weixin/util/logger.js";
 import { redactToken } from "../vendor/openclaw-weixin/util/redact.js";
-import { allowlistForAccount, readRegistry, RegistryReadError, setAccountAllowlist, setAccountLabel, setAccountPaused } from "./account-registry.js";
+import { readRegistry, RegistryReadError, setAccountAllowlist, setAccountLabel, setAccountPaused, validateAccountEntry } from "./account-registry.js";
 import { translate } from "./i18n.js";
 import { readSavedConfig, stateDir } from "./state.js";
 import { DEFAULT_RETENTION, directoryUsage } from "./message/retention.js";
@@ -502,6 +502,15 @@ export class WeixinLoginController extends TypertRemoteService {
             try {
                 const acct = this.loadAccount(id);
                 if (acct?.token) {
+                    try {
+                        registryOperation(() => validateAccountEntry(registry, id));
+                    } catch (error) {
+                        if (error?.code !== "registry_unreadable") throw error;
+                        accounts.push({ accountId: id, userId: acct.userId ?? null, label: null, paused: null,
+                            sessionExpired: this.sessionExpiredAccounts.has(id), lastSeenAt: null,
+                            allowedSenders: [], allowedChats: [], registryError: error.message });
+                        continue;
+                    }
                     // Registry side-table data: label/paused/lastSeenAt live
                     // outside the credential on purpose (see account-registry.js).
                     // A missing entry means "never touched" — defaults, not an error.
@@ -509,7 +518,7 @@ export class WeixinLoginController extends TypertRemoteService {
                     // The EFFECTIVE allowlist for this account (account override
                     // over the global config), so the card shows what actually
                     // rules this account rather than one layer of it.
-                    const effective = registryOperation(() => allowlistForAccount(id, readSavedConfig(), { failClosed: true }));
+                    const global = readSavedConfig();
                     accounts.push({
                         accountId: id,
                         userId: acct.userId ?? null,
@@ -517,12 +526,11 @@ export class WeixinLoginController extends TypertRemoteService {
                         paused: entry.paused === true,
                         sessionExpired: this.sessionExpiredAccounts.has(id),
                         lastSeenAt: typeof entry.lastSeenAt === "string" ? entry.lastSeenAt : null,
-                        allowedSenders: effective.allowedSenders,
-                        allowedChats: effective.allowedChats,
+                        allowedSenders: Array.isArray(entry.allowedSenders) && entry.allowedSenders.length > 0 ? entry.allowedSenders : (global.allowedSenders ?? []),
+                        allowedChats: Array.isArray(entry.allowedChats) && entry.allowedChats.length > 0 ? entry.allowedChats : (global.allowedChats ?? []),
                     });
                 }
-            } catch (error) {
-                if (error?.code === "registry_unreadable") throw error;
+            } catch {
                 // skip unreadable entries
             }
         }

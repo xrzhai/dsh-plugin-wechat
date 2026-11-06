@@ -24,7 +24,7 @@ import { atomicWriteJson } from '../atomic.js'
 const SCHEMA_VERSION = 1
 const COMPLETED_LIMIT = 4096
 
-// The gateway refused a queued message before the user handler ran.
+// The gateway refused a queued message before processing or user-visible side effects.
 export const INBOUND_NOT_ACCEPTED = Symbol('inbound-not-accepted')
 
 export class InboundPendingError extends Error {
