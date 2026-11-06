@@ -13,6 +13,7 @@ import path from "node:path";
 import { TypertRemoteService, RemoteError } from "@deepseek-ai/dsh-typert-protocol";
 import { stateDir, readSavedConfig, configFile } from "./state.js";
 import { remoteMethods } from "./typert-js.js";
+import { archivedChildren, updateArchivedChildren } from "./archived-children.js";
 import { CATALOG } from "./i18n.js";
 
 /** Shape declarations the card understands. `number` carries min/max/step. */
@@ -280,6 +281,14 @@ export class ConfigController extends TypertRemoteService {
     this.config = options.config ?? {}
   }
 
+  async archivedChildren(parentSessionId) {
+    return archivedChildren(parentSessionId)
+  }
+
+  async updateArchivedChildren(parentSessionId, addJson, removeJson) {
+    return updateArchivedChildren(parentSessionId, addJson, removeJson)
+  }
+
   /**
    * The whole form: every field, its effective value, and where that came from.
    *
@@ -487,5 +496,5 @@ function writeSavedConfig(config) {
   }
 }
 
-remoteMethods(ConfigController, ['list', 'save', 'reset'])
+remoteMethods(ConfigController, ['list', 'save', 'reset', 'archivedChildren', 'updateArchivedChildren'])
 

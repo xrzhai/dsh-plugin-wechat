@@ -60,7 +60,7 @@ const rows = []
 for (const sourceDir of SOURCES) {
     for (const file of walk(join(root, sourceDir))) {
         const name = relative(root, file).replaceAll('\\', '/')
-        const count = countCjkStrings(readFileSync(file, 'utf8'), { catalogue: name === 'src/i18n.js' })
+        const count = countCjkStrings(readFileSync(file, 'utf8'), { catalogue: name === 'src/i18n.js' || name === 'src/client.subagent.js' })
         if (count > 0) rows.push({ file: name, count })
     }
 }
