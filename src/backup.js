@@ -1,8 +1,8 @@
 /**
  * Backups of the state directory.
  *
- * Everything this plugin knows — which accounts are bound, what it remembers
- * about you, your personas, the journal, the subscriptions — lives as plain
+ * Everything this plugin knows — which accounts are bound, workspace instructions,
+ * on-demand memory notes, the journal, and subscriptions — lives as plain
  * files under the state root. Retention (see `src/message/retention.js`) deletes
  * the old ones on purpose; nothing anywhere takes a copy. So one bad `rm`, one
  * restore-from-a-stale-snapshot, or one machine replacement and all of it is
@@ -45,9 +45,6 @@ const BACKUP_ROOTS = [
   // without this one restores a plugin that is logged out.
   ['openclaw-weixin', 'dir'],
   ['asr-config.json', 'file'],
-  ['memory', 'dir'],
-  ['persona-modes.json', 'file'],
-  ['persona-active.json', 'file'],
   ['journal', 'dir'],
   ['audit', 'dir'],
   ['sessions.json', 'file'],

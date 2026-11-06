@@ -242,13 +242,7 @@ export function readSavedConfig() {
  * merges one level deeper, and an explicit non-empty composition
  * `allowedSenders` stays authoritative.
  *
- * The reason is the one that forced the `asr` rule: the loader validates the
- * composition through schemastery before `apply` sees it, so every field
- * arrives with its schema default already filled in. `{ ...saved, ...config }`
- * therefore let a default outrank the card — `proactiveEnabled: true` in
- * config.json reached `planProactive` as `false` and no proactive message was
- * ever planned (2026-10-28); `quietHoursEnabled: true` was read as false, and
- * `memoryEnabled: false` could not switch memory off.
+ * Loader schema defaults must not overwrite explicit saved preferences.
  *
  * @param {Record<string, unknown>} config config as the loader passed it
  * @returns {Record<string, unknown>} config with the saved settings applied

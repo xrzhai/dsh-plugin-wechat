@@ -22,8 +22,6 @@ export const SCOPABLE_KEYS = Object.freeze([
   'maxMessageLength',
   'markdownMode',
   'typingIndicator',
-  'usageAwarenessEnabled',
-  'knowledgeEnabled',
 ]);
 
 const SCOPE_VERSION = 1;

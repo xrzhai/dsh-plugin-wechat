@@ -445,8 +445,6 @@ function applyFixes(root, { dryRun }) {
     [root, 'state root'],
     [path.join(root, 'sessions'), 'sessions/'],
     [statePath(root, 'mediaInboundDir'), 'media/inbound/'],
-    // knowledgeDir() lives in src/message/knowledge.js as <root>/knowledge/<account>.
-    [path.join(root, 'knowledge'), 'knowledge/'],
     [backupsDir(root), 'backups/'],
   ]
   for (const [dir, label] of ownedDirs) {

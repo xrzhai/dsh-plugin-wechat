@@ -14,7 +14,7 @@
  *     什么，这一格就写什么。
  *
  * 这套数字的用途只有一个：让「这个会话到底在用哪个模型、大概烧了多少」有个
- * 看得见的落点 —— 包括让人设自己知道。它不做计费、不做限额（限额是 `budget.js`）。
+ * 看得见的落点。它不做计费、不做限额（限额是 `budget.js`）。
  *
  * 状态文件 `usage-ledger.json`（原子写，按账号 → 会话 → 汇总 + 最近 30 天日桶）。
  *
@@ -135,21 +135,6 @@ export function costOf({ tokensIn = 0, tokensOut = 0 } = {}, { priceInPer1k = DE
   return (tokensIn / 1000) * input + (tokensOut / 1000) * output
 }
 
-/** 人读的元：小额给三位小数，别写成 0.00。 */
-export function formatYuan(value) {
-  const amount = Number.isFinite(value) ? Math.max(0, value) : 0
-  if (amount === 0) return '—'
-  if (amount < 0.1) return `${amount.toFixed(3)} 元`
-  return `${amount.toFixed(2)} 元`
-}
-
-/** 人读的 token：1200 → 1.2k。 */
-export function formatTokens(value) {
-  const tokens = Math.max(0, Math.round(Number(value) || 0))
-  if (tokens < 1000) return String(tokens)
-  return `${(tokens / 1000).toFixed(tokens < 10_000 ? 1 : 0)}k`
-}
-
 /**
  * 一个账号的会话明细（按「最近的在前」）。
  */
@@ -192,19 +177,4 @@ export function ledgerTotals(rows = []) {
     totals.todayTokens += Number(row.today?.tokensIn ?? 0) + Number(row.today?.tokensOut ?? 0)
   }
   return totals
-}
-
-/**
- * 给人设看的一行：这个会话用了多少、大概花了多少。
- * 读不到账本时返回 `''`（宁可不说，也不编一个数）。
- */
-export function usageAwarenessLine(stateRoot, accountId, conversationId, { now = Date.now(), priceInPer1k, priceOutPer1k, warn } = {}) {
-  const rows = conversationRows(stateRoot, accountId, { now, priceInPer1k, priceOutPer1k, warn })
-  const row = rows.find((item) => item.conversationId === String(conversationId))
-  if (row === undefined || row.turns === 0) return ''
-  const parts = [`本会话已用 ${row.turns} 个回合、约 ${formatTokens(row.tokens)} token`]
-  if (row.cost > 0) parts.push(`约 ${formatYuan(row.cost)}`)
-  const todayTokens = Number(row.today?.tokensIn ?? 0) + Number(row.today?.tokensOut ?? 0)
-  if (todayTokens > 0) parts.push(`其中今天约 ${formatTokens(todayTokens)} token`)
-  return `（这些是你自己的消耗，估算值：${parts.join('，')}。可以据此说话更省一点。）`
 }

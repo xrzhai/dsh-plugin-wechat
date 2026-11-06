@@ -712,36 +712,6 @@ window.__ModuleLoader__.load({
 
 		//#endregion
 
-		// ----------------------------------------------------- session row mark --
-
-		// The WeChat mark a Session row leads with, on the Sessions this plugin
-		// opened. The `sidebar.session.row.leading` seat (declared by
-		// ui-workspace — the same seat ui-schedule's clock occupies) renders only
-		// while the row's primary status is idle and is left blank on an archived
-		// row; search results have no leading seat at all. The seat receives the
-		// row's Session identity and nothing else, so the occupant decides from
-		// `sessionId` alone.
-		//
-		// Only *our* Sessions carry the mark. `baseSessionIdFor` mints
-		// `weixin-<slug>`, and a new line appends `--<stamp>`; an ordinary
-		// workspace Session keeps its unrelated `session-<uuid>` id, so a prefix
-		// test shows the mark exactly where WeChat opened the conversation — and
-		// never on someone else's rows.
-		const SESSION_ID_PREFIX = "weixin-";
-
-		// WeChat's own logo: the simple-icons "WeChat" path (24x24 viewBox) — the
-		// same glyph the host draws for `weixin.qq.com` links, so this mark and a
-		// WeChat link in a transcript read as one identity. Kept inline because
-		// the client bundle may only require `react` and `react/jsx-runtime`; a
-		// glyph module is not on that list.
-		const WECHAT_GLYPH = "M8.691 2.188C3.891 2.188 0 5.476 0 9.53c0 2.212 1.17 4.203 3.002 5.55a.59.59 0 0 1 .213.665l-.39 1.48c-.019.07-.048.141-.048.213 0 .163.13.295.29.295a.326.326 0 0 0 .167-.054l1.903-1.114a.864.864 0 0 1 .717-.098 10.16 10.16 0 0 0 2.837.403c.276 0 .543-.027.811-.05-.857-2.578.157-4.972 1.932-6.446 1.703-1.415 3.882-1.98 5.853-1.838-.576-3.583-4.196-6.348-8.596-6.348zM5.785 5.991c.642 0 1.162.529 1.162 1.18a1.17 1.17 0 0 1-1.162 1.178A1.17 1.17 0 0 1 4.623 7.17c0-.651.52-1.18 1.162-1.18zm5.813 0c.642 0 1.162.529 1.162 1.18a1.17 1.17 0 0 1-1.162 1.178 1.17 1.17 0 0 1-1.162-1.178c0-.651.52-1.18 1.162-1.18zm5.34 2.867c-1.797-.052-3.746.512-5.28 1.786-1.72 1.428-2.687 3.72-1.78 6.22.942 2.453 3.666 4.229 6.884 4.229.826 0 1.622-.12 2.361-.336a.722.722 0 0 1 .598.082l1.584.926a.272.272 0 0 0 .14.047c.134 0 .24-.111.24-.247 0-.06-.023-.12-.038-.177l-.327-1.233a.582.582 0 0 1-.023-.156.49.49 0 0 1 .201-.398C23.024 18.48 24 16.82 24 14.98c0-3.21-2.931-5.837-6.656-6.088V8.89c-.135-.01-.27-.027-.407-.03zm-2.53 3.274c.535 0 .969.44.969.982a.976.976 0 0 1-.969.983.976.976 0 0 1-.969-.983c0-.542.434-.982.97-.982zm4.844 0c.535 0 .969.44.969.982a.976.976 0 0 1-.969.983.976.976 0 0 1-.969-.983c0-.542.434-.982.969-.982z";
-
-		// WeChat green, the brand's own value. The `--dsw-alias-state-success-*`
-		// tokens sit near it but are the interface's "everything is fine" green
-		// rather than WeChat's, and a brand mark that shifts with the shell's
-		// state palette stops being a brand mark.
-		const WECHAT_GREEN = "#07C160";
-
 		// The left sidebar's panel list (`sidebar.panellist`) and the page that
 		// row opens (the layout's root-scoped `main` keyed slot) are addressed by
 		// the SAME id: the host looks the page up by the row's id, and a row
@@ -749,109 +719,6 @@ window.__ModuleLoader__.load({
 		// selection. The id also has to stay clear of the shell's own panels
 		// (`conversation`, `plugins`, `schedules`), so the package name is it.
 		const PANEL_ID = "dsh-weixin";
-
-		/** Whether a Session id belongs to a conversation this plugin opened. */
-		function isWeixinSession(sessionId) {
-			return typeof sessionId === "string" && sessionId.startsWith(SESSION_ID_PREFIX);
-		}
-
-		// Which account a session line belongs to, for the faint ownership hint
-		// on the sidebar row. Only `sessions()` knows the line→account mapping
-		// (the session id's slug is the CONVERSATION's, not the account's, so it
-		// cannot be derived from the id), and the row seat renders for every
-		// session on screen, so the mapping is fetched once per mount and cached
-		// module-wide: the seat must stay cheap, and a failed fetch must never
-		// break the row — the hint is a hint, not a feature the row depends on.
-		let sessionOwnerMap = null; // Map<sessionId, {accountId, accountLabel}>
-		let sessionOwnerFetched = false;
-		// The seat's occupant receives only the row's Session identity — no
-		// injection context — so registerUi parks its ctx here for the fetch.
-		let sessionOwnerCtx = null;
-
-		async function loadSessionOwners(ctx) {
-			if (sessionOwnerFetched) return sessionOwnerMap;
-			sessionOwnerFetched = true;
-			try {
-				const data = await callRemote(() => ctx.remote.weixin.sessions());
-				const map = new Map();
-				for (const conversation of data?.conversations ?? []) {
-					if (typeof conversation?.accountId !== "string" || conversation.accountId === "") continue;
-					for (const line of conversation.lines ?? []) {
-						if (typeof line?.sessionId === "string") {
-							map.set(line.sessionId, { accountId: conversation.accountId, accountLabel: conversation.accountLabel ?? null });
-						}
-					}
-				}
-				sessionOwnerMap = map;
-			} catch {
-				// Remote not mounted yet, or the host refused: render no hint.
-				sessionOwnerMap = null;
-			}
-			return sessionOwnerMap;
-		}
-
-		/** At most 6 visible characters, then an ellipsis, per the card's spec. */
-		function ownerHintText(text) {
-			const chars = Array.from(typeof text === "string" ? text : "");
-			return chars.length <= 6 ? text : chars.slice(0, 6).join("") + "…";
-		}
-
-		/**
-		 * The faint account hint beside the WeChat mark. Reads the cached
-		 * session→owner map; sessions it cannot attribute (pre-multi-account
-		 * history, a mapping not loaded yet) render no hint at all. The seat
-		 * passes no ctx, so the hook falls back to the one registerUi parked.
-		 */
-		function useSessionOwner(sessionId) {
-			const [owner, setOwner] = react.useState(() => sessionOwnerMap?.get(sessionId) ?? null);
-			react.useEffect(() => {
-				if (!sessionOwnerCtx) return undefined;
-				let alive = true;
-				loadSessionOwners(sessionOwnerCtx).then((map) => {
-					if (alive) setOwner(map?.get(sessionId) ?? null);
-				}).catch(() => {});
-				return () => {
-					alive = false;
-				};
-			}, [sessionId]);
-			return owner;
-		}
-
-		/**
-		 * The row mark for one of this plugin's Sessions.
-		 *
-		 * Returns `null` for every other Session, which is the whole point: the
-		 * seat is shared with the host's own marks, so an occupant that claimed
-		 * every row would stamp the WeChat logo on unrelated conversations.
-		 * Decorative only — the seat is not a button and has no tab stop, so the
-		 * glyph is `aria-hidden` and carries no label of its own.
-		 *
-		 * @param props.sessionId - the row's Session identity.
-		 * @returns the glyph, or `null` for a Session this plugin did not open.
-		 */
-		function SessionRowMark({ sessionId }) {
-			if (!isWeixinSession(sessionId)) return null;
-			// Ownership moved INTO the title (`备注名: 标题`, see titledWithAccount
-			// in sessions.js) after two hint-element attempts were squeezed by the
-			// host's row — text inside the title flows, nothing competes for
-			// width. The mark is the plain glyph again; useSessionOwner and the
-			// owner fetch stay (the card still reads attribution), only the row
-			// hint element is gone.
-			return createElement("span", {
-					className: "weixin-session-row-mark",
-					"aria-hidden": "true",
-					style: { display: "inline-flex", alignItems: "center", justifyContent: "center", flex: "none", gap: 4 },
-				},
-				createElement("svg", {
-					width: 14,
-					height: 14,
-					viewBox: "0 0 24 24",
-					fill: WECHAT_GREEN,
-					focusable: "false",
-					"aria-hidden": "true",
-					style: { flex: "none" },
-				}, createElement("path", { d: WECHAT_GLYPH })));
-		}
 
 		// This list must NOT name the namespaces: `remote.weixin` only comes into
 		// existence inside apply() when $mount installs it, so waiting for it here
@@ -864,10 +731,6 @@ window.__ModuleLoader__.load({
 
 		async function registerUi(ctx) {
 			const { t } = useLocaleText(ctx);
-			// Park the ui context for the row-mark's owner fetch: the seat hands
-			// its occupant the Session identity only, so the hint hook has no ctx
-			// of its own to read remote.weixin.sessions() through.
-			sessionOwnerCtx = ctx;
 			const actions = {
 				noop: async () => {},
 			};
@@ -1061,11 +924,6 @@ window.__ModuleLoader__.load({
 						inject: () => actions,
 					},
 					WeixinSettingsCard));
-
-			// The session row leading mark used to stamp the WeChat logo on every
-			// WeChat Session row. It carried no information (ownership already
-			// lives in the title) and only added visual noise, so the seat is no
-			// longer registered.
 
 			// Fetch the chunk here, at activation, not on first paint: apply()
 			// awaits this registration, so the shell never sees a "loading" card.

@@ -50,14 +50,14 @@ test('catalogue entries have both locales and interpolate newly migrated failure
 })
 
 test('live command help includes English /compact and omits retired commands', () => {
-  const help = buildCommandsHelp(createTranslator('en').t)
+  const help = buildCommandsHelp(createTranslator('en').t, { all: true })
   assert.match(help, /^\/compact compact the current topic’s history in DSH immediately$/m)
   assert.match(help, /^\/cancel stop the reply currently being generated; actions already run are not undone, and queued messages will still be processed$/m)
   assert.match(help, /^\/new \[title\] start a new topic/m)
   assert.match(help, /^\/clear remove every topic from this WeChat chat’s topic list/m)
   assert.match(help, /original DSH session history is not deleted/)
   assert.doesNotMatch(help, /\/clear clear this session/)
-  const helpZh = buildCommandsHelp()
+  const helpZh = buildCommandsHelp(undefined, { all: true })
   assert.match(helpZh, /^\/new \[标题\] 在当前微信聊天里新建话题/m)
   assert.match(helpZh, /^\/list 查看当前微信聊天里的所有话题/m)
   assert.match(helpZh, /^\/use <序号> 切换到当前微信聊天里的第几个话题/m)

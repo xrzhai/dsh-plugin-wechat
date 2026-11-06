@@ -6,11 +6,7 @@ import path from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import {
-  findMountBlocks,
-  parseYamlNode,
-  readKeptValues,
   removeInstalledPackage,
-  removeMountBlocks,
   sourceLinkSpec,
 } from '../bin/lib/install-profile.mjs'
 import {
@@ -47,115 +43,6 @@ function writeJson(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true })
   fs.writeFileSync(file, JSON.stringify(value, null, 2) + '\n')
 }
-
-test('mount migration finds later inserts and preserves other rows in the same insert', () => {
-  const patch = [
-    '- patch:',
-    '    - id: unrelated-patch',
-    '      enabled: true',
-    '',
-    '# first insert stays byte-for-byte',
-    '- insert:',
-    '    - id: alpha',
-    '      options:',
-    '        keep: first',
-    '',
-    '- insert:',
-    '    # target ownership comment',
-    '    - id: dsh-weixin',
-    '      allowedSenders:',
-    '        - alice',
-    '      asr:',
-    '        hfProxy: http://127.0.0.1:7897',
-    '    - id: beta',
-    '      options:',
-    '        keep: second',
-    '    - id: dsh-weixin',
-    '      enabled: false',
-    '    - id: gamma',
-    '      nested:',
-    '        - one',
-    '        - two',
-    '',
-  ].join('\n')
-
-  const blocks = findMountBlocks(patch)
-  assert.equal(blocks.length, 2)
-  const values = readKeptValues(patch.split('\n').slice(blocks[0].rowStart, blocks[0].rowEnd).join('\n'))
-  assert.deepEqual(parseYamlNode(values.allowedSenders), ['alice'])
-  assert.deepEqual(parseYamlNode(values.asr), { hfProxy: 'http://127.0.0.1:7897' })
-
-  const result = removeMountBlocks(patch)
-  assert.equal(result.blocks.length, 2)
-  assert.doesNotMatch(result.text, /dsh-weixin/)
-  assert.doesNotMatch(result.text, /target ownership comment/)
-  assert.match(result.text, /# first insert stays byte-for-byte\n- insert:\n    - id: alpha/)
-  assert.match(result.text, /    - id: beta\n      options:\n        keep: second/)
-  assert.match(result.text, /    - id: gamma\n      nested:\n        - one\n        - two/)
-  assert.match(result.text, /- patch:\n    - id: unrelated-patch/)
-})
-
-test('an insert containing only the old row is removed without swallowing the next block', () => {
-  const patch = [
-    '# old plugin header',
-    '- insert:',
-    '    - id: dsh-weixin',
-    '      enabled: true',
-    '',
-    '# keep the next block header',
-    '- insert:',
-    '    - id: keep-me',
-    '      enabled: true',
-    '',
-  ].join('\n')
-  const result = removeMountBlocks(patch)
-  assert.doesNotMatch(result.text, /old plugin header|dsh-weixin/)
-  assert.match(result.text, /# keep the next block header\n- insert:/)
-  assert.match(result.text, /- insert:\n    - id: keep-me\n      enabled: true/)
-})
-
-test('a top-level id after the old insert is not treated as part of the mount block', () => {
-  const patch = [
-    '- insert:',
-    '    - id: dsh-weixin',
-    '      enabled: true',
-    '- id: ui-settings-general',
-    '  options:',
-    '    keep: true',
-    '',
-  ].join('\n')
-  const result = removeMountBlocks(patch)
-  assert.doesNotMatch(result.text, /id: dsh-weixin/)
-  assert.match(result.text, /^- id: ui-settings-general\n  options:\n    keep: true/m)
-})
-
-test('only direct insert children match; same-indent comments keep later target config in the row', () => {
-  const patch = [
-    '- insert:',
-    '    - id: other-plugin',
-    '      config:',
-    '        children:',
-    '          - id: dsh-weixin',
-    '            keep: nested',
-    '    - id: dsh-weixin',
-    '      enabled: true',
-    '    # target config follows this comment',
-    '      config:',
-    '        shouldRemove: true',
-    '    # sibling comment stays',
-    '    - id: sibling',
-    '      enabled: true',
-    '',
-  ].join('\n')
-  const blocks = findMountBlocks(patch)
-  assert.equal(blocks.length, 1)
-  const result = removeMountBlocks(patch)
-  assert.equal((result.text.match(/id: dsh-weixin/g) ?? []).length, 1)
-  assert.match(result.text, /- id: dsh-weixin\n            keep: nested/)
-  assert.doesNotMatch(result.text, /target config follows|shouldRemove/)
-  assert.match(result.text, /# sibling comment stays\n    - id: sibling/)
-  assert.match(result.text, /- id: other-plugin[\s\S]*- id: sibling/)
-})
 
 test('published pin inserts a missing dependency while preserving existing entries', () => {
   const raw = JSON.stringify({ dependencies: { left: '1.0.0' } }, null, 2) + '\n'
@@ -335,26 +222,24 @@ test('fresh temp profile installs, resolves, survives a second install, and unin
     name: 'fresh-profile',
     private: true,
     dependencies: {
-      'dsh-plugin-weixin': '^0.0.1',
       untouched: '1.0.0',
     },
-    optionalDependencies: { 'dsh-weixin': '^0.0.1' },
     devDependencies: { [PKG_NAME]: '^0.0.1' },
-    dsh: { profile: { bundles: ['base', 'dsh-weixin', 'other-plugin'] } },
+    dsh: { profile: { bundles: ['base', 'other-plugin'] } },
   })
   fs.writeFileSync(patchPath, [
     '- insert:',
     '    - id: other-before',
     '      enabled: true',
     '- insert:',
-    '    - id: dsh-weixin',
-    '      allowedSenders:',
-    '        - owner',
     '    - id: other-after',
     '      options:',
     '        keep: true',
     '',
   ].join('\n'))
+
+  fs.mkdirSync(path.dirname(settingsPath), { recursive: true })
+  fs.writeFileSync(settingsPath, '{invalid-settings-preserved')
 
   const run = (extraArgs = [], extraEnv = {}) => execFileSync(process.execPath, [
     path.join(REPO_ROOT, 'bin', 'install.mjs'),
@@ -368,6 +253,7 @@ test('fresh temp profile installs, resolves, survives a second install, and unin
     stdio: 'pipe',
   })
 
+  const originalPatchText = fs.readFileSync(patchPath, 'utf8')
   const firstOutput = run()
   assert.match(firstOutput, /linked package/)
   assert.match(firstOutput, /完整退出并重新打开 DSH/)
@@ -387,19 +273,17 @@ test('fresh temp profile installs, resolves, survives a second install, and unin
 
   const firstPkgText = fs.readFileSync(pkgPath, 'utf8')
   const firstPatchText = fs.readFileSync(patchPath, 'utf8')
+  assert.equal(firstPatchText, originalPatchText)
   const firstSettingsText = fs.readFileSync(settingsPath, 'utf8')
   const firstPkg = JSON.parse(firstPkgText)
   assert.equal(firstPkg.dependencies[PKG_NAME], sourceLinkSpec(REPO_ROOT))
   assert.equal(firstPkg.dependencies.untouched, '1.0.0')
-  assert.equal(Object.hasOwn(firstPkg.dependencies, 'dsh-plugin-weixin'), false)
-  assert.equal(Object.hasOwn(firstPkg.optionalDependencies, 'dsh-weixin'), false)
   assert.equal(Object.hasOwn(firstPkg.devDependencies, PKG_NAME), false)
   assert.equal(firstPkg.dsh.profile.bundles.filter((name) => name === PKG_NAME).length, 1)
-  assert.equal(firstPkg.dsh.profile.bundles.includes('dsh-weixin'), false)
   assert.match(firstPatchText, /other-before/)
   assert.match(firstPatchText, /other-after/)
   assert.doesNotMatch(firstPatchText, /dsh-weixin/)
-  assert.deepEqual(JSON.parse(firstSettingsText).allowedSenders, ['owner'])
+  assert.equal(firstSettingsText, '{invalid-settings-preserved')
   assert.match(createRequire(pkgPath).resolve(PKG_NAME), /src[\\/]index\.js$/)
 
   // Simulate the profile's next start: node_modules may be recreated, but the

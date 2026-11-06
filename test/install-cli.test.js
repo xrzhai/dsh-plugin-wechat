@@ -146,7 +146,6 @@ for (const mode of ['install', 'uninstall']) {
     if (mode === 'install') {
       assert.match(result.stdout, /would link /)
       assert.match(result.stdout, /would register dependency /)
-      assert.match(result.stdout, /old mount rows to remove: 1/)
     } else {
       assert.match(result.stdout, /would remove package link and plugin registrations/)
     }

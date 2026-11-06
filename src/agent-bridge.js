@@ -184,7 +184,6 @@ export class AgentBridge {
     // C20: the conversation's own route, when the operator pinned one.
     this.chatRoute = options.chatRoute
     this.onSpontaneousReply = options.onSpontaneousReply
-    this.getSystemAppend = options.getSystemAppend
     this.spontaneousPollMs =
       Number.isFinite(options.spontaneousPollMs) && options.spontaneousPollMs > 0
         ? options.spontaneousPollMs
@@ -459,7 +458,7 @@ export class AgentBridge {
    * running without the listener rather than failing to load.
    *
    * @param {{ provider: string, model: string }} [routeOverride] run this
-   *   session on a different provider/model — what the memory model setting
+   *   session on a different provider/model — what the background model setting
    *   uses, so background summarising cannot spend the conversation's model.
    */
   async #setup(routeOverride) {
@@ -486,22 +485,8 @@ export class AgentBridge {
           install(agentCtx, { current: route, assembled: undefined })
         }
       }
-      if (typeof this.getSystemAppend === 'function') {
-        try {
-          const text = this.getSystemAppend()
-          if (typeof text === 'string' && text.trim() !== '' && typeof agentCtx?.systemPrompt?.section === 'function') {
-            if (typeof agentCtx.effect === 'function') {
-              agentCtx.effect(() => agentCtx.systemPrompt.section({ name: 'WEIXIN_PERSONA', order: 85, text }))
-            } else {
-              agentCtx.systemPrompt.section({ name: 'WEIXIN_PERSONA', order: 85, text })
-            }
-          }
-        } catch {
-          // Ignore when systemPrompt is absent on the agent context
-        }
-      }
     }
-    const hasSetup = presetId !== undefined || route !== undefined || typeof this.getSystemAppend === 'function'
+    const hasSetup = presetId !== undefined || route !== undefined
     return { agentOptions, setup: hasSetup ? setup : undefined }
   }
 
@@ -545,7 +530,7 @@ export class AgentBridge {
    * @param {string} [accountId] owning bot account; bare key when absent
    * @param {{ sessionId?: string, sideMeta?: { parentSession?: string, origin?: string } }} [options]
    *   `sessionId` attaches an EXPLICIT session instead of the conversation's
-   *   active line (the memory summarizer's side session); `sideMeta` adds
+   *   active line (the scheduled subscription side session); `sideMeta` adds
    *   header-admitted meta (parentSession/origin) so the side session files
    *   under its conversation instead of the top level.
    */
@@ -690,7 +675,7 @@ export class AgentBridge {
       // one would fail validation ("header origin must be \"subagent\"").
       meta: {
         ...(cwd === undefined ? {} : { cwd }),
-        // Side sessions (memory summarizer) file under their conversation:
+        // Side sessions (scheduled subscriptions) file under their conversation:
         // origin 'subagent' + a parent is the only admitted child shape.
         ...(sideMeta === undefined ? {} : sideMeta),
       },
@@ -807,17 +792,10 @@ export class AgentBridge {
   }
 
   /**
-   * Run one prompt through a SIDE session and return its reply — the memory
-   * summarizer's engine. The side session is keyed deterministically off the
-   * conversation, so successive summaries reuse and resume it instead of
-   * creating a session per call, and its context stays separate from the
-   * conversation the user talks in. NOTHING here sends outbound: the reply is
-   * returned to the caller, who decides what to do with it (write conv
-   * memory), so a summary can never surface as a WeChat message.
-   *
-   * Returns undefined when the side session is still busy — the next turn
-   * threshold simply tries again, and the journal window it summarizes
-   * includes the latest turns either way.
+   * Run a scheduled prompt in a separate host session and return its reply.
+   * The conversation and selected route determine the reusable side session.
+   * Delivery belongs to the caller; this method never sends to WeChat.
+   * Returns undefined while that side session is busy.
    *
    * @param {object} params
    * @param {string} params.conversationId
@@ -835,7 +813,7 @@ export class AgentBridge {
     this.onBackgroundCall?.()
     const key = scopedLineKey(accountId, conversationId)
     // The route is part of the identity: a session created under one model
-    // cannot be re-pointed at another, so changing the memory model has to
+    // cannot be re-pointed at another, so changing the background model has to
     // start a fresh side session instead of quietly reusing the old one.
     const identity = route === undefined ? key : `${key}|${route.provider}/${route.model}`
     const digest = createHash('sha1').update(identity).digest('hex').slice(0, 16)
@@ -849,7 +827,7 @@ export class AgentBridge {
       },
     })
     if (record.busy) {
-      this.log?.(`memory summary skipped: side session ${sessionId} is busy`)
+      this.log?.(`background call skipped: side session ${sessionId} is busy`)
       return undefined
     }
     record.busy = true

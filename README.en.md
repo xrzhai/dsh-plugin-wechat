@@ -37,7 +37,6 @@ Once your Agent finishes installing, **fully quit and reopen DSH**.
   ```
   You do not need a command to log in: use **WeChat → WeChat Account → Scan QR to Log In**.
 - **`ffmpeg` is not bundled with macOS.** Install it with `brew install ffmpeg` if you want mp3/m4a/ogg sent as voice messages or video frames extracted for the model. Without it, audio falls back to a file attachment and frame extraction is skipped silently; wav and silk use the built-in encoder and are unaffected.
-- **`/say` is local speech synthesis and is macOS-only**, using the system `say` + `afconvert`: no network, no API key, no ffmpeg.
 - **Do not use the system Python for ASR.** `/usr/bin/python3` is 3.9 and has no `mlx-whisper`. Use the Python 3.12 bundled with DSH:
   ```sh
   ~/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/python/bin/python -m pip install mlx-whisper

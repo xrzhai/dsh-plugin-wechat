@@ -16,12 +16,7 @@ import path from 'node:path'
 import { createRequire } from 'node:module'
 import {
   PKG_NAME,
-  ROW_ID,
-  SUPERSEDED_PACKAGES,
-  parseYamlNode,
-  readKeptValues,
   removeInstalledPackage,
-  removeMountBlocks,
   samePath,
   sourceLinkSpec,
 } from './lib/install-profile.mjs'
@@ -68,7 +63,6 @@ const dshHome = process.env.DSH_HOME ?? path.join(os.homedir(), '.dsh')
 const profileDir = path.join(dshHome, 'profiles', profileName)
 const profilePkgPath = path.join(profileDir, 'package.json')
 const targetDir = path.join(profileDir, 'node_modules', PKG_NAME)
-const patchPath = path.join(profileDir, 'cordis.patch.yml')
 const settingsPath = path.join(dshHome, 'weixin', 'config.json')
 
 function fail(message) {
@@ -88,20 +82,12 @@ function writeJson(file, value) {
   fs.writeFileSync(file, JSON.stringify(value, null, 2) + '\n')
 }
 
-function removeStalePackageCopies() {
-  for (const stale of SUPERSEDED_PACKAGES) {
-    const staleDir = path.join(profileDir, 'node_modules', stale)
-    const result = removeInstalledPackage(staleDir, sourceRoot)
-    if (result.removed) process.stdout.write('removed superseded ' + stale + ' at ' + staleDir + '\n')
-  }
-}
-
 function removeProfileRegistrations(pkg) {
   let changed = false
   for (const collectionName of ['dependencies', 'optionalDependencies', 'devDependencies']) {
     const collection = pkg[collectionName]
     if (collection === undefined || typeof collection !== 'object' || Array.isArray(collection)) continue
-    for (const name of [PKG_NAME, ...SUPERSEDED_PACKAGES]) {
+    for (const name of [PKG_NAME]) {
       if (Object.hasOwn(collection, name)) {
         delete collection[name]
         changed = true
@@ -110,7 +96,7 @@ function removeProfileRegistrations(pkg) {
   }
   const bundles = pkg.dsh?.profile?.bundles
   if (Array.isArray(bundles)) {
-    const filtered = bundles.filter((name) => name !== PKG_NAME && !SUPERSEDED_PACKAGES.includes(name))
+    const filtered = bundles.filter((name) => name !== PKG_NAME)
     if (filtered.length !== bundles.length) {
       pkg.dsh.profile.bundles = filtered
       changed = true
@@ -167,21 +153,6 @@ function ensureSourceLink() {
   process.stdout.write('linked package ' + targetDir + ' -> ' + sourceRoot + '\n')
 }
 
-function migratePatch(patchText) {
-  const removal = removeMountBlocks(patchText, ROW_ID)
-  let migrated = {}
-  if (removal.blocks.length > 0) {
-    const lines = patchText.split('\n')
-    for (const block of removal.blocks) {
-      const values = readKeptValues(lines.slice(block.rowStart, block.rowEnd).join('\n'))
-      for (const [key, raw] of Object.entries(values)) {
-        if (!Object.hasOwn(migrated, key)) migrated[key] = raw
-      }
-    }
-  }
-  return { text: removal.text, blocks: removal.blocks, migrated }
-}
-
 if (!fs.existsSync(profileDir)) fail('profile not found: ' + profileDir)
 if (!fs.existsSync(profilePkgPath)) fail('profile package.json not found: ' + profilePkgPath)
 
@@ -194,13 +165,10 @@ if (dryRun) {
     process.stdout.write('  would remove package link and plugin registrations\n')
   } else {
     validateSourceCheckout()
-    const patchBefore = fs.existsSync(patchPath) ? fs.readFileSync(patchPath, 'utf8') : '[]\n'
-    const migration = migratePatch(patchBefore)
     process.stdout.write(
       '  would link ' + targetDir + ' -> ' + sourceRoot + '\n' +
       '  would register dependency ' + sourceLinkSpec(sourceRoot) + '\n' +
       '  would register bundle ' + PKG_NAME + '\n' +
-      '  old mount rows to remove: ' + migration.blocks.length + '\n' +
       '  pin lockfile: ' + (pin ? 'yes' : 'no') + '\n',
     )
   }
@@ -213,7 +181,6 @@ if (uninstall) {
   else if (removal.reason !== 'missing') {
     process.stdout.write('left ' + targetDir + ' untouched (' + removal.reason + ')\n')
   }
-  removeStalePackageCopies()
   const changed = removeProfileRegistrations(profilePkg)
   if (changed) writeJson(profilePkgPath, profilePkg)
   process.stdout.write(
@@ -224,37 +191,13 @@ if (uninstall) {
 
 validateSourceCheckout()
 
-const patchBefore = fs.existsSync(patchPath) ? fs.readFileSync(patchPath, 'utf8') : '[]\n'
-const migration = migratePatch(patchBefore)
-if (migration.blocks.length > 0) {
-  fs.writeFileSync(patchPath, migration.text)
-  process.stdout.write('removed duplicate ' + ROW_ID + ' mount row(s) from ' + patchPath + '\n')
-}
-
-const settings = fs.existsSync(settingsPath) ? readJson(settingsPath) : {}
-for (const [key, raw] of Object.entries(migration.migrated)) {
-  if (Object.hasOwn(settings, key)) continue
-  const value = parseYamlNode(raw)
-  if (value === undefined) continue
-  if (key === 'asr' && (value === null || typeof value !== 'object')) continue
-  settings[key] = value
-}
-fs.mkdirSync(path.dirname(settingsPath), { recursive: true, mode: 0o700 })
-fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n', { mode: 0o600 })
-try {
-  fs.chmodSync(settingsPath, 0o600)
-} catch {
-  // chmod is advisory on Windows and is already handled by the default ACL.
-}
-
-removeStalePackageCopies()
 ensureSourceLink()
 
 const profileBefore = JSON.stringify(profilePkg)
 for (const collectionName of ['dependencies', 'optionalDependencies', 'devDependencies']) {
   const collection = profilePkg[collectionName]
   if (collection === undefined || typeof collection !== 'object' || Array.isArray(collection)) continue
-  for (const name of [PKG_NAME, ...SUPERSEDED_PACKAGES]) delete collection[name]
+  for (const name of [PKG_NAME]) delete collection[name]
 }
 profilePkg.dependencies = profilePkg.dependencies && typeof profilePkg.dependencies === 'object'
   ? profilePkg.dependencies
@@ -268,7 +211,7 @@ profilePkg.dsh.profile = profilePkg.dsh.profile && typeof profilePkg.dsh.profile
   : {}
 const bundles = Array.isArray(profilePkg.dsh.profile.bundles) ? profilePkg.dsh.profile.bundles : []
 profilePkg.dsh.profile.bundles = bundles.filter((name) => (
-  name !== PKG_NAME && !SUPERSEDED_PACKAGES.includes(name)
+  name !== PKG_NAME
 ))
 profilePkg.dsh.profile.bundles.push(PKG_NAME)
 if (JSON.stringify(profilePkg) !== profileBefore) writeJson(profilePkgPath, profilePkg)

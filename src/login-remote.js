@@ -34,7 +34,6 @@ import { readJournal, DEFAULT_JOURNAL_LIMIT } from "./message/journal.js";
 import { readJournalRange, renderChatMarkdown } from "./message/chat-export.js";
 import { computeStats, buildHealth } from "./message/stats.js";
 import { conversationRows, ledgerTotals } from "./message/usage-ledger.js";
-import { readPromptComposition } from "./message/prompt-composition.js";
 import { readBudget } from "./budget.js";
 
 const FIXED_BASE_URL = "https://ilinkai.weixin.qq.com";
@@ -785,19 +784,7 @@ export class WeixinLoginController extends TypertRemoteService {
         }
     }
 
-    /**
-     * The system prompt the next message would carry, assembled from the SAME
-     * builders the inbound path uses — not a second implementation. A preview
-     * that drifts from the real prompt would be worse than none: it is the one
-     * screen meant to settle "what do you actually send?".
-     *
-     * It is a best-effort approximation of the message-scoped blocks: recall and
-     * knowledge search need a question, so they are previewed with a canned
-     * probe rather than the user's next words. Everything persona, style, memory,
-     * life, usage and grouping related is exact.
-     *
-     * @param {{ modeId?: string }} [options]
-     */
+    /** Read or save AGENTS.md in the active workspace. */
     async promptPreview(options) {
         // Startup owns the effective cwd (including profile configuration and
         // fallback). Do not re-read the saved overlay and redirect the editor
@@ -867,14 +854,7 @@ export class WeixinLoginController extends TypertRemoteService {
         const accountId = typeof opts.accountId === "string" && opts.accountId !== "" ? opts.accountId : undefined;
         const result = computeStats(stateDir(), { days, accountId });
 
-        // 提示词构成与健康度：构成来自运行时记录（进程内、最近一个回合），
-        // 健康度来自四件我们真的知道的事。两者都可能在重启后为空/降级，
-        // 所以卡片必须能画出「还没有记录」而不是编一个数字。
         const live = readSavedConfig();
-        const compositionAccount =
-            accountId ?? (typeof live.accountId === "string" && live.accountId !== "" ? live.accountId : "");
-        const composition = readPromptComposition(compositionAccount);
-
         const pending = readOutbox(stateDir()).items.length;
         let connected = false;
         try {
@@ -896,7 +876,7 @@ export class WeixinLoginController extends TypertRemoteService {
             },
         });
 
-        return { ...result, composition, health };
+        return { ...result, health };
     }
 
     /**
@@ -928,7 +908,6 @@ export class WeixinLoginController extends TypertRemoteService {
             rows,
             totals: ledgerTotals(rows),
             prices: { priceInPer1k, priceOutPer1k },
-            awareness: live.usageAwarenessEnabled !== false,
         };
     }
 

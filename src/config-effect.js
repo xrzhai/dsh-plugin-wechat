@@ -28,33 +28,29 @@
  */
 export const CONFIG_EFFECTS = Object.freeze({
   // —— 保存即生效：消息热路径或周期任务会重读存档配置 ——
-  // Compatibility note: `knowledgeHits`, `dryRun`, and `usageAwarenessEnabled`
-  // remain `live` only because they still exist in Config and the table must be
-  // schema-complete. No current runtime consumer is wired for them; this label
-  // alone does not mean the feature works.
   'enabled': 'live',
   'sessionDispatcherEnabled': 'live', 'sessionDispatcherSenders': 'live', 'sessionDispatcherTargets': 'live', 'protectedSessions': 'live', 'readOnlyPaths': 'live',
   'allowedSenders': 'live', 'allowedChats': 'live',
   'chatProvider': 'live', 'chatModel': 'live', 'documentExtract': 'live',
   'ocrEnabled': 'live', 'ocrCommand': 'live', 'ocrTimeoutMs': 'live', 'ocrMaxChars': 'live', 'documentTextChars': 'live',
-  'knowledgeHits': 'live',
-  'ttsVoice': 'live',
-  'groupChatEnabled': 'live', 'groupReplyWhen': 'live', 'groupKeywords': 'live',
-  'groupSummaryEnabled': 'live', 'groupSummaryEvery': 'live',
-  'pricePer1kInputYuan': 'live', 'pricePer1kOutputYuan': 'live', 'usageAwarenessEnabled': 'live',
+
+
+  'groupChatEnabled': 'live', 'groupReplyWhen': 'live',
+
+  'pricePer1kInputYuan': 'live', 'pricePer1kOutputYuan': 'live',
   'videoFrames': 'live', 'locale': 'live',
   'toolNotices': 'live', 'quietHoursEnabled': 'live', 'quietHoursStart': 'live', 'quietHoursEnd': 'live',
   'senderDailyLimit': 'live',
   'retentionJournalDays': 'live', 'retentionAuditDays': 'live', 'retentionMediaDays': 'live', 'retentionExportsDays': 'live', 'retentionLogsDays': 'live',
-  'dryRun': 'live', 'metricsExport': 'live', 'backupEnabled': 'live', 'backupKeep': 'live',
-  'awayAutoReply': 'live', 'mediaMaxBytes': 'live', 'backgroundDailyLimit': 'live',
+  'metricsExport': 'live', 'backupEnabled': 'live', 'backupKeep': 'live',
+  'mediaMaxBytes': 'live', 'backgroundDailyLimit': 'live',
   'busyMessageMode': 'live',
 
   // —— 重启后才生效：启动时被 transport、bridge、timer 或闭包捕获 ——
   'accountId': 'restart', 'cwd': 'restart', 'workspaceTitle': 'restart',
   'maxMessageLength': 'restart', 'sendIntervalMs': 'restart', 'sendCooldownMs': 'restart', 'voiceOutbound': 'restart', 'messageJournal': 'restart',
   'sideProvider': 'restart', 'sideModel': 'restart',
-  'knowledgeEnabled': 'restart', 'groupBotNames': 'restart',
+  'groupBotNames': 'restart',
   'richContent': 'restart', 'codeFileThreshold': 'restart',
   'senderRatePerMinute': 'restart', 'maxQueuedPerConversation': 'restart',
   'notifyEnabled': 'restart', 'notifyPort': 'restart', 'notifyToken': 'restart',
@@ -88,7 +84,7 @@ export function effectOf(field) {
 }
 
 /**
- * 「多久以前」的一行话。和 `/keyword stats` 用的是同一种语气。
+ * 配置保存时间的可读说明。
  *
  * @param {number} at
  * @param {number} now

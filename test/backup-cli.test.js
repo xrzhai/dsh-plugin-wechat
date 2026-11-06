@@ -37,13 +37,13 @@ function fixture(t) {
 }
 
 function writeState(root, marker) {
-  fs.mkdirSync(path.join(root, 'memory'), { recursive: true })
+  fs.mkdirSync(path.join(root, 'sessions'), { recursive: true })
   fs.writeFileSync(path.join(root, 'config.json'), '{"enabled":false}\n')
-  fs.writeFileSync(path.join(root, 'memory', 'remember.txt'), `${marker}\n`)
+  fs.writeFileSync(path.join(root, 'sessions', 'memory.md'), `${marker}\n`)
 }
 
 function readMarker(root) {
-  return fs.readFileSync(path.join(root, 'memory', 'remember.txt'), 'utf8').trim()
+  return fs.readFileSync(path.join(root, 'sessions', 'memory.md'), 'utf8').trim()
 }
 
 function writeLock(root, value) {

@@ -47,7 +47,6 @@ import { HEARTBEAT_MS, acquireInstanceLock, heartbeatInstanceLock, releaseInstan
 import { createOutbox, formatOutbox, CONTEXT_TOKEN_TTL_MS } from './message/outbox.js'
 import { createGatewayControl } from './gateway-control.js'
 import { configureOutbound, sendChunked, sendProducedFiles } from './outbound.js'
-import { channelFor } from './channel.js'
 import { HOOK_POINTS, createHooks } from './hooks.js'
 import { createMetrics, exportMetricsSnapshot } from './metrics.js'
 import { ensureSecretModes, redactSecrets } from './credentials.js'
@@ -57,7 +56,6 @@ import { readScope, scopedConfig } from './config-scope.js'
 import { DEFAULT_MAX_QUEUE, DEFAULT_PER_MINUTE, createSenderLimiter } from './message/sender-limit.js'
 import { createSenderDailyLimiter } from './message/sender-daily.js'
 import { recordStranger } from './message/strangers.js'
-import { keywordGate, keywordStats, parseKeywordRules } from './message/keyword-reply.js'
 import { isAllowedSender, denialReason } from './security/allowlist.js'
 import { ILinkTransport } from './transport/ilink.js'
 import { AgentBridge } from './agent-bridge.js'
@@ -77,24 +75,16 @@ let hooks
 /** Counters the settings card reads (src/metrics.js); process lifetime only. */
 let metrics
 let metricsTimer
-let knowledgeRefresher
 /** ④ One audit line per unfamiliar shape per conversation, not one per message. */
 const unknownItemSeen = new Set()
 let outbox
-/** 群聊摘要：内存里攒群消息，够一批就后台压成几行。 */
-let groupSummaries
 import { MessageDeduper } from './message/dedupe.js'
 import { extractUrls, fetchLinkText, describeLinkResults } from './message/links.js'
 import { ReminderScheduler, parseWhen } from './message/scheduler.js'
-import { createAwayCommands, readAway, noteMissed, buildAwayReply, awaySummary, clearAway } from './message/away.js'
-import { createDraftCommands, readDraft } from './message/drafts.js'
 import { createWebhookSender } from './webhook.js'
 import { backgroundBudget, recordBackgroundCall } from './budget.js'
-import { createListCommands } from './message/lists.js'
-import { createHabitCommands } from './message/habits.js'
-import { createMediaCommands, humanTime } from './message/media-archive.js'
+import { createMediaCommands } from './message/media-archive.js'
 import { startAccounts } from './startup.js'
-import { createReadingCommands } from './message/reading.js'
 import { createSendCommands } from './message/send-file.js'
 import { SubscriptionScheduler, formatStamp } from './message/subscriptions.js'
 import { allowedMediaDirs, deliverOutboundMedia, DEFAULT_MAX_MEDIA_BYTES } from './media/outbound.js'
@@ -111,8 +101,7 @@ import { mapWithConcurrency } from './concurrency.js'
 // cannot drift apart.
 import { isInterruptCommand, readLines, mostRecentConversationId } from './sessions.js'
 
-import { startKnowledgeRefresh } from './message/knowledge-refresh.js'
-import { groupReplyPolicy, isGroupMessage } from './message/groups.js'
+import { groupReplyPolicy } from './message/groups.js'
 import { classifyToolCall, noticeText } from './message/tool-guard.js'
 import { createTranslator, resolveLocale } from './i18n.js'
 import { routeFor, sideRouteFor } from './model-route.js'
@@ -120,11 +109,8 @@ import { readJournalRange, renderChatMarkdown, writeChatExport } from './message
 import { createNotifyServer, DEFAULT_NOTIFY_PORT, ensureNotifyToken } from './notify.js'
 import { describeUnknownItems, firstSighting } from './message/unknown-items.js'
 import { statePaths } from './state-layout.js'
-import { createGroupSummaries, groupSummaryPrompt } from './message/group-summary.js'
-import { recordPromptComposition } from './message/prompt-composition.js'
 import { recordUsage } from './message/usage-ledger.js'
 
-import { cleanSpeechText, synthesizeVoiceFile, ttsPlatformSupported } from './media/tts.js'
 // The vendored logger is the only channel guaranteed to land on disk at INFO:
 // ctx.logger can drop levels depending on the host's exporter config, and a
 // refusal that leaves no trace turns an allowlist mismatch into "the bot just
@@ -205,7 +191,7 @@ export const Config = z.object({
   // route where supported, then the host default; it does not imply chat.
   chatProvider: z.string().default('').description('主对话模型 provider：留空沿用 DSH 当前会话模型。只填 provider 或只填 model 都不生效。'),
   chatModel: z.string().default('').description('主对话模型 model：和 chatProvider 一起填才生效。'),
-  sideProvider: z.string().default('').description('后台任务模型 provider：定时主动消息、群聊摘要等后台任务使用；留空仍会检查旧版用途路由，若仍无可用后台路由则使用 DSH 默认模型。'),
+  sideProvider: z.string().default('').description('后台任务模型 provider：定时订阅使用；留空使用 DSH 默认模型。'),
   sideModel: z.string().default('').description('后台任务模型 model：和 sideProvider 一起填才生效。'),
   documentExtract: z.boolean().default(true).description('Extract the text of an inbound document (docx/txt/md/csv/json) into the turn, instead of only telling the model where it was saved. PDF needs the optional pdfjs-dist package; without it a PDF is only described by its path.'),
   ocrEnabled: z.boolean().default(false).description('Run an external OCR command on inbound images and put the text into the turn. Off by default: the plugin ships no OCR engine.'),
@@ -213,22 +199,11 @@ export const Config = z.object({
   ocrTimeoutMs: z.number().default(20000).description('Kill the OCR command after this many milliseconds.'),
   ocrMaxChars: z.number().default(2000).description('Keep at most this many characters of OCR text per image.'),
   documentTextChars: z.number().min(200).max(20000).default(4000).description('How many characters of an inbound document to put into the prompt; the rest is cut with a note.'),
-  knowledgeEnabled: z.boolean().default(false).description(
-    '知识库：把文件放进 <state>/knowledge/<账号>/ 目录，聊天里问到相关内容时自动检索，并说清答案出自哪份文件。不需要任何命令。',
-  ),
-  knowledgeHits: z.number().min(1).max(8).default(3).description('一次最多注入几段知识库原文。'),
-  ttsVoice: z.string().default('').description(
-    '本地语音合成用的系统音色：macOS `say -v` 的名字（例如 Tingting、Meijia；`say -v ?` 可以列出来）。留空用系统默认音色。',
-  ),
   groupChatEnabled: z.boolean().default(false).description('参加群聊：开启后才会在群里回话。默认关闭——一个对每条群消息都答的机器人，在真群里就是刷屏。私聊不受影响。'),
-  groupSummaryEnabled: z.boolean().default(false).description('群聊上下文摘要：群里攒够 groupSummaryEvery 条消息后，用一次后台调用把最近聊的压成几行，下次被叫到时折进提示词。默认关闭——它每次都要花一次调用。'),
-  groupSummaryEvery: z.number().min(4).max(100).default(12).description('攒多少条群消息做一次摘要（默认 12）。'),
   pricePer1kInputYuan: z.number().min(0).default(0).description('估算花费用：每千输入 token 多少元（0 表示不算钱，只显示 token）。'),
   pricePer1kOutputYuan: z.number().min(0).default(0).description('估算花费用：每千输出 token 多少元。'),
-  usageAwarenessEnabled: z.boolean().default(false).description('把人设自己这个会话的消耗（估算 token / 元）写进提示词，让它有「我在花钱」的意识。'),
   groupReplyWhen: z.string().default('mention').description('群里什么时候回：mention 只答被叫到的时候，all 每条都答。iLink 不给 @ 列表，因此按首行里的机器人名字匹配。'),
   groupBotNames: z.string().default('').description('群里额外的称呼，用逗号分隔。iLink 不提供机器人的群昵称，想让「@小助手」生效就得在这里写上它。'),
-  groupKeywords: z.string().default('').description('群关键词自动回复，每行一条：正则 => 回复。例如「^打卡$ => 打卡成功」。只在群里、只对白名单内的人生效；同一群同一条规则 60 秒内最多应一次；免打扰时段沉默。回复是模板，不走模型。'),
   videoFrames: z.boolean().default(true).description('收到视频时用本机 ffmpeg 抽几帧静图交给模型（模型读不了视频，但能看图）。需要的机器上装了 ffmpeg；抽帧失败只影响那一条视频的内容理解，文件照常保存。'),
   richContent: z.boolean().default(true).description('富内容：长代码块作为文件附件发出、Markdown 表格转成对齐文本。微信只有纯文本气泡，这两处是 Markdown 里最容易在纯文本里变形的东西。'),
   codeFileThreshold: z.number().min(200).max(20000).default(1200).description('代码块超过多少字就改成发文件；更短的留在气泡里（两行代码读起来比附件顺）。'),
@@ -251,7 +226,6 @@ export const Config = z.object({
   retentionMediaDays: z.number().min(0).default(30).description('收到的图片/文件/语音保留天数；0 表示不清理。'),
   retentionExportsDays: z.number().min(0).default(60).description('/export 导出的 Markdown 保留天数；0 表示不清理。'),
   retentionLogsDays: z.number().min(0).default(30).description('vendor 每日日志保留天数；0 表示不清理。'),
-  dryRun: z.boolean().default(false).description('预演模式：让模型先给计划再动手，你回「执行」才真正执行。这不是强制拦截——插件拦不住工具调用，它只是让模型先说后做，所以危险工具提醒仍然同时生效。'),
   metricsExport: z.boolean().default(true).description('每 30 秒把指标写到状态目录的 metrics.json / metrics.prom，方便外部抓取（npm run metrics 读取）。'),
   backupEnabled: z.boolean().default(true).description('每天自动备份一次状态目录（账号凭证、会话记录、提醒、配置及历史数据）；备份在 <状态目录>/backups，含登录凭证，请勿外传。'),
   backupKeep: z.number().min(1).max(60).default(DEFAULT_KEEP).description('保留最近几份自动备份；更旧的会被删掉。'),
@@ -261,7 +235,6 @@ export const Config = z.object({
   webhookUrl: z.string().default('').description('出站 webhook：收到消息/回复发出时向这个 http(s) URL POST 一条 JSON。留空关闭。'),
   webhookSecret: z.string().default('').description('出站 webhook 的 HMAC 密钥；填了就带 X-Weixin-Signature: sha256=<hex>，对原始 body 签名。'),
   webhookTimeoutMs: z.number().default(5000).description('出站 webhook 的超时毫秒数；失败只记日志，不影响回复。'),
-  awayAutoReply: z.string().default('').description('离开模式的自动回复；留空用「我现在不在，看到会回你～（大概 HH:mm 回来）」。'),
   mediaMaxBytes: z.number().min(0).default(0).description('入站媒体的总容量上限（字节）；超过就从最旧的开始删。0 表示不限。'),
   backgroundDailyLimit: z.number().default(0).description('每天允许的后台模型调用次数上限（订阅等后台任务都算）；0 表示不限。主对话不受影响。'),
   toolAudit: z.boolean().default(true).description(
@@ -530,7 +503,6 @@ export function apply(ctx, config) {
     let subscriptionScheduler
     let retentionTimer
     let notifyBridge
-    let awayTimer
     /** @type {Array<() => void>} */
     const offWebhook = []
     const backupTimers = []
@@ -540,12 +512,6 @@ export function apply(ctx, config) {
     let senderLimiter
     /** Set in apply(); bringUpLoop() is a different function and grows its own closure. */
     let senderDailyLimiterFor = () => undefined
-    // Same reachability trick: the inbound handler lives where the setup
-    // scope's quietGate is out of reach, so the gate travels through a cell.
-    let quietGateFor = (now, _accountId) => 0
-    // C20: declared here (not inside setup) because bringUpAccount, which is a
-    // sibling of setup(), hands it to createInboundHandler.
-    let sideRoute = () => undefined
     // Serializes loop hand-offs across ALL accounts. A login can complete while
     // a previous hand-off is still tearing a transport down, and two live loops
     // on one credential deliver every inbound message twice — the server hands
@@ -671,7 +637,7 @@ export function apply(ctx, config) {
       // C20: background side sessions (subscriptions, proactive) get their own
       // route; without one they fall back to the host default, so a single cheap
       // model covers everything that is not the conversation.
-      sideRoute = (purpose = 'side') => routeFor(purpose, config) ?? sideRouteFor(config)
+      const sideRoute = () => sideRouteFor(config)
 
       // Voice transcription is opt-in and out of tree: with no bridge configured
       // this stays undefined and voice notes are delivered as files, exactly as
@@ -691,7 +657,6 @@ export function apply(ctx, config) {
       // writes are atomic, so the damage is bounded to last-writer-wins).
       // The outbox: a reply that could not be delivered is written to disk and
       // retried, because a reminder nobody receives is worse than one sent late.
-      groupSummaries = createGroupSummaries({ stateRoot, warn })
     outbox = createOutbox({
         stateRoot,
         transportFor: (accountId) => transports.get(accountId),
@@ -751,17 +716,6 @@ export function apply(ctx, config) {
       }, 30_000)
       metricsTimer.unref?.()
 
-      // 知识库：索引只在后台建，检索走热路径只读 index.json。启动先建一次，
-      // 之后每 6 小时一次；nudge 让刚放进目录的文件不必等到下一个周期。
-      if (withSavedConfig(config).knowledgeEnabled !== false) {
-        knowledgeRefresher = startKnowledgeRefresh({
-          stateRoot,
-          accountIds: () => [...transports.keys()],
-          warn,
-          log,
-        })
-      }
-
       const lock = acquireInstanceLock(stateRoot, { warn })
       if (lock.acquired === false) {
         warn(
@@ -779,7 +733,6 @@ export function apply(ctx, config) {
         quietDelay(now, withSavedConfig(config)),
         tempQuietDelay(now, stateRoot, accountId, { warn }),
       )
-      quietGateFor = quietGate
       const deliveryStillEnabled = (accountId) => !cancelled && gatewayEnabled() && !isAccountPaused(accountId)
 
       // Retention: state grows all day; a nightly sweep keeps it bounded. It
@@ -854,11 +807,7 @@ export function apply(ctx, config) {
       // journal sink above (null when journalling is off) and the outbox.
       configureOutbound({ journal: journalOutboundRef, outbox, hooks, warn, snippetsDir: statePaths(stateRoot).snippetsDir.absolute })
 
-      // Scheduled proactive messages (/subscribe): the bot speaks first
-      // through its own side session. The prompt re-uses the exact injection
-      // blocks the reply path builds — persona mode, memory, the recent
-      // window — so a proactive bubble sounds like the same entity the user
-      // has been talking to, not a different bot.
+      // Scheduled subscriptions use an isolated host side session.
       const subscriptionBusy = new Set()
       subscriptionScheduler = new SubscriptionScheduler({
         stateRoot,
@@ -884,7 +833,7 @@ export function apply(ctx, config) {
               `直接输出这条消息的正文，就像你在微信里自己发起的一条消息。不要复述或解释这个约定本身。`,
               `</weixin_subscription>`,
             ].join('\n')
-            const result = await bridge.summarize({ conversationId: item.conversationId, accountId: item.accountId, prompt, sessionPrefix: 'wx-sub-', route: sideRoute('report') })
+            const result = await bridge.summarize({ conversationId: item.conversationId, accountId: item.accountId, prompt, sessionPrefix: 'wx-sub-', route: sideRoute() })
             if (!deliveryStillEnabled(item.accountId) || transports.get(item.accountId) !== transport) {
               throw new Error(`subscription ${item.id} origin is no longer live`)
             }
@@ -945,22 +894,6 @@ export function apply(ctx, config) {
           log('outbound webhook enabled')
         }
       }
-
-      // 离开模式到点：把最后一个找过你的会话当收件箱，发一条汇总后关窗。
-      // 一分钟的粒度对「离开两小时」足够；到点时不会顺带跑一轮模型。
-      awayTimer = setInterval(() => {
-        for (const [id, t] of transports) {
-          const away = readAway(stateRoot, id, { warn })
-          if (away === undefined || away.active) continue
-          const last = away.missed[away.missed.length - 1]
-          if (last !== undefined) {
-            sendChunked(t, withSavedConfig(config), { conversationId: last.conversationId, text: awaySummary(away) })
-              .catch((error) => warn(`away summary failed: ${String(error)}`))
-          }
-          clearAway(stateRoot, id, { warn })
-        }
-      }, 60_000)
-      awayTimer.unref?.()
 
     })()
     // A disabled gateway has no startLoop awaiting setup, but setup failures
@@ -1128,8 +1061,6 @@ export function apply(ctx, config) {
         senderDailyGate: (senderId) => senderDailyLimiterFor(account.accountId, senderId),
         // C20: side sessions (/\summary, subscriptions, proactive) use the
         // background route; the conversation keeps the chat route.
-        sideRoute,
-        quietGate: quietGateFor,
       })
 
       const previous = transports.get(account.accountId)
@@ -1234,13 +1165,11 @@ export function apply(ctx, config) {
       subscriptionScheduler?.stop()
       await gateway.sync()
       await notifyBridge?.stop()
-      if (awayTimer !== undefined) clearInterval(awayTimer)
       for (const off of offWebhook.splice(0)) off()
       if (retentionTimer !== undefined) clearInterval(retentionTimer)
       for (const timer of backupTimers) clearTimeout(timer)
       outbox?.stop()
       if (metricsTimer !== undefined) clearInterval(metricsTimer)
-      knowledgeRefresher?.stop()
       if (lockHeartbeat !== undefined) clearInterval(lockHeartbeat)
       releaseInstanceLock(stateRoot)
       if (loginController !== undefined && loginController.onAccountBound === onAccountBound) {
@@ -1465,7 +1394,7 @@ export function weixinSourceBlock(message) {
   return `<weixin_source ${fields.join(' ')} />`
 }
 
-function createInboundHandler({ config, accountId, transport, bridge, asrBridge, seen, log, warn, fileLog, stateRoot, mediaDirs, agentCwd, reminderScheduler, subscriptionScheduler, journalInbound, senderGate, senderDailyGate, sideRoute, quietGate }) {
+function createInboundHandler({ config, accountId, transport, bridge, asrBridge, seen, log, warn, fileLog, stateRoot, mediaDirs, agentCwd, reminderScheduler, subscriptionScheduler, journalInbound, senderGate, senderDailyGate }) {
   // The effective allowlist is per account: an account-level override in the
   // registry narrows (or replaces) the global list.
   // `accountId` is always set here (bringUpAccount passes it), but the
@@ -1616,8 +1545,6 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
         const file = writeChatExport(stateRoot, accountId, conversationId, markdown)
         return `聊天记录比较长（${entries.length} 条，${markdown.length} 字），已导出成文件：\n${file}`
       },
-      // ⑥ 群关键词规则配在 config.json 里，命中是静默的模板回复 —— 用户看不出哪条
-      //    规则在干活、哪条写错了正则永远不响。这个命令把规则和计数一起摊开。
       config: () => {
         // 只描述规则：哪一项保存即生效、哪一项要重启。不读文件、不改任何东西。
         let savedAt
@@ -1631,70 +1558,6 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
           configFile: configFile(),
           savedAt,
         })
-      },
-      keyword: (arg) => {
-        const action = String(arg ?? '').trim()
-        if (action !== '' && /^(stats|统计|命中)$/i.test(action) === false) {
-          return '用法：/keyword stats（看每条群关键词规则的命中次数）'
-        }
-        const rules = parseKeywordRules(String(withSavedConfig(config).groupKeywords ?? ''), { warn })
-        if (rules.length === 0) {
-          return '还没有配置群关键词规则。可在 config.json 的 groupKeywords 中按「正则 => 回复」每行配置一条。'
-        }
-        const stats = keywordStats(String(withSavedConfig(config).groupKeywords ?? ''), { warn })
-        const lines = [`群关键词规则 ${stats.length} 条（命中次数是插件启动以来的累计）：`]
-        for (const [index, entry] of stats.entries()) {
-          // media-archive 的 humanTime 已经在别处用「今天 14:03 / 昨天」这套说法，
-          // 同一个产品里不该有两种「多久以前」。
-          const when = entry.lastAt === 0 ? '还没响过' : `最近一次 ${humanTime(entry.lastAt, { now: Date.now() })}`
-          const cooled = entry.cooled > 0 ? `，另有 ${entry.cooled} 次因为冷却被吞` : ''
-          lines.push(`${index + 1}. ${entry.source} → ${entry.reply.slice(0, 20)}${entry.reply.length > 20 ? '…' : ''}\n   命中 ${entry.triggered} 次${cooled} · ${when}`)
-        }
-        if (stats.every((entry) => entry.triggered === 0)) lines.push('（这些规则一次都没命中过：检查正则大小写、^$ 锚点，以及是不是只在群里生效）')
-        return lines.join('\n')
-      },
-      ...createAwayCommands({ stateRoot, accountId, warn, parseWhen }),
-      ...createListCommands({ stateRoot, accountId, warn }),
-      ...createHabitCommands({ stateRoot, accountId, warn }),
-      ...createDraftCommands({
-        stateRoot,
-        accountId,
-        item: () => {
-          const held = readDraft(stateRoot, accountId, { warn })
-          return held === undefined ? undefined : { kind: held.kind, label: held.forLabel }
-        },
-        who: () => undefined,
-        send: (text) => sendChunked(transport, effectiveConfig.current, { conversationId, text }),
-        warn,
-      }),
-      say: async (arg) => {
-        const spoken = String(arg ?? '').trim()
-        if (spoken === '') return '用法：/say 要说的话 —— 用本机语音合成，发成音频（macOS 才带 `say`）。'
-        if (!ttsPlatformSupported()) return `这台机器（${process.platform}）没有系统语音合成，/say 只在 macOS 上能用。`
-        const liveConfig = effectiveConfig.current
-        const speech = cleanSpeechText(spoken, { max: 300 })
-        if (speech.text === '') return '这句话里没有可读的文字。'
-        const made = await synthesizeVoiceFile(speech.text, { voice: liveConfig.ttsVoice })
-        if (made.ok !== true) return `语音没合成出来：${made.reason}`
-        try {
-          await channelFor(transport).sendMedia({
-            filePath: made.file,
-            text: '',
-            conversationId,
-            cdnBaseUrl: transport.cdnBaseUrl,
-          })
-        } catch (error) {
-          return `语音发送失败：${String(error?.message ?? error)}`
-        } finally {
-          try {
-            fs.rmSync(made.file, { force: true })
-          } catch {
-            // 临时文件删不掉不是错误。
-          }
-        }
-        const how = liveConfig.voiceOutbound === true ? '语音条' : '音频文件'
-        fileLog.info(`sent /say voice (${speech.chars} chars) to ${conversationId}`)
-        return `用本机音色合成好了，作为${how}发了出去（${speech.chars} 字${speech.truncated ? '，只念了前一段' : ''}）。`
       },
       ...createMediaCommands({
         dir: inboxDir(),
@@ -1712,7 +1575,6 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
         },
         warn,
       }),
-      ...createReadingCommands({ stateRoot, accountId, warn }),
       ...createSendCommands({
         conversationId,
         mediaDirs,
@@ -1723,9 +1585,6 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
     }
   }
   return async (message) => {
-    // One timestamp for both the journal line and the recall exclusion, so the
-    // message being answered can be recognised in the index without matching
-    // on text alone.
     // ④ A passive listener for shapes the vendored client does not know: it cannot
     // render a link card, it can only tell us whether the server sends them.
     for (const line of describeUnknownItems(message)) {
@@ -1795,49 +1654,7 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
       ],
     })
 
-    // 群聊上下文（C14-bis）：记下每一条群消息（不管有没有被点到），够一批就在
-    // 后台压成几行；下次被叫到时那几行会折进提示词。默认关闭，因为一次后台调用
-    // 就是一次钱。
-    if (isGroupMessage(message) && effectiveConfig.current.groupSummaryEnabled === true && groupSummaries !== undefined) {
-      groupSummaries.note(accountId, message.conversationId, { sender: message.senderId, text: message.text, at: Date.now() })
-      const batch = groupSummaries.due(accountId, message.conversationId, Number(effectiveConfig.current.groupSummaryEvery ?? 12))
-      if (batch.due && bridge !== undefined && batch.lines.length > 0) {
-        const lines = batch.lines
-        void bridge
-          .summarize({
-            conversationId: message.conversationId,
-            accountId,
-            prompt: groupSummaryPrompt(lines),
-            sessionPrefix: 'wx-grp-',
-            route: sideRoute?.(),
-          })
-          .then((result) => {
-            if (result?.ok !== true || typeof result.text !== 'string' || result.text.trim() === '') return
-            groupSummaries?.save(accountId, message.conversationId, { summary: result.text, covered: lines.length })
-            fileLog.info(`group summary for ${message.conversationId} covers ${lines.length} messages`)
-          })
-          .catch((error) => warn(`group summary failed: ${error?.message ?? error}`))
-      }
-    }
     if (groupDecision.reply === false) {
-      // 1a-ter. Group keyword auto-reply: the third group policy. It lives in
-      // the declined branch (mention/all did not fire), still inside the group
-      // gate, only for allowlisted senders, and it sends a template — no model
-      // turn, no memory, no tools. Quiet hours silence it like proactive.
-      const keywordRules = parseKeywordRules(String(effectiveConfig.current.groupKeywords ?? ''), { warn })
-      const quietMs = typeof quietGate === 'function' ? quietGate(Date.now(), accountId) : 0
-      const keyword = isAllowedSender(effectiveConfig.current, message.senderId, message.conversationId) && quietMs === 0
-        ? keywordGate(keywordRules, message.text ?? '', message.conversationId)
-        : null
-      if (keyword !== null) {
-        metrics?.inc('group.keyword', 1)
-        await sendChunked(transport, config, {
-          conversationId: message.conversationId,
-          text: keyword.reply,
-          contextToken: message.contextToken,
-        })
-        return
-      }
       hooks?.emit(HOOK_POINTS.inboundRefused, {
         accountId,
         conversationId: message.conversationId,
@@ -2033,30 +1850,6 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
       return
     }
 
-    // 4.2 离开模式：窗口内的消息在这里就被拦下，不进 agent —— 「不回消息」
-    //     如果还走一遍模型，二十句「在吗」就是二十次调用。同一个会话每 30
-    //     分钟回一句，免得对方以为被无视；其余记下来等 /back 一次交代。
-    const awayNow = readAway(stateRoot, accountId, { warn })
-    if (awayNow !== undefined && awayNow.active) {
-      const missed = noteMissed(stateRoot, accountId, {
-        senderId: message.senderId,
-        conversationId: message.conversationId,
-        text: message.text,
-        at: Date.now(),
-        warn,
-      })
-      const awayQuiet = tempQuietDelay(Date.now(), stateRoot, accountId, { warn }) > 0
-      if (missed.shouldReply && !awayQuiet) {
-        await sendChunked(transport, effectiveConfig.current, {
-          conversationId: message.conversationId,
-          text: buildAwayReply(awayNow, { reply: effectiveConfig.current.awayAutoReply }),
-          contextToken: message.contextToken,
-        })
-        fileLog.info(`away auto-reply sent to ${message.conversationId}`)
-      }
-      return
-    }
-
     // 4.5 Link enrichment: if the message carries URLs, fetch each one and
     //    fold the readable text into the prompt. A failed link NEVER fails the
     //    message — the agent gets a one-line reason instead, and the user's
@@ -2210,10 +2003,6 @@ ${neutralizeTags(ocr.text)}
     if (config.sourceContext === true) {
       prompt = weixinSourceBlock(message) + (prompt === '' ? '' : `\n\n${prompt}`)
     }
-
-    recordPromptComposition(accountId, [
-      { key: 'message', chars: prompt.length },
-    ], { total: prompt.length, at: journaledAt })
 
     // 5. Drive the agent, then send the reply back in chunks.
     if (config.typingIndicator) await transport.setTyping(true, message.conversationId)

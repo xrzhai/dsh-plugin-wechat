@@ -3,10 +3,9 @@
  *
  * 固定免打扰（`quietHoursStart/End`）解决的是「每天这个点都别吵」，但开会、
  * 看电影、开车这种两小时的临时状态只能去设置卡改配置再改回来。这里把
- * 「到某个时刻为止」存成一个账号级状态，让两类静默行为让路：
+ * 「到某个时刻为止」存成一个账号级状态，让定时发送让路：
  *
  *   - 定时提醒与 /subscribe：到点顺延到静默结束；
- *   - 离开模式的自动回复：不自动回，但仍记下未读。
  *
  * 入站消息的回复**不受影响** —— 人都在打字了，再静默就是装死。
  *
@@ -111,7 +110,7 @@ export function quietLabel(until, now = Date.now()) {
 export function describeTempQuiet(quiet, now = Date.now()) {
   if (quiet === undefined) return '当前没有临时静默。'
   const minutes = Math.max(1, Math.round((quiet.until - now) / 60_000))
-  return `临时静默到 ${quietLabel(quiet.until, now)}（还剩约 ${minutes} 分钟）：离开模式不自动回复，提醒与订阅顺延；你发消息仍会回。`
+  return `临时静默到 ${quietLabel(quiet.until, now)}（还剩约 ${minutes} 分钟）：提醒与订阅顺延；你发消息仍会回。`
 }
 
 /** 仅供测试与诊断：直接看状态文件是否存在。 */

@@ -29,7 +29,6 @@ const EXPECTED_RESTART = [
   'cwd',
   'eventPollMs',
   'groupBotNames',
-  'knowledgeEnabled',
   'markdownMode',
   'maxInboundMediaBytes',
   'maxMediaBytes',
@@ -93,9 +92,10 @@ test('startup-captured fields are restart-only and hot-path fields are live', ()
   }
 })
 
-test('schema-backed dormant fields keep a live mapping label without implying wiring', () => {
+test('retired configuration has no schema or effect mapping', () => {
   for (const field of ['knowledgeHits', 'dryRun', 'usageAwarenessEnabled']) {
-    assert.equal(CONFIG_EFFECTS[field], 'live')
+    assert.equal(CONFIG_EFFECTS[field], undefined)
+    assert.equal(Config.dict[field], undefined)
   }
 })
 

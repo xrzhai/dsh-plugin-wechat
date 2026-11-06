@@ -1,16 +1,4 @@
-// Group chats (C14): the transport already routes them — a message with a
-// non-blank group_id becomes the conversation id — but nothing downstream knew.
-// Three things go wrong without a policy, and they are all quiet:
-//
-//   1. the bot answers every message in a group chat, which in a real group is
-//      indistinguishable from spam;
-//   2. the group shares ONE conversation line, so member A's turn is the context
-//      member B is answered from;
-//   3. the memory block carries the owner's private facts, and a group is the
-//      worst place to read those aloud.
-//
-// So: a group message is ignored unless it is addressed to the bot, and private
-// memory/recall/threads are not injected into a group unless the operator opts in.
+// Basic group identity and opt-in reply policy. Authorization is checked separately.
 export const DEFAULT_GROUP_REPLY_WHEN = 'mention'
 
 /** A group message is one whose conversation is not the sender. */
@@ -61,12 +49,4 @@ export function groupReplyPolicy(message, config, { botNames = [] } = {}) {
   return mentionsBot(message?.text, { names: botNames }) === true
     ? { reply: true, reason: 'group-mention' }
     : { reply: false, reason: 'not-addressed' }
-}
-
-/**
- * Private memory stays private: a group gets an answer, not the owner's dossier.
- * Opt in per install with `groupShareMemory` and the blocks come back.
- */
-export function groupSharesMemory(message, config) {
-  return isGroupMessage(message) === false || config?.groupShareMemory === true
 }
