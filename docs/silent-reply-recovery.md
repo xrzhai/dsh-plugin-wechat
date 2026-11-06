@@ -33,6 +33,8 @@ DSH 的 turn 不等于一次模型调用。一个 step 已生成完整答复后�
 
 宿主 `TurnEndReason` 将 `completed`、`aborted`、`blocked` 和 `error` 分开；还包括 `max-tokens`、`interrupted`、`forked` 以及扩展类型。取消中流式正文可能以 `interrupted` 的正式消息保留，因此普通回复、超时补发和主动回报只把 `completed` 当作完整结果。其他原因给出停止、受阻、失败或状态不明的提示，不交付部分正文。没有观察到 `turn/end` 时不再仅凭正文推断成功；等待窗口结束后提示状态不明。停止的是当前会话的回复，不能据此断言子任务都已停止。
 
+宿主 [工具批次](https://github.com/deepseek-ai/deepseek-harness/blob/fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159/packages/core/tools/src/batch.ts)以 `tool/call.data.callId` 和 `tool/result.data.message.source.callId` 配对；[当前结果消息](https://github.com/deepseek-ai/deepseek-harness/blob/fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159/packages/llm/llm/src/message.ts)还包含 `message.toolCallId`。本地 pendingTools 只用于执行中进度，不能覆盖宿主明确的 `completed` 终态。错误回合的用户提示不包含底层详情；主回复、超时补发和主动回报会通过宿主日志和插件文件日志写入可搜索的 `turn/end error`、session、seq、错误码及经凭据脱敏的原因。文件日志沿用现有尽力写入语义，无法保证磁盘故障时落盘。
+
 项目派发保留原有目标授权、来源和 turn 匹配。仅在匹配回合 `completed` 且最后为纯 `[SILENT]` 时，尝试同一保守恢复；候选正文的 seq 必须晚于派发及领取游标。跨回合、领取前、工具说明、失败尝试或被后续人工/relay 指令改变的内容不恢复。事件不完整时继续保留静默标记，不猜测正文；非成功回合返回状态而不是部分正文。
 
 ## 验证和限制

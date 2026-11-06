@@ -67,7 +67,7 @@ export function streamText(stream) {
  * @param {number} [params.afterSeq]      Ignore events at or below this seq, so a
  *   reply is never re-sent when the same conversation continues.
  * @returns {{ text: string, settledSeq: number, pendingTools: string[], sawTurnBoundary: boolean,
- *   turnError: (string | undefined), turnReason: (string | undefined), turnSettled: boolean }}
+ *   turnError: (string | undefined), turnErrorCode: (string | undefined), turnReason: (string | undefined), turnSettled: boolean }}
  * `turnReason` is undefined until a terminal event is observed; a missing
  * reason on that event becomes `unknown`. Text from a non-completed turn may
  * be a partial assistant message and must not be presented as a final answer.
@@ -77,6 +77,7 @@ export function readAssistantReply({ events, afterSeq = -1 }) {
   let settledSeq = -1
   let sawTurnBoundary = false
   let turnError
+  let turnErrorCode
   let turnReason
   let turnSettled = false
   let turnEvents = []
@@ -95,6 +96,7 @@ export function readAssistantReply({ events, afterSeq = -1 }) {
         settledSeq = typeof event.seq === 'number' ? event.seq : -1
         pending.clear()
         turnError = undefined
+        turnErrorCode = undefined
         turnReason = undefined
         turnSettled = false
         break
@@ -108,6 +110,7 @@ export function readAssistantReply({ events, afterSeq = -1 }) {
         if (reason?.kind === 'error') {
           const message = reason.error?.message
           turnError = typeof message === 'string' && message !== '' ? message : 'unknown error'
+          turnErrorCode = typeof reason.error?.code === 'string' ? reason.error.code : undefined
         }
         turnSettled = reason?.kind === 'completed'
         if (turnSettled && isPureSilent(text)) {
@@ -142,7 +145,7 @@ export function readAssistantReply({ events, afterSeq = -1 }) {
     }
   }
 
-  return { text, settledSeq, pendingTools: [...pending.values()], sawTurnBoundary, turnError, turnSettled, turnReason }
+  return { text, settledSeq, pendingTools: [...pending.values()], sawTurnBoundary, turnError, turnErrorCode, turnSettled, turnReason }
 }
 
 /**
@@ -217,10 +220,10 @@ export function replyBeforeSilent(events, afterSeq = -1) {
  * @param {readonly any[]} params.events  `agent.session.snapshotEvents()`.
  * @param {number} [params.afterSeq]      Ignore events at or below this seq.
  * @returns {Array<{ text: string, settledSeq: number, pendingTools: string[],
- *   turnError: (string | undefined), turnReason: string, turnSettled: boolean, silentRecoveredFromSeq?: number }>}
+ *   turnError: (string | undefined), turnErrorCode: (string | undefined), turnReason: string, turnSettled: boolean, silentRecoveredFromSeq?: number }>}
  */
 export function readSettledTurns({ events, afterSeq = -1 }) {
-  /** @type {Array<{ text: string, settledSeq: number, pendingTools: string[], turnError: (string | undefined), turnSettled: boolean }>} */
+  /** @type {Array<{ text: string, settledSeq: number, pendingTools: string[], turnError: (string | undefined), turnErrorCode: (string | undefined), turnReason: string, turnSettled: boolean, silentRecoveredFromSeq?: number }>} */
   const turns = []
   let current = null
   function initTurn(seq) {
@@ -230,6 +233,7 @@ export function readSettledTurns({ events, afterSeq = -1 }) {
       /** @type {Map<string, string>} */
       pending: new Map(),
       turnError: undefined,
+      turnErrorCode: undefined,
       turnReason: undefined,
       turnSettled: false,
       events: [],
@@ -262,6 +266,7 @@ export function readSettledTurns({ events, afterSeq = -1 }) {
         if (reason?.kind === 'error') {
           const message = reason.error?.message
           current.turnError = typeof message === 'string' && message !== '' ? message : 'unknown error'
+          current.turnErrorCode = typeof reason.error?.code === 'string' ? reason.error.code : undefined
         }
         current.turnSettled = reason?.kind === 'completed'
         if (typeof event.seq === 'number' && event.seq > current.settledSeq) {
@@ -275,6 +280,7 @@ export function readSettledTurns({ events, afterSeq = -1 }) {
           settledSeq: current.settledSeq,
           pendingTools: [...current.pending.values()],
           turnError: current.turnError,
+          turnErrorCode: current.turnErrorCode,
           turnReason: current.turnReason,
           turnSettled: current.turnSettled,
         })

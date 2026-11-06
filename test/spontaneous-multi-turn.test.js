@@ -3,6 +3,7 @@ import { test } from 'node:test'
 import { readSettledTurns, readAssistantReply } from '../src/session-reader.js'
 import { AgentBridge } from '../src/agent-bridge.js'
 import { CATALOG } from '../src/i18n.js'
+import { createToolResultMessage } from '@deepseek-ai/dsh-llm'
 
 test('readSettledTurns correctly splits multiple turns in a single event stream', () => {
   const events = [
@@ -113,13 +114,31 @@ test('a message without a terminal event is not assumed complete', () => {
   assert.deepEqual(readSettledTurns({ events }), [])
 })
 
+test('host tool result source.callId clears pending progress for old and current message shapes', () => {
+  const oldResult = createToolResultMessage({ callId: 'call-1', content: [{ type: 'text', text: 'done' }], isError: false })
+  const currentResult = { role: 'tool', source: { kind: 'tool', callId: 'call-1' }, toolCallId: 'call-1', content: [{ type: 'text', text: 'done' }], isError: false }
+  for (const message of [oldResult, currentResult]) {
+    const events = [
+      { seq: 1, type: 'turn/start' },
+      { seq: 2, type: 'tool/call', data: { callId: 'call-1', name: 'read' } },
+      { seq: 3, type: 'tool/result', data: { message } },
+    ]
+    assert.deepEqual(readAssistantReply({ events: events.slice(0, 2) }).pendingTools, ['read'])
+    assert.deepEqual(readAssistantReply({ events }).pendingTools, [])
+    const ended = [...events, { seq: 4, type: 'turn/end', data: { reason: { kind: 'completed' } } }]
+    assert.deepEqual(readSettledTurns({ events: ended })[0].pendingTools, [])
+  }
+})
+
 for (const reason of ['completed', 'aborted', 'blocked', 'error', 'max-tokens', 'future-kind', undefined]) {
   for (const late of [false, true]) {
     test(`direct ${late ? 'late' : 'normal'} reply respects terminal reason ${reason ?? 'missing'}`, async t => {
       const events = []
+      const logs = []
       const bridge = new AgentBridge({
         ctx: { get: () => undefined }, lines: { active: () => 'session-1', title: () => undefined },
         eventPollMs: 1, eventPollFastMs: 1, maxWaitMs: late ? 0 : 500, lateReplyMaxWaitMs: 500,
+        errLog: line => logs.push(line),
       })
       t.after(() => bridge.dispose())
       const agent = {
@@ -127,7 +146,7 @@ for (const reason of ['completed', 'aborted', 'blocked', 'error', 'max-tokens', 
         followup: () => events.push(
           { seq: 1, type: 'turn/start' },
           { seq: 2, type: 'assistant/message', data: { interrupted: reason === 'aborted', message: { content: [{ type: 'text', text: 'partial or final' }] } } },
-          { seq: 3, type: 'turn/end', data: { reason: reason === undefined ? undefined : { kind: reason } } },
+          { seq: 3, type: 'turn/end', data: { reason: reason === undefined ? undefined : { kind: reason, ...(reason === 'error' ? { error: { code: 'RATE_LIMIT', message: 'provider failed: Bearer synthetic-secret-token-123' } } : {}) } } },
         ),
       }
       bridge.sessions.set('session-1', { agent, busy: false, queue: [], cancelled: false, auditSeq: -1, auditCalls: new Map(), lastDeliveredSeq: -1, dispose: async () => {} })
@@ -141,6 +160,12 @@ for (const reason of ['completed', 'aborted', 'blocked', 'error', 'max-tokens', 
       const expected = reason === 'completed' ? 'partial or final' : CATALOG[`turn.${expectedStatus}`].zh
       assert.equal(late ? callbacks.at(-1).text : result.text, expected)
       if (reason !== 'completed') assert.equal(late ? callbacks.at(-1).status : result.status, reason ?? 'unknown')
+      if (reason === 'error') {
+        assert.equal(logs.length, 1)
+        assert.match(logs[0], /turn\/end error session=session-1 seq=3 code="RATE_LIMIT"/)
+        assert.match(logs[0], /provider failed: Bearer \*\*\*/)
+        assert.doesNotMatch(logs[0], /synthetic-secret-token-123/)
+      }
     })
   }
 }
@@ -166,23 +191,25 @@ for (const late of [false, true]) {
   })
 }
 
-test('a completed terminal event with an unresolved tool does not deliver partial text', async t => {
+for (const late of [false, true]) test(`completed remains authoritative with incomplete tool tracking during ${late ? 'late' : 'normal'} delivery`, async t => {
   const events = []
-  const bridge = new AgentBridge({ ctx: { get: () => undefined }, lines: { active: () => 'session-1', title: () => undefined }, eventPollMs: 1, maxWaitMs: 500 })
+  const bridge = new AgentBridge({ ctx: { get: () => undefined }, lines: { active: () => 'session-1', title: () => undefined }, eventPollMs: 1, maxWaitMs: late ? 0 : 500, lateReplyMaxWaitMs: 500 })
   t.after(() => bridge.dispose())
   const agent = {
     session: { id: 'session-1', snapshotEvents: () => events },
     followup: () => events.push(
       { seq: 1, type: 'turn/start' },
-      { seq: 2, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'partial' }] } } },
+      { seq: 2, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'final answer' }] } } },
       { seq: 3, type: 'tool/call', data: { callId: 'tool', name: 'read' } },
       { seq: 4, type: 'turn/end', data: { reason: { kind: 'completed' } } },
     ),
   }
   bridge.sessions.set('session-1', { agent, busy: false, queue: [], cancelled: false, auditSeq: -1, auditCalls: new Map(), lastDeliveredSeq: -1, dispose: async () => {} })
-  const result = await bridge.deliver({ conversationId: 'chat', text: 'task' })
-  assert.equal(result.text, CATALOG['turn.unknown'].zh)
-  assert.equal(result.status, 'unknown')
+  const callbacks = []
+  const result = await bridge.deliver({ conversationId: 'chat', text: 'task', ...(late ? { onLateReply: async value => callbacks.push(value) } : {}) })
+  const delivered = late ? callbacks.at(-1) : result
+  assert.equal(delivered.text, 'final answer')
+  assert.equal(delivered.status, undefined)
 })
 
 test('AgentBridge deliver waits for turn/end after a tool-call transition step', async (t) => {

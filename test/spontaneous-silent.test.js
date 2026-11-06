@@ -120,14 +120,22 @@ for (const reason of ['aborted', 'blocked', 'interrupted', 'forked', 'max-tokens
   })
 }
 
-test('unknown terminal reason and completed turn with unresolved tool report uncertainty', async t => {
+test('unknown terminal reason reports uncertainty but completed remains authoritative', async t => {
   const missingReason = turn([step(1, 'Partial')])
   missingReason.at(-1).data.reason = undefined
   const first = await fixture(t, missingReason)
   assert.deepEqual(first.delivered, [CATALOG['turn.unknown'].zh])
   const unresolved = turn([step(1, 'Partial', { tools: true })]).filter(event => event.type !== 'tool/result')
   const second = await fixture(t, unresolved)
-  assert.deepEqual(second.delivered, [CATALOG['turn.unknown'].zh])
+  assert.deepEqual(second.delivered, ['Partial'])
+})
+
+test('spontaneous failure logs the reason and code without sending partial text', async t => {
+  const events = turn([step(1, 'Partial')], 'error')
+  events.at(-1).data.reason.error = { code: 'RATE_LIMIT', message: 'provider unavailable' }
+  const f = await fixture(t, events)
+  assert.deepEqual(f.delivered, [CATALOG['turn.error'].zh])
+  assert.ok(f.logs.some(line => line.includes('turn/end error session=synthetic') && line.includes('RATE_LIMIT') && line.includes('provider unavailable')))
 })
 
 test('a delivery error retains the cursor and retries the recovered reply', async t => {

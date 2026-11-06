@@ -22,6 +22,7 @@
 import { createHash } from 'node:crypto'
 import { readAssistantReply, readSettledTurns, describePending } from './session-reader.js'
 import { CATALOG } from './i18n.js'
+import { redactSecrets } from './credentials.js'
 import { SessionDispatcher } from './session-dispatcher.js'
 import { baseSessionIdFor, scopedLineKey, SessionLines, runSessionCommand } from './sessions.js'
 
@@ -32,6 +33,12 @@ function terminalNotice(reason) {
   if (reason === 'blocked') return CATALOG['turn.blocked'].zh
   if (reason === 'error') return CATALOG['turn.error'].zh
   return CATALOG['turn.unknown'].zh
+}
+
+function logTurnError(errLog, sessionId, reply) {
+  const code = redactSecrets(reply.turnErrorCode ?? 'unknown')
+  const reason = redactSecrets(reply.turnError ?? 'unknown error')
+  errLog(`turn/end error session=${sessionId} seq=${reply.settledSeq} code=${JSON.stringify(code)} reason=${JSON.stringify(reason)}`)
 }
 
 /**
@@ -1155,10 +1162,8 @@ export class AgentBridge {
       this.#auditEvents(record, events, before)
       const reply = readAssistantReply({ events, afterSeq: before })
       if (reply.turnReason !== undefined && reply.turnReason !== 'completed') {
+        if (reply.turnReason === 'error') logTurnError(this.errLog, sessionId, reply)
         return { text: terminalNotice(reply.turnReason), sessionId, status: reply.turnReason }
-      }
-      if (reply.turnReason === 'completed' && reply.pendingTools.length > 0) {
-        return { text: terminalNotice('unknown'), sessionId, status: 'unknown' }
       }
       // Intermediate assistant messages can precede tool calls in the same
       // turn. They are progress, not the final delivery contract.
@@ -1223,9 +1228,9 @@ export class AgentBridge {
       const events = record.agent.session?.snapshotEvents?.() ?? []
       this.#auditEvents(record, events, before)
       const reply = readAssistantReply({ events, afterSeq: before })
-      if ((reply.turnReason !== undefined && reply.turnReason !== 'completed')
-        || (reply.turnReason === 'completed' && reply.pendingTools.length > 0)) {
-        const status = reply.turnReason === 'completed' ? 'unknown' : reply.turnReason
+      if (reply.turnReason !== undefined && reply.turnReason !== 'completed') {
+        const status = reply.turnReason
+        if (status === 'error') logTurnError(this.errLog, sessionId, reply)
         record.lastDeliveredSeq = Math.max(record.lastDeliveredSeq ?? -1, reply.settledSeq)
         try {
           await onLateReply({ kind: 'reply', text: terminalNotice(status), status })
@@ -1277,8 +1282,8 @@ export class AgentBridge {
       this.#auditEvents(record, events, afterSeq)
       const turns = readSettledTurns({ events, afterSeq })
       for (const turn of turns) {
-        const replyText = turn.turnReason === 'completed' && turn.pendingTools?.length === 0
-          ? turn.text : terminalNotice(turn.turnReason === 'completed' ? 'unknown' : turn.turnReason)
+        if (turn.turnReason === 'error') logTurnError(this.errLog, sessionId, turn)
+        const replyText = turn.turnReason === 'completed' ? turn.text : terminalNotice(turn.turnReason)
         const trimmedReply = replyText.trim()
         if (trimmedReply === '') {
           record.lastDeliveredSeq = Math.max(record.lastDeliveredSeq ?? -1, turn.settledSeq)

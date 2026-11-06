@@ -562,7 +562,10 @@ export function apply(ctx, config) {
         maxWaitMs: config.maxTurnWaitMs,
         eventPollMs: config.eventPollMs,
         log,
-        errLog: warn,
+        errLog: (line) => {
+          warn(line)
+          fileLog.warn(`dsh-weixin: ${redactSecrets(String(line))}`)
+        },
         // Tool audit lands on disk, not in the log: the log rotates away, and
         // the question this answers ("who triggered that tool, with what
         // arguments") is asked after the fact. Wired here rather than inside
