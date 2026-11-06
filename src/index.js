@@ -94,7 +94,7 @@ import { resolveOcrSettings, extractImageText } from './media/ocr.js'
 import { WeixinLoginController } from './login-remote.js'
 import { AsrController } from './asr-remote.js'
 import { ConfigController } from './config-remote.js'
-import { isAccountPaused, touchAccount, allowlistForAccount, readRegistry, enrolFirstContact } from './account-registry.js'
+import { isAccountPaused, touchAccount, allowlistForAccount, readRegistry, registryFile, enrolFirstContact } from './account-registry.js'
 import { mapWithConcurrency } from './concurrency.js'
 // `/cancel` is the one message the transport must be able to deliver while a
 // turn is still running; the predicate lives beside the parser so the two
@@ -1409,9 +1409,9 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
   // that enrolled, refusing the very sender who had just been let in until the
   // channel reconnected. The settings card edits the same registry, so a
   // capture would also make its changes wait for a restart.
-  const resolveAccountConfig = () => {
+  const resolveAccountConfig = ({ failClosed = false } = {}) => {
     const live = withSavedConfig(config)
-    return { ...live, ...allowlistForAccount(accountId, live) }
+    return { ...live, ...allowlistForAccount(accountId, live, { failClosed }) }
   }
   // The handler reads the config for THIS message through this cell so a
   // first-contact enrolment takes effect on the very message that triggered it.
@@ -1421,7 +1421,7 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
   // change a scope without a restart, and rebuilt from the account config so an
   // override never leaks into the next conversation.
   const applyScope = (conversationId) => {
-    effectiveConfig.current = scopedConfig(resolveAccountConfig(), readScope(stateRoot, accountId, conversationId, { warn }))
+    effectiveConfig.current = scopedConfig(resolveAccountConfig({ failClosed: true }), readScope(stateRoot, accountId, conversationId, { warn }))
   }
   // ⑦ `/diag export`：体检包要能发出去。所有 id 换别名、地址与凭据整段抹掉，
   // 然后写成 stateRoot 下的一个文件 —— 命令回复会走一遍出站附件管线，文件
@@ -1619,8 +1619,23 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
       return undefined
     }
     // Before anything reads the config for this message: layer the
-    // conversation's overrides (if any) onto the account config.
-    applyScope(message.conversationId)
+    // conversation's overrides onto the account config. The registry holds the
+    // account-level authorization boundary, so an unreadable existing file is a
+    // refusal, not an empty registry that falls back to the global allowlist.
+    try {
+      applyScope(message.conversationId)
+    } catch (error) {
+      const detail = String(error?.message ?? error)
+      hooks?.emit(HOOK_POINTS.inboundRefused, {
+        accountId,
+        conversationId: message.conversationId,
+        senderId: message.senderId,
+        reason: 'registry-unreadable',
+      })
+      warn(`refused message from ${message.senderId}: account authorization registry is unreadable at ${registryFile()}; restore or repair it before retrying (${detail})`)
+      fileLog.info(`refused message from ${message.senderId}: account authorization registry is unreadable at ${registryFile()}; restore or repair it before retrying (${detail})`)
+      return
+    }
     if (config.messageJournal === true && message.type === 'text') {
       journalInbound?.({
         at: journaledAt,

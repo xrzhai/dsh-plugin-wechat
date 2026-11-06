@@ -13,9 +13,11 @@
 // keeps its label and paused flag — an operator should not have to re-describe
 // an account after every re-login.
 //
-// Writes go through tmp+rename (the convention from src/sessions.js), and every
-// read tolerates a missing or malformed file: the registry is metadata, and
-// losing it must never block messaging.
+// Writes go through tmp+rename (the convention from src/sessions.js). Missing
+// files still mean a fresh install, but authorization reads fail closed when an
+// existing registry cannot be read: falling back to the global allowlist could
+// widen access and losing the file must never turn into a second first-contact
+// enrolment.
 // @module dsh-weixin/account-registry
 import { readTextFileCached } from './atomic.js'
 import path from 'node:path'
@@ -27,22 +29,42 @@ export function registryFile() {
   return path.join(stateDir(), 'accounts-registry.json')
 }
 
-/** Read the whole registry, tolerating absence and corruption. */
-export function readRegistry() {
-  try {
-    const parsed = JSON.parse(readTextFileCached(registryFile()))
-    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      // The schema stamp shares the object with the account entries; it is
-      // metadata, not an account, so it must not leak into the map.
-      delete parsed.schemaVersion
-      return parsed
-    }
-    process.emitWarning(`dsh-weixin: ignoring ${registryFile()}: expected a JSON object`)
-  } catch (error) {
-    if (error?.code !== 'ENOENT') {
-      process.emitWarning(`dsh-weixin: ignoring malformed ${registryFile()}: ${String(error?.message ?? error)}`)
-    }
+export class RegistryReadError extends Error {
+  constructor(message, options) {
+    super(message, options)
+    this.name = 'RegistryReadError'
+    this.code = 'ACCOUNT_REGISTRY_UNREADABLE'
   }
+}
+
+/**
+ * Read the whole registry.
+ *
+ * A missing file is the first-run state and yields `{}`. Ordinary UI reads keep
+ * their historical tolerant behavior. Callers making an authorization decision
+ * pass `{ failClosed: true }`: an existing file that is malformed or cannot be
+ * read throws instead of looking like an empty registry.
+ */
+export function readRegistry({ failClosed = false } = {}) {
+  let parsed
+  try {
+    parsed = JSON.parse(readTextFileCached(registryFile()))
+  } catch (error) {
+    if (error?.code === 'ENOENT') return {}
+    const message = `dsh-weixin: ignoring malformed ${registryFile()}: ${String(error?.message ?? error)}`
+    if (failClosed) throw new RegistryReadError(message, { cause: error })
+    process.emitWarning(message)
+    return {}
+  }
+  if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    // The schema stamp shares the object with the account entries; it is
+    // metadata, not an account, so it must not leak into the map.
+    delete parsed.schemaVersion
+    return parsed
+  }
+  const message = `dsh-weixin: ignoring ${registryFile()}: expected a JSON object`
+  if (failClosed) throw new RegistryReadError(message)
+  process.emitWarning(message)
   return {}
 }
 
@@ -219,10 +241,16 @@ export function setAccountAllowlist(accountId, senders, chats, warn = () => {}) 
  *
  * @param {string} accountId
  * @param {{ allowedSenders?: string[], allowedChats?: string[] }} config the global plugin config
+ * @param {{ failClosed?: boolean }} [options] fail closed when authorization
+ *   state exists but cannot be read
  * @returns {{ allowedSenders: string[], allowedChats: string[] }}
  */
-export function allowlistForAccount(accountId, config) {
-  const entry = typeof accountId === 'string' && accountId !== '' ? readRegistry()[accountId] : undefined
+export function allowlistForAccount(accountId, config, options = {}) {
+  const registry = readRegistry(options)
+  const entry = typeof accountId === 'string' && accountId !== '' ? registry[accountId] : undefined
+  if (options.failClosed === true && entry !== undefined && (entry === null || typeof entry !== 'object' || Array.isArray(entry))) {
+    throw new RegistryReadError(`dsh-weixin: account entry ${accountId} in ${registryFile()} is not a JSON object`)
+  }
   const senders = Array.isArray(entry?.allowedSenders) && entry.allowedSenders.length > 0
     ? entry.allowedSenders
     : (config.allowedSenders ?? [])

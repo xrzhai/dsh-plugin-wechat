@@ -244,6 +244,71 @@ test('an account sender list overrides the global sender list', async (t) => {
   assert.deepEqual(readRegistry()[ACCOUNT]?.allowedSenders, ['account-owner'])
 })
 
+for (const { label, contents } of [
+  { label: 'invalid JSON', contents: '{invalid-account-registry\n' },
+  { label: 'a null document', contents: 'null\n' },
+  { label: 'an array document', contents: '[]\n' },
+]) {
+  test(`an account registry containing ${label} refuses inbound without overwriting it`, async (t) => {
+    const f = fixture(t, {
+      enabled: true,
+      beforeApply: (root) => fs.writeFileSync(path.join(root, 'accounts-registry.json'), contents),
+    })
+    const registryPath = path.join(f.root, 'accounts-registry.json')
+
+    await until(() => f.started.length === 1, 'transport starts')
+    await f.started[0].testInbound(f.message(`corrupt-${label.replaceAll(' ', '-')}`))
+
+    assert.equal(f.sessions.length, 0)
+    assert.deepEqual(f.sent, [])
+    assert.equal(fs.readFileSync(registryPath, 'utf8'), contents)
+  })
+}
+
+test('a non-ENOENT registry read error refuses inbound without replacing the path', async (t) => {
+  const f = fixture(t, {
+    enabled: true,
+    beforeApply: (root) => fs.mkdirSync(path.join(root, 'accounts-registry.json')),
+  })
+  const registryPath = path.join(f.root, 'accounts-registry.json')
+
+  await until(() => f.started.length === 1, 'transport starts')
+  await f.started[0].testInbound(f.message('registry-read-error'))
+
+  assert.equal(f.sessions.length, 0)
+  assert.deepEqual(f.sent, [])
+  assert.equal(fs.statSync(registryPath).isDirectory(), true)
+})
+
+test('a restored registry resumes its original narrower account allowlist', async (t) => {
+  const corrupt = '{invalid-account-registry\n'
+  const restored = `${JSON.stringify({
+    schemaVersion: 1,
+    [ACCOUNT]: {
+      allowedSenders: ['synthetic-owner'],
+      firstContactEnrolledAt: '2026-11-05T00:00:00.000Z',
+    },
+  }, null, 2)}\n`
+  const f = fixture(t, {
+    enabled: true,
+    allowedSenders: ['global-owner'],
+    beforeApply: (root) => fs.writeFileSync(path.join(root, 'accounts-registry.json'), corrupt),
+  })
+  const registryPath = path.join(f.root, 'accounts-registry.json')
+
+  await until(() => f.started.length === 1, 'transport starts')
+  await f.started[0].testInbound({ ...f.message('corrupt-global-owner'), senderId: 'global-owner', conversationId: 'global-owner' })
+  assert.equal(f.sessions.length, 0, 'corruption must not fall back to the broader global list')
+  assert.equal(fs.readFileSync(registryPath, 'utf8'), corrupt)
+
+  fs.writeFileSync(registryPath, restored)
+  await f.started[0].testInbound({ ...f.message('restored-global-owner'), senderId: 'global-owner', conversationId: 'global-owner' })
+  assert.equal(f.sessions.length, 0, 'the restored account list stays narrower than the global list')
+  await f.started[0].testInbound({ ...f.message('restored-owner'), senderId: 'synthetic-owner', conversationId: 'synthetic-owner' })
+  assert.equal(f.sessions.length, 1)
+  assert.deepEqual(JSON.parse(fs.readFileSync(registryPath, 'utf8'))[ACCOUNT].allowedSenders, ['synthetic-owner'])
+})
+
 test('an empty sender list enrolls only the first contact in a permitted chat', async (t) => {
   const f = fixture(t, { enabled: true, allowedSenders: [], allowedChats: ['test-user'] })
   await until(() => f.started.length === 1, 'transport starts')
