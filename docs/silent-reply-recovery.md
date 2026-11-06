@@ -21,7 +21,7 @@ DSH 的 turn 不等于一次模型调用。一个 step 已生成完整答复后�
 - 具有匹配的 turn/step、完整 step/start 和 step/end；该 step 仅有一个 assistant/message，且为 append、model 来源。
 - 无 interrupted 标记，stream 明确以 finish(stop) 结束；内容及 stream 不携带工具调用，step 内没有工具事件或 assistant/attempt。
 - 使用正式 message.content 的文本；若 stream 同时带文本，两者必须一致。reasoning、工具参数和工具结果不会进入恢复文本。
-- 不越过后续真人新指令、工具执行、失败尝试或 surface 替换。
+- 不越过后续真人新指令、工具执行、失败尝试或非 system/message 事件上的 surface 替换。system/message 替换的是系统消息，不会撤销已完成的模型答复。
 
 混合正文与标记、其他静默标记、原有发送/游标/outbox 路径不变。`readAssistantReply` 现在对直接回复等待路径复用同一套保守恢复规则：只在匹配的 completed `turn/end` 后选择有完整 step 证据的正文，并忽略 `assistant/attempt`。尤其是原有“以 `[SILENT]` 开头的混合正文会被抑制”不在本次最小修复范围内；本 PR 不宣称解决 issue 中所有描述。
 

@@ -47,7 +47,7 @@ import { mapWithConcurrency } from './concurrency.js'
 // `/cancel` is the one message the transport must be able to deliver while a
 // turn is still running; the predicate lives beside the parser so the two
 // cannot drift apart.
-import { isInterruptCommand } from './sessions.js'
+import { isInterruptCommand, SessionLines, topicAccountIds } from './sessions.js'
 
 import { groupReplyPolicy } from './message/groups.js'
 import { createTranslator } from './i18n.js'
@@ -221,9 +221,11 @@ export function apply(ctx, config) {
   // share the effective profile/overlay directory and the same fallback.
   let workspaceDirectory
   const getWorkspaceDirectory = () => workspaceDirectory ??= resolveCwd(ctx, config, warn)
+  let topicLines
+  const getTopicLines = () => topicLines ??= new SessionLines({ warn })
   let loginController
   try {
-    loginController = new WeixinLoginController(ctx, { getWorkspaceDirectory })
+    loginController = new WeixinLoginController(ctx, { getWorkspaceDirectory, getTopicLines })
   } catch (error) {
     warn(`settings login service unavailable: ${String(error)}`)
     loginController = undefined
@@ -286,6 +288,7 @@ export function apply(ctx, config) {
       bridge = new AgentBridge({
         ctx,
         cwd,
+        lines: getTopicLines(),
         sessionDispatcherConfig,
         onDispatchReply: async ({ accountId, conversationId, senderId, targetSessionId, text }) => {
           // Exact origin only. Never fall back to another bot or interpret
@@ -420,6 +423,7 @@ export function apply(ctx, config) {
       // of making the second wait for the first handshake. `startAccounts`
       // keeps the per-account isolation — one bad credential is reported and
       // skipped, never blocking the rest.
+      getTopicLines().migrateLegacy(topicAccountIds(accounts.map(account => account.accountId)))
       await startAccounts(accounts, (account) => bringUpAccount(account, { force }), warn)
     }
 
@@ -563,6 +567,7 @@ export function apply(ctx, config) {
         if (transports.get(account.accountId) === next) gateway.stopAccount(account.accountId)
         return
       }
+      await bridge.restoreAccount(account.accountId, canStart)
       log(`listening as account ${account.accountId} (state: ${stateRoot})`)
     }
 

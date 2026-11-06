@@ -340,7 +340,7 @@ export class AgentBridge {
         attempted = true
         const out = await commands.execute(record.agent, '/compact', [], AbortSignal.timeout(120_000))
         if (out?.result) {
-          record.lastDeliveredSeq = this.#lastSeq(record.agent)
+          this.#checkpoint(record, this.#lastSeq(record.agent))
           if (out.result.text !== null && out.result.text !== undefined) return out.result.text
           if (out.result.kind === 'success') return '已整理当前话题的前文。'
           this.errLog(`compact command failed for ${conversationId}: compact result kind=${String(out.result.kind ?? 'unknown')}`)
@@ -467,6 +467,17 @@ export class AgentBridge {
     }
   }
 
+  async restoreAccount(accountId, canStart = () => true) {
+    for (const conversationId of this.lines.conversations(accountId)) {
+      if (!canStart() || this.shutdown.signal.aborted) break
+      try {
+        await this.attach(conversationId, accountId, { restoreOnly: true })
+      } catch (error) {
+        this.errLog(`could not restore topic for ${accountId}: ${redactSecrets(String(error))}`)
+      }
+    }
+  }
+
   /**
    * Attach (or resume) the agent session backing a Weixin conversation.
    *
@@ -479,7 +490,7 @@ export class AgentBridge {
    * @param {string} conversationId
    * @param {string} [accountId] owning bot account; bare key when absent
    */
-  async attach(conversationId, accountId) {
+  async attach(conversationId, accountId, { restoreOnly = false } = {}) {
     const sessionId = this.#activeSessionId(conversationId, accountId)
     const existing = this.sessions.get(sessionId)
     if (existing !== undefined) {
@@ -499,7 +510,7 @@ export class AgentBridge {
     const inflight = this.attachPromises.get(sessionId)
     if (inflight !== undefined) return inflight
 
-    const creation = this.#attachNew(sessionId)
+    const creation = this.#attachNew(sessionId, conversationId, accountId, restoreOnly)
     this.attachPromises.set(sessionId, creation)
     try {
       const record = await creation
@@ -514,7 +525,10 @@ export class AgentBridge {
     }
   }
 
-  async #attachNew(sessionId) {
+  async #attachNew(sessionId, conversationId, accountId, restoreOnly) {
+    const line = this.lines.list(conversationId, accountId).find(line => line.sessionId === sessionId)
+    const hasCheckpoint = Number.isSafeInteger(line?.lastDeliveredSeq) && line.lastDeliveredSeq >= -1
+    const preserve = restoreOnly || hasCheckpoint || !sessionId.startsWith(baseSessionIdFor(conversationId, accountId))
     const agents = this.#agents()
     if (agents === undefined) throw new Error('the agents service is unavailable')
 
@@ -534,11 +548,13 @@ export class AgentBridge {
           setup,
           ...(agentOptions === undefined ? {} : { agentOptions }),
         })
-      } catch {
+      } catch (error) {
+        if (preserve) throw error
         handle = await this.#create(sessionId, setup, agentOptions)
         created = true
       }
     } else {
+      if (preserve) throw new Error('the agents service cannot restore a recorded topic')
       handle = await this.#create(sessionId, setup, agentOptions)
       created = true
     }
@@ -547,7 +563,7 @@ export class AgentBridge {
     // holding unclaimed input; clearing it fences the same replay leak
     // sidechat documents (queued input claimed before our first prompt).
     try {
-      handle.agent.inbox?.clear?.()
+      if (!preserve) handle.agent.inbox?.clear?.()
     } catch {
       // Not fatal: the worst case is one stale message in the first turn.
     }
@@ -581,9 +597,12 @@ export class AgentBridge {
       busy: false,
       queue: [],
       cancelled: false,
-      lastDeliveredSeq: this.#lastSeq(handle.agent),
+      sessionId, conversationId, accountId,
+      lastDeliveredSeq: hasCheckpoint ? line.lastDeliveredSeq : this.#lastSeq(handle.agent),
+      deliveredTurns: new Set(Array.isArray(line?.deliveredTurns) ? line.deliveredTurns : []),
       spontaneousSending: false,
     }
+    this.#checkpoint(record)
     this.sessions.set(sessionId, record)
     // Resume can resurrect a session this plugin never filed (created by an
     // earlier generation, before grouping existed), so those paths register
@@ -674,6 +693,7 @@ export class AgentBridge {
     // the sidebar echo, never the message.
     if (sessionId !== undefined) {
       const storeTitle = this.lines.title(conversationId, sessionId, text, accountId)
+      this.#checkpoint(record)
       if (storeTitle !== undefined) void this.#mirrorTitle(record.agent, storeTitle)
     }
     const mode = busyMessageMode === 'steer' ? 'steer' : 'queue'
@@ -798,6 +818,15 @@ export class AgentBridge {
     record.dispatchSenderMixed = record.agent?.status === 'running' || !meta.senderId
   }
 
+  // Out-of-order direct replies can settle ahead of an older unsent turn.
+  // Persist their receipts with the contiguous cursor so restart neither
+  // skips the gap nor replays an answer when that gap eventually closes.
+  #checkpoint(record, seq = record.lastDeliveredSeq) {
+    record.lastDeliveredSeq = Math.max(record.lastDeliveredSeq ?? -1, seq ?? -1)
+    this.lines.checkpoint?.(record.conversationId, record.accountId, record.sessionId ?? record.agent.session?.id,
+      record.lastDeliveredSeq, record.deliveredTurns)
+  }
+
   #lastSeq(agent) {
     const events = agent.session?.snapshotEvents?.() ?? []
     let seq = -1
@@ -894,8 +923,9 @@ export class AgentBridge {
         if (earlier) {
           record.deliveredTurns ??= new Set()
           record.deliveredTurns.add(settledSeq)
+          this.#checkpoint(record)
         } else {
-          record.lastDeliveredSeq = Math.max(record.lastDeliveredSeq ?? -1, settledSeq)
+          this.#checkpoint(record, settledSeq)
         }
       }
       return result
@@ -951,8 +981,7 @@ export class AgentBridge {
       }
       // A cancellation request is not a terminal event. Keep the busy lock
       // until this specific turn ends so queued work cannot overlap it.
-      if (record.cancelled === true && (reply.turnReason !== undefined)) {
-
+      if (record.cancelled === true && reply.turnReason !== undefined) {
         return { text: '', sessionId, cancelled: true, ...(reply.turnReason !== 'completed' ? { settledSeq: reply.settledSeq } : {}) }
       }
       // A failed turn is OVER: no assistant message will ever arrive, and the
@@ -1027,8 +1056,7 @@ export class AgentBridge {
         }
         if (record.agent.status === 'idle') return { text: '', sessionId, late: true, cancelled: true, discarded: true }
       }
-      if (record.cancelled === true && (reply.turnReason !== undefined)) {
-
+      if (record.cancelled === true && reply.turnReason !== undefined) {
         return { text: '', sessionId, late: true, cancelled: true, ...(reply.turnReason !== 'completed' ? { settledSeq: reply.settledSeq } : {}) }
       }
       if (reply.superseded && (reply.turnReason !== undefined)) return { text: '', sessionId, superseded: true }
@@ -1066,6 +1094,7 @@ export class AgentBridge {
   async #pollSpontaneous() {
     for (const [sessionId, record] of this.sessions) {
       if (record.busy === true || record.spontaneousSending === true) continue
+      if (record.isSideSession === true || sessionId.startsWith('wx-mem-')) continue
       if (!record.conversationId) continue
 
       const events = record.agent?.session?.snapshotEvents?.() ?? []
@@ -1099,12 +1128,12 @@ export class AgentBridge {
           }
           if (!(turn.latestInstructionSeq > suppressedSeq)) {
             record.deliveredTurns?.delete(turn.settledSeq)
-            record.lastDeliveredSeq = Math.max(record.lastDeliveredSeq ?? -1, turn.settledSeq)
+            this.#checkpoint(record, turn.settledSeq)
             continue
           }
         }
         if (record.deliveredTurns?.delete(turn.settledSeq)) {
-          record.lastDeliveredSeq = Math.max(record.lastDeliveredSeq ?? -1, turn.settledSeq)
+          this.#checkpoint(record, turn.settledSeq)
           continue
         }
         const pendingReply = pendingInput && record.pendingLateReplies?.get(pendingInput.id)?.callback
@@ -1113,7 +1142,7 @@ export class AgentBridge {
           try {
             await pendingReply({ kind: 'reply', text: turn.turnReason === 'completed' ? turn.text : terminalNotice(turn.turnReason), ...(turn.turnReason === 'completed' ? {} : { status: turn.turnReason }) })
             record.pendingLateReplies.delete(pendingInput.id)
-            record.lastDeliveredSeq = Math.max(record.lastDeliveredSeq ?? -1, turn.settledSeq)
+            this.#checkpoint(record, turn.settledSeq)
           } catch (error) {
             this.errLog(`late reply delivery failed for ${sessionId}: ${String(error)}`)
             break
@@ -1126,12 +1155,12 @@ export class AgentBridge {
         const replyText = turn.turnReason === 'completed' ? turn.text : terminalNotice(turn.turnReason)
         const trimmedReply = replyText.trim()
         if (trimmedReply === '') {
-          record.lastDeliveredSeq = Math.max(record.lastDeliveredSeq ?? -1, turn.settledSeq)
+          this.#checkpoint(record, turn.settledSeq)
           continue
         }
         if (/^(?:\[SILENT\]|HEARTBEAT_OK|（已取消）|（静默）)/i.test(trimmedReply)) {
           this.log?.(`spontaneous reply suppressed as silent heartbeat for ${sessionId}`)
-          record.lastDeliveredSeq = Math.max(record.lastDeliveredSeq ?? -1, turn.settledSeq)
+          this.#checkpoint(record, turn.settledSeq)
           continue
         }
         const handler = record.onSpontaneousReply ?? this.onSpontaneousReply
@@ -1147,16 +1176,14 @@ export class AgentBridge {
               sessionId,
               text: replyText,
             })
-            record.lastDeliveredSeq = Math.max(record.lastDeliveredSeq ?? -1, turn.settledSeq)
+            this.#checkpoint(record, turn.settledSeq)
           } catch (error) {
             this.errLog(`spontaneous reply delivery failed for ${sessionId}: ${String(error)}`)
             break
           } finally {
             record.spontaneousSending = false
           }
-        } else {
-          record.lastDeliveredSeq = Math.max(record.lastDeliveredSeq ?? -1, turn.settledSeq)
-        }
+        } else break // No recipient yet: leave this and later turns pending.
       }
       for (const [messageId, pending] of record.pendingLateReplies ?? []) {
         if (!pending.claim.discarded) continue

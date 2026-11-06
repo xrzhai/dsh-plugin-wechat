@@ -27,7 +27,7 @@ import { buildOnboardingChecklist } from "./onboarding.js";
 import { qrDataUrl } from "./qr-png.js";
 import fs from "node:fs";
 import path from "node:path";
-import { SessionLines, accountScope } from "./sessions.js";
+import { SessionLines, accountScope, topicAccountIds } from "./sessions.js";
 
 const FIXED_BASE_URL = "https://ilinkai.weixin.qq.com";
 const DEFAULT_BOT_TYPE = "3";
@@ -151,6 +151,7 @@ export class WeixinLoginController extends TypertRemoteService {
 
     constructor(ctx, options = {}) {
         super(ctx, "weixinLoginController", { namespace: "weixin" });
+        this.getTopicLines = options.getTopicLines;
         this.botType = options.botType ?? DEFAULT_BOT_TYPE;
         this.getWorkspaceDirectory = options.getWorkspaceDirectory;
         this.getCompositionConfig = () => ctx.get?.("configController")?.config;
@@ -693,28 +694,19 @@ export class WeixinLoginController extends TypertRemoteService {
     /**
      * Session lines across every Weixin conversation, for the settings card.
      *
-     * Read fresh from disk on every call rather than from a cached copy: the
-     * card is opened rarely, `/new` and `/use` are typed in WeChat between
-     * openings, and a stale list would make the card disagree with what the
-     * user just did on their phone. A read failure yields an empty list rather
-     * than an error, so a corrupt index degrades the card instead of breaking
-     * the settings page.
+     * Share the bridge's live index so a card switch or deletion survives a
+     * subsequent delivery checkpoint and affects the next inbound message.
      *
      * @returns {Promise<{conversations: Array<{conversationId: string, active: string, lines: Array<{sessionId: string, title: string|null, createdAt: string|null}>}>}>}
      */
     async sessions() {
-        let store = {};
-        try {
-            store = new SessionLines({ warn: () => {} }).store ?? {};
-        } catch {
-            // An unreadable index must not take the settings page down.
-        }
-        // The card must be able to tell accounts apart, so resolve each store
-        // key's account prefix back to a label. Account digests retain the
-        // distinction between IDs that have the same readable slug.
+        const lines = this.getTopicLines?.() ?? new SessionLines();
         const registry = readRegistry();
+        const ids = topicAccountIds([this.getCompositionConfig?.()?.accountId], registry);
+        lines.migrateLegacy(ids);
+        const store = lines.store;
         const accountByScope = new Map(
-            Object.keys(registry).map((id) => [
+            ids.map((id) => [
                 accountScope(id),
                 { id, label: typeof registry[id]?.label === "string" ? registry[id].label : null },
             ]),
@@ -761,8 +753,9 @@ export class WeixinLoginController extends TypertRemoteService {
      * @returns {Promise<{switched: true, sessionId: string} | {switched: false, error: string}>}
      */
     async useSession(conversationId, index) {
-        const lines = new SessionLines({ warn: () => {} });
-        const sessionId = lines.use(String(conversationId ?? ""), Number(index));
+        const lines = this.getTopicLines?.() ?? new SessionLines();
+        const key = lines.cardKey(conversationId, topicAccountIds([this.getCompositionConfig?.()?.accountId]));
+        const sessionId = key && lines.use(key, Number(index));
         if (sessionId === undefined) {
             // Not `{ok:false}`: the client's `unwrap()` treats any object with an
             // `ok` key as a carrier envelope and would strip this to `undefined`.
@@ -783,8 +776,9 @@ export class WeixinLoginController extends TypertRemoteService {
      * @returns {Promise<{removed: true} | {removed: false, error: string}>}
      */
     async removeSession(conversationId, index) {
-        const lines = new SessionLines({ warn: () => {} });
-        const active = lines.remove(String(conversationId ?? ""), Number(index));
+        const lines = this.getTopicLines?.() ?? new SessionLines();
+        const key = lines.cardKey(conversationId, topicAccountIds([this.getCompositionConfig?.()?.accountId]));
+        const active = key && lines.remove(key, Number(index));
         if (active === undefined) {
             // Same envelope rule as useSession: no `ok` key on the failure shape.
             return { removed: false, error: `cannot remove session line at position ${index}` };

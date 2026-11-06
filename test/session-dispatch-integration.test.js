@@ -210,12 +210,13 @@ test('new delivery cannot lend newer sender authority to an already-running or u
   register(`data:text/javascript,${encodeURIComponent(loader)}`, import.meta.url)
   for (const [status, senderId, mixed] of [['running', 'owner', true], ['idle', undefined, true], ['idle', 'owner', false]]) {
     const f = fixture(t)
-    const main = await f.bridge.attach('chat', 'account')
+    const chat = `synthetic-${status}-${senderId}`
+    const main = await f.bridge.attach(chat, 'account')
     main.agent.followup = () => { throw new Error('synthetic stop before model') }
     const tool = f.registrations.get(main.agent.session.id).get('session_list').definition
     f.bridge.sessionDispatcher.host.list = async () => []
     main.agent.status = status
-    const outcome = await f.bridge.deliver({ conversationId: 'chat', accountId: 'account', text: 'synthetic message', senderId })
+    const outcome = await f.bridge.deliver({ conversationId: chat, accountId: 'account', text: 'synthetic message', senderId })
     assert.equal(outcome.uncertain, true)
     assert.equal(main.dispatchSenderMixed, mixed)
     if (mixed) await assert.rejects(tool.execute({}, { agent: main.agent }), /non-controller/)

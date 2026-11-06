@@ -247,7 +247,7 @@ export function replyBeforeSilent(events, afterSeq = -1) {
     const event = events[i]
     if (event.type === 'assistant/attempt' || event.type === 'tool/call' || event.type === 'tool/result'
       || (event.type === 'user/message' && isReplyBoundary(event.data?.source))
-      || typeof event.surfaceOp === 'object') return undefined
+      || (event.type !== 'system/message' && event.surfaceOp !== null && typeof event.surfaceOp === 'object')) return undefined
     if (event.type === 'assistant/message' && (!isPureSilent(body(event)) || !completeMessage(i))) return undefined
   }
   return { text: messageText(events[candidate].data.message), seq: events[candidate].seq }

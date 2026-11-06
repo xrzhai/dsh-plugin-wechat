@@ -63,6 +63,15 @@ test('a completed reply survives a later silent step of the same turn once', asy
   assert.ok(f.logs.every(line => !line.includes('Important reminder') && !line.includes('PRIVATE')))
 })
 
+for (const [type, expected] of [['system/message', ['Report']], ['surface/edit', []]]) {
+  test(`a ${type} replacement during the silent step respects the report boundary`, async t => {
+    const silent = step(2, '[SILENT]')
+    silent.splice(1, 0, { type, surfaceOp: { op: 'replace' } })
+    const f = await fixture(t, turn([step(1, 'Report'), silent]))
+    assert.deepEqual(f.delivered, expected)
+  })
+}
+
 test('readAssistantReply recovers a completed reply before a same-turn silent step', () => {
   const events = turn([step(1, 'Important reminder'), step(2, '[SILENT]')])
   const reply = readAssistantReply({ events, afterSeq: 0 })

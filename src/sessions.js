@@ -36,7 +36,8 @@ import { translate } from './i18n.js'
 import path from 'node:path'
 
 import { stateDir } from './state.js'
-import { labelForAccount } from './account-registry.js'
+import { listIndexedWeixinAccountIds } from '../vendor/openclaw-weixin/auth/accounts.js'
+import { labelForAccount, readRegistry } from './account-registry.js'
 
 /** Filename under the state root holding every conversation's line list. */
 const LINES_FILE = 'sessions.json'
@@ -72,6 +73,16 @@ export function scopedLineKey(accountId, conversationId) {
   const account = String(accountId ?? '').trim()
   if (account === '') return conversationId
   return `${accountScope(account)}:${conversationId}`
+}
+
+// Pre-#99 keys folded punctuation. Only reverse a slug against known accounts.
+function legacyScope(id) {
+  return id.replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'default'
+}
+
+export function topicAccountIds(extra = [], registry = readRegistry()) {
+  return [...new Set([...Object.keys(registry), ...listIndexedWeixinAccountIds(), ...extra]
+    .filter(id => typeof id === 'string' && id.trim()).map(id => id.trim()))]
 }
 
 /**
@@ -282,6 +293,82 @@ export class SessionLines {
     this.store = readLines()
   }
 
+  // Resolve all owners together: a slug can name multiple accounts, and the
+  // old host session IDs themselves could collide across chats. Never attach
+  // an ambiguous transcript to whichever account happens to start first.
+  migrateLegacy(accountIds) {
+    const owners = new Map()
+    const digests = new Set(accountIds.map(accountScope))
+    for (const id of accountIds) {
+      const slug = legacyScope(id)
+      owners.set(slug, owners.has(slug) ? null : id)
+    }
+    const targets = new Map()
+    const references = new Map()
+    for (const [key, entry] of Object.entries(this.store)) {
+      const sep = key.indexOf(':')
+      const scope = key.slice(0, sep)
+      const id = sep > 0 && !digests.has(scope) && owners.get(scope)
+      const target = id && key.length > sep + 1 ? scopedLineKey(id, key.slice(sep + 1)) : key
+      if (target !== key) targets.set(key, target)
+      for (const line of Array.isArray(entry?.lines) ? entry.lines : []) {
+        if (!references.has(line?.sessionId)) references.set(line?.sessionId, new Set())
+        references.get(line?.sessionId).add(target)
+      }
+    }
+    let changed = false
+    for (const [key, target] of targets) {
+      const old = this.store[key]
+      if (!Array.isArray(old?.lines) || !old.lines.length || old.lines.some(line =>
+        !line?.sessionId || references.get(line.sessionId).size !== 1)) continue
+      const current = this.store[target]
+      const lines = new Map(old.lines.map(line => [line.sessionId, line]))
+      for (const line of current?.lines ?? []) lines.set(line.sessionId, { ...lines.get(line.sessionId), ...line })
+      this.store[target] = { ...current, ...old, lines: [...lines.values()], active: old.active ?? current?.active }
+      delete this.store[key]
+      changed = true
+    }
+    if (changed) this.#write()
+  }
+
+  #key(conversationId, accountId) {
+    if (accountId && Object.hasOwn(this.store, legacyScope(accountId) + ':' + conversationId)) {
+      this.migrateLegacy(topicAccountIds([accountId]))
+    }
+    return scopedLineKey(accountId, conversationId)
+  }
+
+  // Accept a key held by an already-open settings card across an upgrade.
+  cardKey(key, accountIds) {
+    if (typeof key !== 'string' || !key.includes(':')) return undefined
+    const sep = key.indexOf(':'), scope = key.slice(0, sep)
+    const owners = accountIds.filter(id => accountScope(id) === scope || legacyScope(id) === scope)
+    if (owners.length !== 1) return undefined
+    this.migrateLegacy(accountIds)
+    const canonical = scopedLineKey(owners[0], key.slice(sep + 1))
+    if (key !== canonical && Object.hasOwn(this.store, key)) return undefined
+    return this.store[canonical]?.lines?.length ? canonical : undefined
+  }
+
+  conversations(accountId) {
+    const prefix = accountScope(accountId) + ':'
+    return Object.keys(this.store).filter(key => key.startsWith(prefix) && key.length > prefix.length
+      && this.store[key]?.lines?.length).map(key => key.slice(prefix.length))
+  }
+
+  checkpoint(conversationId, accountId, sessionId, seq, deliveredTurns) {
+    const entry = this.store[scopedLineKey(accountId, conversationId)]
+    const line = entry?.lines?.find(line => line.sessionId === sessionId)
+    // A pending send must not recreate a topic deleted from the settings card.
+    if (!line) return
+    const ahead = [...(deliveredTurns ?? [])].filter(end => end > seq)
+    if (line.lastDeliveredSeq === seq && !ahead.length && !line.deliveredTurns) return
+    line.lastDeliveredSeq = seq
+    if (ahead.length) line.deliveredTurns = ahead
+    else delete line.deliveredTurns
+    this.#write()
+  }
+
   /**
    * Lines recorded for a conversation, oldest first.
    *
@@ -296,7 +383,7 @@ export class SessionLines {
    * @returns {Array<{sessionId: string, title?: string, createdAt?: string, lastUsedAt?: string}>}
    */
   list(conversationId, accountId) {
-    const key = scopedLineKey(accountId, conversationId)
+    const key = this.#key(conversationId, accountId)
     const entry = this.store[key]
     if (entry === undefined || !Array.isArray(entry.lines) || entry.lines.length === 0) {
       return [{ sessionId: baseSessionIdFor(conversationId, accountId), title: undefined }]
@@ -317,7 +404,7 @@ export class SessionLines {
    * @returns {string} session id
    */
   active(conversationId, accountId) {
-    const key = scopedLineKey(accountId, conversationId)
+    const key = this.#key(conversationId, accountId)
     const lines = this.list(conversationId, accountId)
     const active = this.store[key]?.active
     if (typeof active === 'string' && lines.some((line) => line.sessionId === active)) return active
@@ -349,7 +436,7 @@ export class SessionLines {
     // asked to remove.
     const now = new Date().toISOString()
     const sessionId = newSessionIdFor(conversationId, Date.now(), accountId)
-    this.#set(scopedLineKey(accountId, conversationId), { lines: [{ sessionId, createdAt: now, lastUsedAt: now }], active: sessionId })
+    this.#set(this.#key(conversationId, accountId), { lines: [{ sessionId, createdAt: now, lastUsedAt: now }], active: sessionId })
     return sessionId
   }
 
@@ -366,7 +453,7 @@ export class SessionLines {
     const sessionId = newSessionIdFor(conversationId, Date.now(), accountId)
     const lines = this.list(conversationId, accountId).slice()
     lines.push({ sessionId, createdAt: now, lastUsedAt: now })
-    this.#set(scopedLineKey(accountId, conversationId), { lines, active: sessionId })
+    this.#set(this.#key(conversationId, accountId), { lines, active: sessionId })
     return sessionId
   }
 
@@ -393,7 +480,7 @@ export class SessionLines {
    *   removal, '' when the whole entry was removed, undefined on a bad index
    */
   remove(conversationId, index, accountId) {
-    const key = scopedLineKey(accountId, conversationId)
+    const key = this.#key(conversationId, accountId)
     const existing = this.store[key]
     const lines = Array.isArray(existing?.lines) ? existing.lines.slice() : this.list(conversationId, accountId).slice()
     if (!Number.isInteger(index) || index < 1 || index > lines.length) return undefined
@@ -427,7 +514,7 @@ export class SessionLines {
     if (!Number.isInteger(index) || index < 1 || index > lines.length) return undefined
     const target = lines[index - 1]
     target.lastUsedAt = new Date().toISOString()
-    this.#set(scopedLineKey(accountId, conversationId), { lines, active: target.sessionId })
+    this.#set(this.#key(conversationId, accountId), { lines, active: target.sessionId })
     return target.sessionId
   }
 
@@ -452,7 +539,7 @@ export class SessionLines {
     // yet — `list()` synthesizes its first line rather than persisting one, so
     // that merely receiving a message does not write state. Materialize the
     // entry here instead of dropping the title.
-    const key = scopedLineKey(accountId, conversationId)
+    const key = this.#key(conversationId, accountId)
     const existing = this.store[key]
     const lines = Array.isArray(existing?.lines) && existing.lines.length > 0
       ? existing.lines
