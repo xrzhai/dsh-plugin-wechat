@@ -5,7 +5,13 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { Context } from '@deepseek-ai/cordis'
 import * as agentModule from '@deepseek-ai/dsh-agent'
+import { createToolResultMessage } from '@deepseek-ai/dsh-llm'
 import { SessionHost } from '../src/session-host.js'
+
+test('installed host tool results expose the call ID used by the session reader', () => {
+  const message = createToolResultMessage({ callId: 'call-1', content: [{ type: 'text', text: 'done' }], isError: false })
+  assert.equal(message.source?.callId, 'call-1')
+})
 
 const modern = typeof agentModule.AgentModel?.prototype?.current === 'function'
   && agentModule.modelSelectionProjectionDefinition?.key === 'modelSelection'
