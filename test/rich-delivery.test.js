@@ -59,6 +59,31 @@ for (const failAt of [1, 2]) {
   })
 }
 
+test('lost acknowledgement persists only the unconfirmed suffix and waits for explicit retry after restart', async (t) => {
+  const { root } = setup(t)
+  const retried = [], attempts = []
+  const recovered = { send: async m => retried.push(m.text) }
+  const makeBox = () => createOutbox({ stateRoot: root, transportFor: () => recovered })
+  configureOutbound({ outbox: makeBox() })
+  const transport = {
+    accountId: 'synthetic-account',
+    async send(m) {
+      attempts.push(m.text)
+      if (attempts.length === 2) throw Object.assign(new Error('ack timed out'), { deliveryUncertain: true })
+    },
+  }
+  const text = 'x'.repeat(80)
+  await sendChunked(transport, config, { conversationId: 'synthetic-chat', text })
+  const restarted = makeBox()
+  assert.equal(attempts.length, 2)
+  await restarted.flush()
+  assert.deepEqual(retried, [])
+  assert.equal(restarted.pending().length, 1)
+  await restarted.flush({ force: true })
+  assert.equal(attempts[0] + retried.join(''), text)
+  assert.equal(restarted.pending().length, 0)
+})
+
 for (const failure of ['write', 'media']) {
   test(`${failure} failure falls back to complete code and retries failed fallback text`, async (t) => {
     const { root } = setup(t)

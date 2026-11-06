@@ -13,8 +13,8 @@
  * and the file may be gone from disk.
  *
  * Delivery is at-least-once. WeChat's API has no idempotency key we can rely on,
- * so a send that succeeded but whose response was lost can be delivered twice;
- * the alternative is dropping the response.
+ * so a send that succeeded but whose response was lost can be delivered twice.
+ * When the transport flags that uncertainty, only a manual retry may replay it.
  *
  * @module dsh-weixin/message/outbox
  */
@@ -181,7 +181,7 @@ export function createOutbox({ stateRoot, transportFor, warn = () => {}, log = (
    * one-segment input. The queue-time message cap is persisted so retries and
    * restarts keep the same boundary even if live configuration later changes.
    *
-   * @param {{ accountId: string, conversationId: string, text?: string, segments?: string[], contextToken?: string, maxMessageLength?: number }} entry
+   * @param {{ accountId: string, conversationId: string, text?: string, segments?: string[], contextToken?: string, maxMessageLength?: number, deliveryUncertain?: boolean }} entry
    */
   const enqueue = (entry) => {
     let sourceSegments
@@ -208,8 +208,9 @@ export function createOutbox({ stateRoot, transportFor, warn = () => {}, log = (
       ...(entry.contextToken ? { contextToken: entry.contextToken } : {}),
       createdAt: at,
       attempts: 0,
+      ...(entry.deliveryUncertain === true ? { deliveryUncertain: true } : {}),
       notBefore: at,
-      lastError: '',
+      lastError: entry.deliveryUncertain === true ? 'delivery uncertain; manual retry required' : '',
     }
     store.items.push(item)
     // Oldest first: the newest message is the one the user is waiting on.
@@ -217,27 +218,6 @@ export function createOutbox({ stateRoot, transportFor, warn = () => {}, log = (
     save(store)
     log(`outbox: queued ${store.items.length} undelivered message(s) for ${entry.conversationId}`)
     return item.id
-  }
-
-  /**
-   * Drop dead letters that can never be delivered: an item whose context token
-   * expired *after* it had already burned its retry budget. A still-retryable
-   * item whose token expired is NOT dropped — `flush` retries it tokenless — but
-   * a parked one has nothing left to try until it ages out. This cleanup keeps the durable
-   * outbox from slowly becoming a graveyard (issue #21).
-   *
-   * @returns {number} how many items were dropped
-   */
-  const prune = () => {
-    const store = readOutbox(stateRoot, { warn })
-    const before = store.items.length
-    const at = now()
-    store.items = store.items.filter((item) => !(Number(item.attempts ?? 0) >= MAX_ATTEMPTS && tokenExpired(item, at)))
-    if (store.items.length !== before) {
-      save(store)
-      log(`outbox: pruned ${before - store.items.length} undeliverable dead letter(s)`)
-    }
-    return before - store.items.length
   }
 
   // Merge only the attempted entry into the latest durable queue. Never put
@@ -258,139 +238,129 @@ export function createOutbox({ stateRoot, transportFor, warn = () => {}, log = (
     if (item === undefined || !tokenExpired(item, now())) return item
     updateItem(id, (current) => {
       delete current.contextToken
-      current.lastError = 'context token expired; retrying without it'
     })
     return freshItem(id)
   }
 
-  /**
-   * Try to deliver everything that is due. Items stay in order per conversation.
-   *
-   * @param {{ force?: boolean }} [options] force ignores notBefore (manual retry)
-   * @returns {Promise<{ sent: number, failed: number, remaining: number }>}
-   */
   let stopped = false
-  const runFlush = async (options = {}) => {
-    // Clear the parked dead letters first: they are the residue of the old
-    // "retry an expired token until it parks" behaviour, and nothing below can
-    // ever send them.
-    prune()
-    const store = readOutbox(stateRoot, { warn })
-    if (store.items.length === 0) return { sent: 0, failed: 0, remaining: 0 }
-    let sent = 0
-    let failed = 0
-    // Grouped by conversation so one conversation's stuck item does not let the
-    // next one overtake it.
-    const byConversation = new Map()
-    for (const item of store.items) {
-      const key = `${item.accountId}|${item.conversationId}`
-      if (!byConversation.has(key)) byConversation.set(key, [])
-      byConversation.get(key).push(item)
-    }
-    for (const queue of byConversation.values()) {
-      let blocked = false
-      for (const candidate of queue) {
-        if (blocked) continue
-        // A previous send yielded to enqueue/drop/prune. Only send entries that
-        // still exist; the snapshot determines this pass's order, not its state.
-        let item = freshItem(candidate.id)
-        if (item === undefined) continue
-        // A reply riding an expired context token can no longer be routed by it
-        // — iLink answers `prepare failed` (issue #9/#21). The text is still
-        // worth delivering, so drop the token and fall through to the tokenless
-        // path (the account's typing ticket, or the bare conversation route).
-        // Only an item that is ALSO out of retries is a genuine dead letter, and
-        // `prune()` has already removed those above.
-        item = withoutExpiredToken(candidate.id)
-        if (item === undefined) continue
-        if (item.attempts >= MAX_ATTEMPTS) {
-          blocked = false
-          continue
-        }
-        if (options.force !== true && Number(item.notBefore ?? 0) > now()) {
-          blocked = true
-          continue
-        }
-        const transport = transportFor(item.accountId)
-        if (transport === undefined) {
-          updateItem(item.id, (current) => {
-            current.lastError = 'no live transport'
-          })
-          blocked = true
-          continue
-        }
-        let completed = false
-        for (let segmentIndex = item.nextSegment; segmentIndex < item.segments.length; segmentIndex += 1) {
-          // Re-read before each segment. A concurrent drop must stop delivery;
-          // a concurrent enqueue can update the file without being overwritten
-          // by this older snapshot.
-          item = withoutExpiredToken(candidate.id)
-          if (item === undefined) break
-          if (item.nextSegment !== segmentIndex) {
-            segmentIndex = item.nextSegment - 1
-            continue
-          }
-          // Authorization or transport availability may change while a prior
-          // segment is in flight. Leave the remaining segments queued.
-          if (stopped || transportFor(item.accountId) !== transport) {
-            blocked = true
-            break
-          }
-          try {
-            await transport.send({
-              conversationId: item.conversationId,
-              type: 'text',
-              text: item.segments[segmentIndex],
-              contextToken: item.contextToken,
-            })
-          } catch (error) {
-            const failedAt = now()
-            updateItem(item.id, (current) => {
-              current.attempts = Number(current.attempts ?? 0) + 1
-              current.lastError = String(error?.message ?? error)
-              current.notBefore = failedAt + retryDelayMs(current.attempts)
-            })
-            failed += 1
-            blocked = true
-            break
-          }
-
-          const finalSegment = segmentIndex === item.segments.length - 1
-          const saved = updateItem(item.id, (current) => {
-            if (current.nextSegment === segmentIndex) current.nextSegment = segmentIndex + 1
-            current.lastError = ''
-          })
-          if (!saved) {
-            // The item was dropped while this segment was in flight. The
-            // current bubble did go out, but there is no durable row to revive;
-            // never continue with the following segments.
-            if (finalSegment) completed = true
-            break
-          }
-          if (finalSegment) completed = true
-        }
-        if (completed) {
-          drop(item.id)
-          sent += 1
-        }
+  // A slot is shared only by overlapping requests that saw the same queue row.
+  // Record the outcome once, even if a timer pass and a scoped retry both saw it.
+  const runFlush = async ({ rows, matches, force }) => {
+    const blocked = new Set()
+    for (const { id, chat, slot } of rows) {
+      if (blocked.has(chat)) continue
+      if (slot.outcome) {
+        if (slot.outcome !== 'sent') blocked.add(chat)
+        continue
       }
+      let item = withoutExpiredToken(id)
+      if (item === undefined) continue
+      if (!force && (item.attempts >= MAX_ATTEMPTS || item.deliveryUncertain === true)) continue
+      if (!force && Number(item.notBefore ?? 0) > now()) {
+        blocked.add(chat)
+        continue
+      }
+      const transport = transportFor(item.accountId)
+      if (transport === undefined) {
+        updateItem(id, (current) => { current.lastError = 'no live transport' })
+        slot.outcome = 'unavailable'
+        blocked.add(chat)
+        continue
+      }
+
+      // Until success is durably recorded, a request already waiting behind
+      // this pass must not replay a segment (even if the progress write throws).
+      slot.outcome = 'interrupted'
+      while (item !== undefined) {
+        if (stopped || transportFor(item.accountId) !== transport) break
+        const index = item.nextSegment
+        try {
+          await transport.send({
+            conversationId: item.conversationId,
+            type: 'text',
+            text: item.segments[index],
+            contextToken: item.contextToken,
+          })
+        } catch (error) {
+          const failedAt = now()
+          updateItem(id, (current) => {
+            current.attempts = Number(current.attempts ?? 0) + 1
+            if (error?.deliveryUncertain === true) current.deliveryUncertain = true
+            current.lastError = String(error?.message ?? error)
+            current.notBefore = failedAt + retryDelayMs(current.attempts)
+          })
+          slot.outcome = 'failed'
+          break
+        }
+
+        const saved = updateItem(id, (current) => {
+          if (current.nextSegment === index) current.nextSegment = index + 1
+          delete current.deliveryUncertain
+          current.lastError = ''
+        })
+        if (index === item.segments.length - 1) {
+          if (saved) drop(id)
+          slot.outcome = 'sent'
+          break
+        }
+        // A drop during send must stop the suffix. Otherwise re-read progress,
+        // token age and transport before sending another segment (#109).
+        if (!saved) break
+        item = withoutExpiredToken(id)
+      }
+      if (slot.outcome !== 'sent') blocked.add(chat)
     }
-    const remaining = readOutbox(stateRoot, { warn }).items.length
-    if (sent > 0) log(`outbox: delivered ${sent} queued message(s), ${remaining} still waiting`)
-    return { sent, failed, remaining }
+
+    const result = { sent: 0, failed: 0, remaining: readOutbox(stateRoot, { warn }).items.filter(matches).length }
+    for (const { slot: { outcome } } of rows) {
+      if (outcome === 'sent' || outcome === 'failed') result[outcome]++
+      else if (outcome === 'unavailable' && force) result.unavailable = (result.unavailable ?? 0) + 1
+    }
+    if (result.sent > 0) log(`outbox: delivered ${result.sent} queued message(s), ${result.remaining} still waiting`)
+    return result
   }
 
-  // Timer and manual retries join the same pass, rather than sending its
-  // snapshot twice. The first caller's force option applies; new entries are
-  // left for the next pass. Defer execution until the guard is installed, even
-  // when transportFor/send synchronously re-enters flush.
-  let inFlight
+  // Identical requests coalesce. Different scopes or retry policies get their
+  // own serialized pass and counts. Skipping a parked row on a timer leaves its
+  // slot untouched, so an overlapping manual request can actually recover it.
+  const passes = new Map()
+  let tail = Promise.resolve()
+  /**
+   * @param {{ force?: boolean, accountId?: string, conversationId?: string }} [options]
+   * Pass both IDs to limit reads for delivery, retries and counts to one chat.
+   * Force includes parked rows and bypasses backoff for this pass only.
+   */
   const flush = (options = {}) => {
-    if (inFlight !== undefined) return inFlight
-    inFlight = Promise.resolve().then(() => runFlush(options)).finally(() => {
-      inFlight = undefined
+    const { accountId, conversationId } = options
+    const scoped = 'accountId' in options || 'conversationId' in options
+    if (scoped && ![accountId, conversationId].every((id) => typeof id === 'string' && id.length > 0)) {
+      return Promise.reject(new TypeError('scoped outbox retry requires both accountId and conversationId'))
+    }
+    const force = options.force === true
+    const key = JSON.stringify([force, accountId, conversationId])
+    if (passes.has(key)) return passes.get(key).promise
+    const matches = (item) => !scoped || (item.accountId === accountId && item.conversationId === conversationId)
+    let items
+    try {
+      items = readOutbox(stateRoot, { warn }).items.filter(matches)
+    } catch (error) {
+      return Promise.reject(error)
+    }
+    const slots = new Map()
+    const rows = items.map(({ id, accountId, conversationId }) => {
+      let slot
+      for (const pass of passes.values()) {
+        slot = pass.slots.get(id)
+        if (slot) break
+      }
+      slot ??= {}
+      slots.set(id, slot)
+      return { id, chat: JSON.stringify([accountId, conversationId]), slot }
     })
-    return inFlight
+    const promise = tail.then(() => runFlush({ rows, matches, force })).finally(() => passes.delete(key))
+    passes.set(key, { slots, promise })
+    tail = promise.catch(() => {})
+    return promise
   }
 
   /** @returns {any[]} the parked items, oldest first */
@@ -419,6 +389,6 @@ export function createOutbox({ stateRoot, transportFor, warn = () => {}, log = (
     timer = undefined
   }
 
-  return { enqueue, flush, pending, drop, prune, start, stop }
+  return { enqueue, flush, pending, drop, start, stop }
 }
 

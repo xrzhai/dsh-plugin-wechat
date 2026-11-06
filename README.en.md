@@ -65,6 +65,7 @@ These shortcuts are handled locally by the plugin without spending model tokens:
 | `/cancel` | Request that the current reply stop; check child tasks separately |
 | `/compact` | Compress context when a conversation gets long |
 | `/status` | Check connection status and active topic |
+| `/outbox`, `/outbox retry` | Check pending replies in this chat or retry them. Check what arrived first: retrying after a lost acknowledgement may send a duplicate. |
 | `/send <file-path>` | Have the Agent send a local file to your WeChat |
 | `/help` | Show the command cheat sheet |
 

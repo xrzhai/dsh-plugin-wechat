@@ -42,11 +42,11 @@ for (const locale of ['zh', 'en']) {
     const translate = createTranslator(locale).t
     const core = buildCommandsHelp(translate)
     const all = buildCommandsHelp(translate, { all: true })
-    for (const command of ['new', 'list', 'use', 'clear', 'cancel', 'compact', 'status', 'send', 'help']) {
+    for (const command of ['new', 'list', 'use', 'clear', 'cancel', 'compact', 'status', 'send', 'outbox', 'help']) {
       assert.match(core, new RegExp(`/${command}\\b`))
       assert.match(all, new RegExp(`/${command}\\b`))
     }
-    for (const command of ['remind', 'subscribe', 'diag', 'outbox']) {
+    for (const command of ['remind', 'subscribe', 'diag']) {
       assert.doesNotMatch(core, new RegExp(`/${command}\\b`))
       assert.doesNotMatch(all, new RegExp(`/${command}\\b`))
     }
