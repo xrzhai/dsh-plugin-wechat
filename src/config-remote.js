@@ -186,15 +186,6 @@ export const FIELDS = [
         hint: "处理消息期间，在微信顶部显示“正在输入”。",
         hintEn: "Show typing indicator in WeChat while running.",
       },
-      {
-        path: "autoSendFiles",
-        type: T.boolean,
-        default: false,
-        label: "自动发送新生成的文件",
-        labelEn: "Automatically send new files",
-        hint: "默认关闭。开启后，只检查工作目录第一层本轮新生成或刚更新的支持文件（如 PDF、Office 文档、图片、CSV、ZIP），最多发送 5 个，不会递归扫描子目录。",
-        hintEn: "Off by default. When enabled, only supported files created or updated during the current turn in the top level of the workspace are sent, up to five. Subdirectories are not scanned.",
-      },
     ],
   },
   {

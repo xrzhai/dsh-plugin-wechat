@@ -82,7 +82,7 @@ window.__ModuleLoader__.load({
 				"webhookUrl": "restart", "webhookSecret": "restart", "webhookTimeoutMs": "restart",
 				"toolAudit": "restart", "markdownMode": "restart", "sourceContext": "restart", "readLinks": "restart",
 				"progressAfterMs": "restart", "progressToolAfterMs": "restart", "progressEveryMs": "restart", "maxTurnWaitMs": "restart", "eventPollMs": "restart",
-				"typingIndicator": "restart", "mediaEnabled": "restart", "autoSendFiles": "restart",
+				"typingIndicator": "restart", "mediaEnabled": "restart",
 				"maxMediaBytes": "restart", "maxInboundMediaBytes": "restart", "cdnBaseUrl": "restart", "asr": "restart",
 			};
 
@@ -1210,7 +1210,6 @@ window.__ModuleLoader__.load({
 				"busyMessageMode",
 				"allowedSenders",
 				"typingIndicator",
-				"autoSendFiles",
 				"sessionDispatcherEnabled",
 				"sessionDispatcherSenders",
 				"sessionDispatcherTargets",

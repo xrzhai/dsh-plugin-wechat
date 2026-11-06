@@ -55,15 +55,3 @@ test('session-management copy states authorization, workspace, and sandbox bound
   assert.match(allowedConversations.hintEn, /any private chat/)
   assert.match(allowedConversations.hintEn, /group chats are not enabled/)
 })
-
-test('automatic file copy matches the actual top-level, extension and count limits', () => {
-  const field = fields.get('autoSendFiles')
-
-  assert.match(field.hint, /工作目录第一层/)
-  assert.match(field.hint, /最多发送 5 个/)
-  assert.match(field.hint, /不会递归扫描子目录/)
-  assert.equal(field.hint.includes('交付物'), false)
-  assert.match(field.hintEn, /top level of the workspace/)
-  assert.match(field.hintEn, /up to five/)
-  assert.match(field.hintEn, /Subdirectories are not scanned/)
-})

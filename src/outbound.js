@@ -10,7 +10,6 @@ import { HOOK_POINTS } from './hooks.js'
 import { chunkText } from './message/chunker.js'
 import { markdownToPlainText, resolveMarkdownMode } from './message/markdown.js'
 import { planRichContent, writeSnippets } from './message/rich-content.js'
-import { allowedMediaDirs, listProducedFiles, resolveOutboundMedia } from './media/outbound.js'
 
 /** Wired in setup; every field defaults so a test can exercise one sender. */
 const runtime = {
@@ -29,82 +28,6 @@ export function configureOutbound(deps = {}) {
   if ('hooks' in deps) runtime.hooks = deps.hooks
   if ('snippetsDir' in deps) runtime.snippetsDir = deps.snippetsDir
   if (typeof deps.warn === 'function') runtime.warn = deps.warn
-}
-
-/**
- * Deliver the files the agent PRODUCED during the turn but never referenced.
- *
- * The reference path (`resolveOutboundReply`) only fires when the reply text
- * names a file. An agent that converts a document or takes a screenshot has
- * still produced a deliverable — writing it and then describing it in prose
- * left the user to ask for it again ("发我微信"), which is exactly the round
- * trip this removes. After the text reply, the agent working directory is
- * scanned for new deliverable files ({@link listProducedFiles}) and each one
- * that the reply did not already send is uploaded.
- *
- * Failure of one file (over the size cap, refused kind) costs one log line,
- * never the reply — the text has already gone out above.
- *
- * @param {object} params
- * @param {{ autoSendFiles?: boolean, maxMediaBytes?: number, allowedMediaDirs?: string[] }} params.config
- * @param {string[]} [params.mediaDirs] Same allowed roots as explicit attachments.
- * @param {ILinkTransport} params.transport
- * @param {string} params.agentCwd  The agent working directory to scan.
- * @param {number} params.sinceMs  Turn start; only newer files are products.
- * @param {string[]} params.alreadySent  Absolute paths resolveOutboundReply sent.
- * @param {string} params.conversationId
- * @param {string} [params.contextToken]
- * @param {(line: string) => void} params.warn
- * @param {{ info: (line: string) => void }} [params.fileLog]
- */
-export async function sendProducedFiles(params) {
-  const fileLog = params.fileLog ?? { info: () => {} }
-  if (params.config.autoSendFiles !== true) return
-  if (typeof params.agentCwd !== 'string' || params.agentCwd === '') return
-  let produced
-  try {
-    produced = await listProducedFiles({ dir: params.agentCwd, sinceMs: params.sinceMs })
-  } catch (error) {
-    params.warn(`scanning produced files failed: ${String(error)}`)
-    return
-  }
-  const allowedDirs = params.mediaDirs ?? allowedMediaDirs({
-    cwd: params.agentCwd,
-    allowedDirs: params.config.allowedMediaDirs,
-  })
-  const sent = new Set(params.alreadySent)
-  const pending = produced.filter((filePath) => !sent.has(filePath))
-  for (const filePath of pending) {
-    try {
-      const resolved = await resolveOutboundMedia({
-        filePath,
-        allowedDirs,
-        ...(params.config.maxMediaBytes === undefined ? {} : { maxBytes: params.config.maxMediaBytes }),
-      })
-      if (!resolved.ok) {
-        params.warn(`refusing produced file ${filePath}: ${resolved.status}`)
-        fileLog.info(`refusing produced file ${filePath}: ${resolved.status}`)
-        continue
-      }
-      // Explicit attachments report canonical paths. Compare after resolution
-      // too, so symlink aliases cannot send an already delivered file twice.
-      if (sent.has(resolved.path)) continue
-      await channelFor(params.transport).sendMedia({
-        filePath: resolved.path,
-        conversationId: params.conversationId,
-        contextToken: params.contextToken,
-        cdnBaseUrl: params.transport.cdnBaseUrl,
-        ...(params.config.maxMediaBytes === undefined ? {} : { maxBytes: params.config.maxMediaBytes }),
-      })
-      sent.add(resolved.path)
-      params.warn(`sent produced file ${filePath}`)
-      fileLog.info(`sent produced file: ${filePath}`)
-    } catch (error) {
-      const reason = String(error?.message ?? error)
-      params.warn(`sending produced file ${filePath} failed: ${reason}`)
-      fileLog.info(`sending produced file ${filePath} failed: ${reason}`)
-    }
-  }
 }
 
 /**

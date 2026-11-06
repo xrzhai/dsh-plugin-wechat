@@ -23,7 +23,6 @@ function clientEssentialPaths() {
 const EXPECTED_RESTART = [
   'accountId',
   'asr',
-  'autoSendFiles',
   'cdnBaseUrl',
   'codeFileThreshold',
   'cwd',
