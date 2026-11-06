@@ -18,7 +18,7 @@ import {
 } from "../vendor/openclaw-weixin/auth/accounts.js";
 import { logger } from "../vendor/openclaw-weixin/util/logger.js";
 import { redactToken } from "../vendor/openclaw-weixin/util/redact.js";
-import { allowlistForAccount, isAccountPaused, readRegistry, setAccountAllowlist, setAccountLabel, setAccountPaused } from "./account-registry.js";
+import { readRegistry, RegistryReadError, setAccountAllowlist, setAccountLabel, setAccountPaused, validateAccountEntry } from "./account-registry.js";
 import { translate } from "./i18n.js";
 import { readSavedConfig, stateDir } from "./state.js";
 import { DEFAULT_RETENTION, directoryUsage } from "./message/retention.js";
@@ -55,6 +55,16 @@ const QR_STATUS_VALUES = new Set([
 ]);
 
 const logins = new Map(); // sessionKey -> active login record
+
+function registryOperation(action) {
+    try {
+        return action();
+    } catch (error) {
+        if (!(error instanceof RegistryReadError)) throw error;
+        logger.warn(error.message);
+        throw new RemoteError("registry_unreadable", translate("error.accountRegistryRead", {}, readSavedConfig().locale), {});
+    }
+}
 
 function normalizeAccountId(accountId) {
     return String(accountId ?? "").trim();
@@ -483,29 +493,41 @@ export class WeixinLoginController extends TypertRemoteService {
     async status() {
         const now = this.now();
         purgeStaleLogins(now);
+        // Do not present corrupt authorization state as a healthy empty account
+        // list or silently fall back to the global allowlist in the card.
+        const registry = registryOperation(() => readRegistry({ failClosed: true }));
         const ids = listIndexedWeixinAccountIds();
         const accounts = [];
         for (const id of ids) {
             try {
                 const acct = this.loadAccount(id);
                 if (acct?.token) {
+                    try {
+                        registryOperation(() => validateAccountEntry(registry, id));
+                    } catch (error) {
+                        if (error?.code !== "registry_unreadable") throw error;
+                        accounts.push({ accountId: id, userId: acct.userId ?? null, label: null, paused: null,
+                            sessionExpired: this.sessionExpiredAccounts.has(id), lastSeenAt: null,
+                            allowedSenders: [], allowedChats: [], registryError: error.message });
+                        continue;
+                    }
                     // Registry side-table data: label/paused/lastSeenAt live
                     // outside the credential on purpose (see account-registry.js).
                     // A missing entry means "never touched" — defaults, not an error.
-                    const entry = readRegistry()[id] ?? {};
+                    const entry = registry[id] ?? {};
                     // The EFFECTIVE allowlist for this account (account override
                     // over the global config), so the card shows what actually
                     // rules this account rather than one layer of it.
-                    const effective = allowlistForAccount(id, readSavedConfig());
+                    const global = readSavedConfig();
                     accounts.push({
                         accountId: id,
                         userId: acct.userId ?? null,
                         label: typeof entry.label === "string" ? entry.label : null,
-                        paused: isAccountPaused(id),
+                        paused: entry.paused === true,
                         sessionExpired: this.sessionExpiredAccounts.has(id),
                         lastSeenAt: typeof entry.lastSeenAt === "string" ? entry.lastSeenAt : null,
-                        allowedSenders: effective.allowedSenders,
-                        allowedChats: effective.allowedChats,
+                        allowedSenders: Array.isArray(entry.allowedSenders) && entry.allowedSenders.length > 0 ? entry.allowedSenders : (global.allowedSenders ?? []),
+                        allowedChats: Array.isArray(entry.allowedChats) && entry.allowedChats.length > 0 ? entry.allowedChats : (global.allowedChats ?? []),
                     });
                 }
             } catch {
@@ -942,7 +964,7 @@ export class WeixinLoginController extends TypertRemoteService {
     async pause(accountId) {
         const id = String(accountId ?? "").trim();
         if (!id) throw new RemoteError("account id is required");
-        if (!this.persistAccountPaused(id, true, (m) => logger.warn(m))) {
+        if (!registryOperation(() => this.persistAccountPaused(id, true, (m) => logger.warn(m)))) {
             throw new RemoteError("registry_write_failed", translate("error.accountPauseWrite", {}, readSavedConfig().locale), {});
         }
         this.onAccountControlChange?.(id);
@@ -953,7 +975,7 @@ export class WeixinLoginController extends TypertRemoteService {
     async resume(accountId) {
         const id = String(accountId ?? "").trim();
         if (!id) throw new RemoteError("account id is required");
-        if (!this.persistAccountPaused(id, false, (m) => logger.warn(m))) {
+        if (!registryOperation(() => this.persistAccountPaused(id, false, (m) => logger.warn(m)))) {
             throw new RemoteError("registry_write_failed", translate("error.accountResumeWrite", {}, readSavedConfig().locale), {});
         }
         this.onAccountControlChange?.(id);
@@ -967,7 +989,9 @@ export class WeixinLoginController extends TypertRemoteService {
     async label(accountId, text) {
         const id = String(accountId ?? "").trim();
         if (!id) throw new RemoteError("account id is required");
-        setAccountLabel(id, typeof text === "string" ? text : "", (m) => logger.warn(m));
+        if (!registryOperation(() => setAccountLabel(id, typeof text === "string" ? text : "", (m) => logger.warn(m)))) {
+            throw new RemoteError("registry_write_failed", translate("error.accountRegistryWrite", {}, readSavedConfig().locale), {});
+        }
         return { accountId: id };
     }
 
@@ -986,7 +1010,9 @@ export class WeixinLoginController extends TypertRemoteService {
         // The card sends one comma/newline-separated string per list (its
         // codec layer only has string codecs); arrays are accepted too.
         const split = (value) => (Array.isArray(value) ? value : String(value ?? "").split(/[\n,]/));
-        setAccountAllowlist(id, split(senders), split(chats), (m) => logger.warn(m));
+        if (!registryOperation(() => setAccountAllowlist(id, split(senders), split(chats), (m) => logger.warn(m)))) {
+            throw new RemoteError("registry_write_failed", translate("error.accountRegistryWrite", {}, readSavedConfig().locale), {});
+        }
         // The inbound handler reads the allowlist once per bring-up, so saving
         // alone would leave the running loop ruling with the old list. Re-arm
         // now — with the dedup guard forced — so the change acts on the very

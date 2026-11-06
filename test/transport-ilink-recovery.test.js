@@ -6,6 +6,7 @@ import { test } from 'node:test'
 import { ILinkTransport } from '../src/transport/ilink.js'
 import { createInboundPendingStore } from '../src/message/inbound-pending.js'
 import { createGatewayControl } from '../src/gateway-control.js'
+import { isAccountPaused, registryFile } from '../src/account-registry.js'
 import { getSyncBufFilePath } from '../vendor/openclaw-weixin/storage/sync-buf.js'
 
 const SENSITIVE_FIXTURE_TOKEN = ['not', 'a', 'real', 'token'].join('-')
@@ -213,6 +214,57 @@ test('a replaced gateway releases a claim when its handler never ran', async (t)
   assert.deepEqual(seen, ['first'])
   assert.deepEqual(recovery.queued.map((item) => item.message.id), ['second'])
   assert.equal(recovery.unresolved, 0)
+})
+
+test('a damaged account retains queued inbound while another account continues and recovery replays it', async (t) => {
+  const entered = deferred()
+  const release = deferred()
+  const otherReceived = deferred()
+  const replayed = deferred()
+  const f = fixture(t, { getUpdates: ({ abortSignal }) => idlePoll(abortSignal) })
+  const other = fixture(t, { getUpdates: ({ abortSignal }) => idlePoll(abortSignal) })
+  f.setRelease(() => release.resolve())
+  const file = registryFile()
+  const previous = fs.existsSync(file) ? fs.readFileSync(file) : undefined
+  t.after(() => {
+    if (previous === undefined) fs.rmSync(file, { force: true })
+    else fs.writeFileSync(file, previous)
+  })
+  const healthy = { [f.accountId]: { paused: false }, [other.accountId]: { paused: false } }
+  fs.writeFileSync(file, JSON.stringify(healthy))
+  const transports = new Map([[f.accountId, f.transport], [other.accountId, other.transport]])
+  const control = createGatewayControl({
+    isEnabled: () => true, isPaused: isAccountPaused, isDisposed: () => false,
+    transports, startLoop: async () => {},
+  })
+  const received = []
+  const handler = control.wrapInbound(f.accountId, async (message) => {
+    received.push(message.id)
+    if (message.id === 'first') { entered.resolve(); await release.promise }
+    if (message.id === 'waiting') replayed.resolve()
+  })
+  f.transport.pendingStore.stage({ id: 'first', type: 'text', text: 'first', senderId: 'user-a', conversationId: 'chat-a' })
+  f.transport.pendingStore.stage({ id: 'waiting', type: 'text', text: 'waiting', senderId: 'user-a', conversationId: 'chat-a' })
+  let claims = 0
+  const claim = f.transport.pendingStore.claim.bind(f.transport.pendingStore)
+  t.mock.method(f.transport.pendingStore, 'claim', (key) => { claims += 1; return claim(key) })
+  await f.transport.start(handler)
+  await within(entered.promise, 'first message')
+  fs.writeFileSync(file, JSON.stringify({ ...healthy, [f.accountId]: { paused: 'invalid' } }))
+  other.transport.pendingStore.stage({ id: 'other-message', type: 'text', text: 'other', senderId: 'user-b', conversationId: 'chat-b' })
+  await other.transport.start(control.wrapInbound(other.accountId, async () => otherReceived.resolve()))
+  await within(otherReceived.promise, 'unrelated account')
+  release.resolve()
+  for (let i = 0; i < 100 && (claims < 2 || f.transport.pendingStore.recover().unresolved !== 0); i += 1) await tick()
+  assert.equal(claims, 2)
+  assert.deepEqual(received, ['first'])
+  assert.deepEqual(f.transport.pendingStore.recover().queued.map((item) => item.message.id), ['waiting'])
+  assert.equal(f.transport.pendingStore.recover().unresolved, 0)
+  await f.transport.stop()
+  fs.writeFileSync(file, JSON.stringify(healthy))
+  await f.transport.start(control.wrapInbound(f.accountId, async (message) => { received.push(message.id); replayed.resolve() }))
+  await within(replayed.promise, 'replay after restoring registry and restarting transport')
+  assert.deepEqual(received, ['first', 'waiting'])
 })
 
 test('capacity overflow resumes in-process with per-conversation FIFO and /cancel still bypasses', async (t) => {

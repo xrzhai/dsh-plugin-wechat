@@ -79,6 +79,7 @@ let metricsTimer
 const unknownItemSeen = new Set()
 let outbox
 import { MessageDeduper } from './message/dedupe.js'
+import { INBOUND_NOT_ACCEPTED } from './message/inbound-pending.js'
 import { extractUrls, fetchLinkText, describeLinkResults } from './message/links.js'
 import { ReminderScheduler, parseWhen } from './message/scheduler.js'
 import { createWebhookSender } from './webhook.js'
@@ -94,7 +95,7 @@ import { resolveOcrSettings, extractImageText } from './media/ocr.js'
 import { WeixinLoginController } from './login-remote.js'
 import { AsrController } from './asr-remote.js'
 import { ConfigController } from './config-remote.js'
-import { isAccountPaused, touchAccount, allowlistForAccount, readRegistry, enrolFirstContact } from './account-registry.js'
+import { isAccountPaused, touchAccount, allowlistForAccount, readRegistry, registryFile, RegistryReadError, enrolFirstContact } from './account-registry.js'
 import { mapWithConcurrency } from './concurrency.js'
 // `/cancel` is the one message the transport must be able to deliver while a
 // turn is still running; the predicate lives beside the parser so the two
@@ -543,9 +544,10 @@ export function apply(ctx, config) {
           if (!allowed(sessionDispatcherConfig())) return
           const transport = transports.get(accountId)
           if (!transport || !conversationId) throw new Error('Originating Weixin account is unavailable for dispatch notification.')
+          if (isAccountPaused(accountId)) return
           try { await transport.refreshConfig() } catch {}
           const current = sessionDispatcherConfig()
-          if (transports.get(accountId) !== transport || !allowed(current)) return
+          if (isAccountPaused(accountId) || transports.get(accountId) !== transport || !allowed(current)) return
           // #31: a parallel-session dispatch result is promised as plain text on
           // the durable text pipeline. Force rich content off here so a long
           // fenced code block stays inline instead of being swapped for a
@@ -666,7 +668,7 @@ export function apply(ctx, config) {
       // retried, because a reminder nobody receives is worse than one sent late.
     outbox = createOutbox({
         stateRoot,
-        transportFor: (accountId) => transports.get(accountId),
+        transportFor: (accountId) => !cancelled && gatewayEnabled() && !isAccountPaused(accountId) ? transports.get(accountId) : undefined,
         warn,
         log,
       })
@@ -870,7 +872,7 @@ export function apply(ctx, config) {
             warn,
             send: async (text) => {
               const store = readLines()
-              const accountId = [...transports.keys()].find((id) => mostRecentConversationId(id, store) !== undefined)
+              const accountId = [...transports.keys()].find((id) => deliveryStillEnabled(id) && mostRecentConversationId(id, store) !== undefined)
               if (accountId === undefined) throw new Error('no conversation has ever been spoken in')
               const conversationId = mostRecentConversationId(accountId, store)
               const transport = transports.get(accountId)
@@ -1409,9 +1411,9 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
   // that enrolled, refusing the very sender who had just been let in until the
   // channel reconnected. The settings card edits the same registry, so a
   // capture would also make its changes wait for a restart.
-  const resolveAccountConfig = () => {
+  const resolveAccountConfig = ({ failClosed = false } = {}) => {
     const live = withSavedConfig(config)
-    return { ...live, ...allowlistForAccount(accountId, live) }
+    return { ...live, ...allowlistForAccount(accountId, live, { failClosed }) }
   }
   // The handler reads the config for THIS message through this cell so a
   // first-contact enrolment takes effect on the very message that triggered it.
@@ -1421,7 +1423,7 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
   // change a scope without a restart, and rebuilt from the account config so an
   // override never leaks into the next conversation.
   const applyScope = (conversationId) => {
-    effectiveConfig.current = scopedConfig(resolveAccountConfig(), readScope(stateRoot, accountId, conversationId, { warn }))
+    effectiveConfig.current = scopedConfig(resolveAccountConfig({ failClosed: true }), readScope(stateRoot, accountId, conversationId, { warn }))
   }
   // ⑦ `/diag export`：体检包要能发出去。所有 id 换别名、地址与凭据整段抹掉，
   // 然后写成 stateRoot 下的一个文件 —— 命令回复会走一遍出站附件管线，文件
@@ -1588,14 +1590,6 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
     }
   }
   return async (message) => {
-    // ④ A passive listener for shapes the vendored client does not know: it cannot
-    // render a link card, it can only tell us whether the server sends them.
-    for (const line of describeUnknownItems(message)) {
-      if (firstSighting(unknownItemSeen, line, `${message.conversationId}|${line}`)) {
-        fileLog.info(`unfamiliar inbound shape: ${line}`)
-        appendToolAudit(stateRoot, { tool: 'weixin/unknown-item', ok: true, summary: line })
-      }
-    }
     const journaledAt = Date.now()
     // iLink only honours an inbound `context_token` for about ten minutes after
     // the message arrives (issue #9); reusing it past that is answered with
@@ -1619,8 +1613,33 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
       return undefined
     }
     // Before anything reads the config for this message: layer the
-    // conversation's overrides (if any) onto the account config.
-    applyScope(message.conversationId)
+    // conversation's overrides onto the account config. The registry holds the
+    // account-level authorization boundary, so an unreadable existing file is a
+    // refusal, not an empty registry that falls back to the global allowlist.
+    try {
+      applyScope(message.conversationId)
+    } catch (error) {
+      if (!(error instanceof RegistryReadError)) throw error
+      const detail = String(error?.message ?? error)
+      hooks?.emit(HOOK_POINTS.inboundRefused, {
+        accountId,
+        conversationId: message.conversationId,
+        senderId: message.senderId,
+        reason: 'registry-unreadable',
+      })
+      warn(`refused message from ${message.senderId}: account authorization registry is unreadable at ${registryFile()}; restore or repair it before retrying (${detail})`)
+      fileLog.info(`refused message from ${message.senderId}: account authorization registry is unreadable at ${registryFile()}; restore or repair it before retrying (${detail})`)
+      // Nothing has been processed yet. The transport can release its claim
+      // back to the durable queue under the gateway's existing contract.
+      return INBOUND_NOT_ACCEPTED
+    }
+    // ④ Observe unfamiliar shapes only after the replay-safe authorization read.
+    for (const line of describeUnknownItems(message)) {
+      if (firstSighting(unknownItemSeen, line, `${message.conversationId}|${line}`)) {
+        fileLog.info(`unfamiliar inbound shape: ${line}`)
+        appendToolAudit(stateRoot, { tool: 'weixin/unknown-item', ok: true, summary: line })
+      }
+    }
     if (config.messageJournal === true && message.type === 'text') {
       journalInbound?.({
         at: journaledAt,
@@ -1741,17 +1760,26 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
       let enrolled = false
       if (accountId && allowedSenders.length === 0 && (allowedChats.length === 0 || allowedChats.includes(message.conversationId))) {
         const hasOverride = () => {
-          const entry = readRegistry()[accountId]
+          const entry = readRegistry({ failClosed: true, accountId })[accountId]
           return (Array.isArray(entry?.allowedSenders) && entry.allowedSenders.length > 0) || Boolean(entry?.firstContactEnrolledAt)
         }
-        enrolled = enrolFirstContact(accountId, message.senderId, hasOverride, (line) => {
-          log(`${line}`)
-          fileLog.info(`dsh-weixin: ${line} (add more senders on the card or in the registry)`)
-        })
+        try {
+          enrolled = enrolFirstContact(accountId, message.senderId, hasOverride, (line) => {
+            log(`${line}`)
+            fileLog.info(`dsh-weixin: ${line} (add more senders on the card or in the registry)`)
+          })
+        } catch (error) {
+          if (!(error instanceof RegistryReadError)) throw error
+          warn(error.message)
+          fileLog.info(error.message)
+          // The handler may already have journaled this message. Preserve it as
+          // uncertain rather than acknowledge it or replay possible side effects.
+          throw error
+        }
         if (enrolled) {
           // Re-resolve the effective config so the rest of this message runs
           // under the list that now contains the sender.
-          const enrolledConfig = resolveAccountConfig()
+          const enrolledConfig = resolveAccountConfig({ failClosed: true })
           if (isAllowedSender(enrolledConfig, message.senderId, message.conversationId)) {
             effectiveConfig.current = enrolledConfig
           } else {
@@ -1797,7 +1825,16 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
     // timestamp, so it is written once a message is actually accepted — not on
     // every poll, which would make a busy loop mask a dead inbound path. A
     // registry write failure is a warning, never a dropped message.
-    touchAccount(accountId, warn)
+    try {
+      touchAccount(accountId, warn)
+    } catch (error) {
+      if (!(error instanceof RegistryReadError)) throw error
+      warn(error.message)
+      fileLog.info(error.message)
+      // Dedupe and possibly journaling have already run, so this cannot be
+      // safely released for automatic replay.
+      throw error
+    }
 
     // 4. Session-control commands (`/new`, `/list`, `/use`) are answered by the
     //    plugin itself, before any media download or agent turn. A command must

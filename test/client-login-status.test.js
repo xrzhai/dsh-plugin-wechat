@@ -117,6 +117,40 @@ test('failed status RPC is not presented as logged out; retry restores bound acc
   assert.equal(button(recovered, '扫码登录微信'), undefined)
 })
 
+test('a registry read failure tells the operator to restore the authorization file', async () => {
+  let broken = true
+  const f = fixture(async () => {
+    if (broken) throw Object.assign(new Error('账号授权表无法读取，请恢复 accounts-registry.json'), { code: 'registry_unreadable' })
+    return { accounts: [{ accountId: 'synthetic-account' }] }
+  })
+  const failed = await f.mount()
+  assert.match(text(failed), /请恢复 accounts-registry\.json/)
+  assert.doesNotMatch(text(failed), /未登录/)
+  broken = false
+  await button(failed, '重试').props.onClick()
+  assert.match(text(f.render()), /已绑定/)
+  assert.doesNotMatch(text(f.render()), /请恢复 accounts-registry\.json/)
+  await f.unmount()
+})
+
+test('a damaged account reports its error without disabling another account', async () => {
+  const f = fixture(async () => ({ accounts: [
+    { accountId: 'healthy', paused: false },
+    { accountId: 'broken', paused: null, registryError: '请修复 accounts-registry.json' },
+  ] }))
+  const view = await f.mount()
+  const rows = nodes(view).filter(node => node.type === 'div' && ['healthy', 'broken'].includes(node.props.key))
+  const healthy = rows.find(node => node.props.key === 'healthy')
+  const broken = rows.find(node => node.props.key === 'broken')
+  assert.ok(healthy && broken)
+  assert.equal(button(healthy, '暂停').props.disabled, false)
+  assert.equal(button(broken, '暂停').props.disabled, true)
+  assert.equal(button(broken, '改名称').props.disabled, true)
+  assert.match(text(broken), /请修复 accounts-registry\.json/)
+  assert.doesNotMatch(text(broken), /已暂停/)
+  await f.unmount()
+})
+
 test('only a successful empty account list is presented as logged out', async () => {
   const f = fixture(async () => ({ accounts: [] }))
   const tree = await f.mount()

@@ -13,9 +13,9 @@
 // keeps its label and paused flag — an operator should not have to re-describe
 // an account after every re-login.
 //
-// Writes go through tmp+rename (the convention from src/sessions.js), and every
-// read tolerates a missing or malformed file: the registry is metadata, and
-// losing it must never block messaging.
+// Writes go through tmp+rename (the convention from src/sessions.js). Missing
+// files still use the first-run behavior, but an existing unreadable registry
+// must not be treated as empty for authorization or read-modify-write operations.
 // @module dsh-weixin/account-registry
 import { readTextFileCached } from './atomic.js'
 import path from 'node:path'
@@ -27,23 +27,62 @@ export function registryFile() {
   return path.join(stateDir(), 'accounts-registry.json')
 }
 
-/** Read the whole registry, tolerating absence and corruption. */
-export function readRegistry() {
+export class RegistryReadError extends Error {
+  constructor(message, options) {
+    super(message, options)
+    this.name = 'RegistryReadError'
+    this.code = 'ACCOUNT_REGISTRY_UNREADABLE'
+  }
+}
+
+/**
+ * Read the whole registry.
+ *
+ * A missing file is the first-run state and yields `{}`. Ordinary UI reads keep
+ * their historical tolerant behavior. Callers making an authorization decision
+ * pass `{ failClosed: true, accountId }`: an unreadable document or malformed
+ * entry for that account throws instead of looking like an empty registry.
+ */
+export function readRegistry({ failClosed = false, accountId } = {}) {
+  let parsed
   try {
-    const parsed = JSON.parse(readTextFileCached(registryFile()))
-    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      // The schema stamp shares the object with the account entries; it is
-      // metadata, not an account, so it must not leak into the map.
-      delete parsed.schemaVersion
-      return parsed
-    }
-    process.emitWarning(`dsh-weixin: ignoring ${registryFile()}: expected a JSON object`)
+    parsed = JSON.parse(readTextFileCached(registryFile()))
   } catch (error) {
-    if (error?.code !== 'ENOENT') {
-      process.emitWarning(`dsh-weixin: ignoring malformed ${registryFile()}: ${String(error?.message ?? error)}`)
+    if (error?.code === 'ENOENT') return {}
+    const message = `dsh-weixin: cannot read account registry ${registryFile()}; restore or repair it (${String(error?.message ?? error)})`
+    if (failClosed) throw new RegistryReadError(message, { cause: error })
+    process.emitWarning(message)
+    return {}
+  }
+  if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    // The schema stamp shares the object with the account entries; it is
+    // metadata, not an account, so it must not leak into the map.
+    delete parsed.schemaVersion
+    if (failClosed && typeof accountId === 'string' && accountId !== '') validateAccountEntry(parsed, accountId)
+    return parsed
+  }
+  const message = `dsh-weixin: account registry ${registryFile()} is not a JSON object; restore or repair it`
+  if (failClosed) throw new RegistryReadError(message)
+  process.emitWarning(message)
+  return {}
+}
+
+/** Validate only the account being used; other entries must survive unchanged. */
+export function validateAccountEntry(registry, accountId) {
+  if (!Object.hasOwn(registry, accountId)) return
+  const entry = registry[accountId]
+  if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+    throw new RegistryReadError(`dsh-weixin: invalid account entry ${accountId} in ${registryFile()}; restore or repair the account registry`)
+  }
+  for (const key of ['allowedSenders', 'allowedChats']) {
+    if (Object.hasOwn(entry, key) && (!Array.isArray(entry[key]) || !entry[key].every((item) => typeof item === 'string'))) {
+      throw new RegistryReadError(`dsh-weixin: invalid ${key} for account ${accountId} in ${registryFile()}; restore or repair the account registry`)
     }
   }
-  return {}
+  if ((Object.hasOwn(entry, 'paused') && typeof entry.paused !== 'boolean') ||
+      (Object.hasOwn(entry, 'firstContactEnrolledAt') && typeof entry.firstContactEnrolledAt !== 'string')) {
+    throw new RegistryReadError(`dsh-weixin: invalid authorization state for account ${accountId} in ${registryFile()}; restore or repair the account registry`)
+  }
 }
 
 /**
@@ -112,12 +151,12 @@ export function touchAccount(accountId, warn = () => {}, options = {}) {
   const throttleMs = options.throttleMs ?? TOUCH_WRITE_INTERVAL_MS
   const previous = lastTouchWriteAt.get(key) ?? 0
   if (throttleMs > 0 && now - previous < throttleMs) return false
-  lastTouchWriteAt.set(key, now)
-  const registry = readRegistry()
+  const registry = readRegistry({ failClosed: true, accountId })
   const entry = ensureAccountEntry(registry, accountId)
   entry.lastSeenAt = new Date(now).toISOString()
-  writeRegistry(registry, warn, { durable: false })
-  return true
+  const persisted = writeRegistry(registry, warn, { durable: false })
+  if (persisted) lastTouchWriteAt.set(key, now)
+  return persisted
 }
 
 /** Forget the throttle state — used by tests that switch state directories. */
@@ -135,17 +174,23 @@ export function resetTouchThrottle() {
  * @returns {boolean} whether the pause state was persisted
  */
 export function setAccountPaused(accountId, paused, warn = () => {}, options = {}) {
-  const registry = readRegistry()
+  const registry = readRegistry({ failClosed: true, accountId })
   const entry = ensureAccountEntry(registry, accountId)
   entry.paused = paused === true
   entry.pausedAt = entry.paused ? new Date().toISOString() : undefined
   return writeRegistry(registry, warn, options)
 }
 
-/** Whether an account is paused. Missing entry means "not paused". */
+/** Whether an account is paused. An unreadable registry also stops delivery. */
 export function isAccountPaused(accountId) {
   if (typeof accountId !== 'string' || accountId === '') return false
-  return readRegistry()[accountId]?.paused === true
+  try {
+    return readRegistry({ failClosed: true, accountId })[accountId]?.paused === true
+  } catch (error) {
+    if (!(error instanceof RegistryReadError)) throw error
+    process.emitWarning(error.message)
+    return true
+  }
 }
 
 /**
@@ -153,20 +198,19 @@ export function isAccountPaused(accountId) {
  * The card shows the label next to the raw id, which is otherwise meaningless.
  */
 export function setAccountLabel(accountId, label, warn = () => {}) {
-  const registry = readRegistry()
+  const registry = readRegistry({ failClosed: true, accountId })
   const entry = ensureAccountEntry(registry, accountId)
   const trimmed = typeof label === 'string' ? label.trim() : ''
   if (trimmed === '') delete entry.label
   else entry.label = trimmed
-  writeRegistry(registry, warn)
+  return writeRegistry(registry, warn)
 }
 
 /**
  * Read one account's label back, for callers that render or prefix with it.
  *
- * Read-only and failure-tolerant per the registry's own rule: a missing or
- * malformed registry must never block messaging, so any problem reads as "no
- * label" and the caller falls back to the account id.
+ * Read-only and failure-tolerant: any problem reads as "no label" and the
+ * caller falls back to the account id.
  *
  * @param {string} accountId
  * @returns {string} the stored label, or '' when there is none
@@ -200,7 +244,7 @@ export function labelForAccount(accountId) {
  * @param {string[] | undefined} [chats] optional conversation ids for this account
  */
 export function setAccountAllowlist(accountId, senders, chats, warn = () => {}) {
-  const registry = readRegistry()
+  const registry = readRegistry({ failClosed: true, accountId })
   const entry = ensureAccountEntry(registry, accountId)
   const clean = (list) => (Array.isArray(list) ? list.map((item) => String(item).trim()).filter((item) => item !== '') : [])
   const sendersClean = clean(senders)
@@ -209,7 +253,7 @@ export function setAccountAllowlist(accountId, senders, chats, warn = () => {}) 
   else entry.allowedSenders = sendersClean
   if (chatsClean.length === 0) delete entry.allowedChats
   else entry.allowedChats = chatsClean
-  writeRegistry(registry, warn)
+  return writeRegistry(registry, warn)
 }
 
 /**
@@ -219,10 +263,13 @@ export function setAccountAllowlist(accountId, senders, chats, warn = () => {}) 
  *
  * @param {string} accountId
  * @param {{ allowedSenders?: string[], allowedChats?: string[] }} config the global plugin config
+ * @param {{ failClosed?: boolean }} [options] fail closed when authorization
+ *   state exists but cannot be read
  * @returns {{ allowedSenders: string[], allowedChats: string[] }}
  */
-export function allowlistForAccount(accountId, config) {
-  const entry = typeof accountId === 'string' && accountId !== '' ? readRegistry()[accountId] : undefined
+export function allowlistForAccount(accountId, config, options = {}) {
+  const registry = readRegistry({ ...options, accountId })
+  const entry = typeof accountId === 'string' && accountId !== '' ? registry[accountId] : undefined
   const senders = Array.isArray(entry?.allowedSenders) && entry.allowedSenders.length > 0
     ? entry.allowedSenders
     : (config.allowedSenders ?? [])
@@ -262,7 +309,7 @@ export function enrolFirstContact(accountId, senderId, hasOverride, note = () =>
   if (typeof accountId !== 'string' || accountId === '') return false
   if (typeof senderId !== 'string' || senderId === '') return false
   if (hasOverride()) return false
-  const registry = readRegistry()
+  const registry = readRegistry({ failClosed: true, accountId })
   // Re-check against a fresh read: the caller's snapshot may be stale if a
   // concurrent handler for the same account enrolled between the two reads.
   const entry = registry[accountId]
@@ -271,7 +318,7 @@ export function enrolFirstContact(accountId, senderId, hasOverride, note = () =>
   const fresh = ensureAccountEntry(registry, accountId)
   fresh.allowedSenders = [senderId]
   fresh.firstContactEnrolledAt = new Date().toISOString()
-  writeRegistry(registry, () => {})
+  if (!writeRegistry(registry, () => {})) return false
   note(`first contact ${senderId} enrolled into account ${accountId}'s allowlist`)
   return true
 }

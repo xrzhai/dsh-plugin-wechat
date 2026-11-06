@@ -287,6 +287,22 @@ test('apply wires saved policy and exact account/chat dispatch notification rout
     assert.equal(sent.length, 1, `${field} revocation during refresh must prevent delivery`)
     await save(field, restored)
   }
+  {
+    let release, entered = false
+    const pending = new Promise((resolve) => { release = resolve })
+    const refresh = t.mock.method(origin, 'refreshConfig', async () => { entered = true; await pending })
+    const sending = notify()
+    await until(() => entered)
+    const file = path.join(root, 'accounts-registry.json')
+    const healthy = fs.readFileSync(file, 'utf8')
+    fs.writeFileSync(file, '{corrupt while refreshing')
+    release()
+    await sending
+    assert.equal(sent.length, 1, 'registry corruption during refresh must prevent delivery')
+    assert.equal(fs.readFileSync(file, 'utf8'), '{corrupt while refreshing')
+    fs.writeFileSync(file, healthy)
+    refresh.mock.restore()
+  }
   let release, entered = false
   const pending = new Promise((resolve) => { release = resolve })
   t.mock.method(origin, 'refreshConfig', async () => { entered = true; await pending })

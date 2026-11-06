@@ -316,6 +316,7 @@ window.__ModuleLoader__.load({
 			const [message, setMessage] = react.useState("");
 			const [accounts, setAccounts] = react.useState([]);
 			const [statusState, setStatusState] = react.useState("loading");
+			const [statusError, setStatusError] = react.useState("");
 			const statusRequestRef = react.useRef(0);
 			const [sessionExpired, setSessionExpired] = react.useState(false);
 			const [loggingOut, setLoggingOut] = react.useState(false);
@@ -352,8 +353,12 @@ window.__ModuleLoader__.load({
 					// top-level boolean.
 					setSessionExpired(s?.sessionExpired === true || s.accounts.some(account => account?.sessionExpired === true));
 					setStatusState("ready");
-				} catch {
-					if (request === statusRequestRef.current) setStatusState("error");
+					setStatusError("");
+				} catch (err) {
+					if (request === statusRequestRef.current) {
+						setStatusError(err?.code === "registry_unreadable" ? String(err.message ?? "") : "");
+						setStatusState("error");
+					}
 				}
 			}, [ctx]);
 
@@ -761,6 +766,7 @@ window.__ModuleLoader__.load({
 				? createElement("div", { style: { display: "flex", flexDirection: "column", gap: 6 } },
 						accounts.map((account) => {
 							const busy = busyAccount === account.accountId;
+							const registryError = typeof account.registryError === "string" && account.registryError !== "";
 							const seen = seenText(account.lastSeenAt);
 							return createElement("div", {
 									key: account.accountId,
@@ -778,18 +784,20 @@ window.__ModuleLoader__.load({
 								account.label ? createElement("span", {
 									style: { fontSize: 12, color: C.labelSecondary },
 								}, account.accountId) : null,
+								registryError ? createElement("span", { role: "alert", style: noticeStyle }, account.registryError) : null,
 								account.paused ? createElement("span", { style: pillStyle("idle") }, t("paused", "已暂停")) : null,
 								account.sessionExpired === true ? createElement("span", { style: pillStyle("bad") }, t("session expired", "登录已过期")) : null,
 								seen ? createElement("span", { style: { fontSize: 12, color: C.labelSecondary } }, seen) : null,
 								createElement("span", { style: { flex: 1 } }),
 								createElement("button", {
 									onClick: () => renameAccount(account),
-									style: buttonStyleFor(false),
+									disabled: registryError,
+									style: buttonStyleFor(registryError),
 								}, t("Rename", "改名称")),
 								createElement("button", {
 									onClick: () => setPausedFor(account, !account.paused),
-									disabled: busy,
-									style: buttonStyleFor(busy),
+									disabled: busy || registryError,
+									style: buttonStyleFor(busy || registryError),
 								}, account.paused
 									? t("Resume", "恢复")
 									: busy ? t("Pausing…", "正在暂停…") : t("Pause", "暂停")),
@@ -798,7 +806,7 @@ window.__ModuleLoader__.load({
 									disabled: busy,
 									style: buttonStyleFor(busy),
 								}, busy ? t("Logging out…", "正在退出…") : t("Log out", "退出登录")),
-								editing?.accountId === account.accountId
+								!registryError && editing?.accountId === account.accountId
 									? createElement("div", {
 											style: { display: "flex", alignItems: "center", gap: 6, flexBasis: "100%" },
 										},
@@ -850,7 +858,7 @@ window.__ModuleLoader__.load({
 				//#endregion status
 				statusState === "error"
 					? createElement("div", { role: "alert", style: noticeStyle },
-						createElement("span", null, t(
+						createElement("span", null, statusError || t(
 							"Failed to connect to WeChat service. Retry, or restart DSH if you just upgraded.",
 							"微信服务连接失败，请重试；若刚安装或升级插件，请重启 DSH。")),
 						createElement("button", { onClick: refreshStatus, style: buttonStyleFor(false) }, t("Retry", "重试")))
