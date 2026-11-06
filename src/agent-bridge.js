@@ -1146,7 +1146,6 @@ export class AgentBridge {
       const events = record.agent.session?.snapshotEvents?.() ?? []
       this.#auditEvents(record, events, before)
       const reply = readAssistantReply({ events, afterSeq: before })
-      if (reply.text !== '') return { text: reply.text, sessionId }
       // A failed turn is OVER: no assistant message will ever arrive, and the
       // turn/end(error) event is already durable. Waiting out the deadline
       // here holds record.busy for the whole budget, so the user's NEXT
@@ -1155,6 +1154,9 @@ export class AgentBridge {
       if (reply.turnError !== undefined) {
         return { text: `（模型调用失败：${reply.turnError}）`, sessionId }
       }
+      // Intermediate assistant messages can precede tool calls in the same
+      // turn. They are progress, not the final delivery contract.
+      if (reply.turnSettled) return { text: reply.text, sessionId }
 
       // A long tool run is invisible in WeChat. The first note goes out after
       // progressAfterMs; after that a CHANGED tool set is re-announced at most
@@ -1215,15 +1217,19 @@ export class AgentBridge {
       const events = record.agent.session?.snapshotEvents?.() ?? []
       this.#auditEvents(record, events, before)
       const reply = readAssistantReply({ events, afterSeq: before })
-      if (reply.text !== '') {
+      // The same settlement rule applies after the normal wait expires: a
+      // transition step must not be mistaken for the eventual final answer.
+      if (reply.turnSettled) {
         record.lastDeliveredSeq = Math.max(record.lastDeliveredSeq ?? -1, this.#lastSeq(record.agent))
-        try {
-          await onLateReply({ kind: 'reply', text: reply.text })
-        } catch (error) {
-          this.errLog(`late reply delivery failed: ${String(error)}`)
+        if (reply.text !== '') {
+          try {
+            await onLateReply({ kind: 'reply', text: reply.text })
+          } catch (error) {
+            this.errLog(`late reply delivery failed: ${String(error)}`)
+          }
         }
-        // The answer went out through the late-reply channel; the caller must
-        // not send the normal reply path again.
+        // This turn was consumed through the late-reply channel; if it had a
+        // non-empty answer, that callback already delivered it.
         return { text: '', sessionId, late: true }
       }
       // Same failure rule as the primary loop: an errored turn is over, and

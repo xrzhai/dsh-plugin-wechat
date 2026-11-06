@@ -3,9 +3,9 @@
  *
  * Why this exists: DSH 0.1.5 removed the durable `assistant/chunk` event, so a
  * plugin cannot read a reply by watching chunk events. Text settles in
- * `assistant/message` (or `assistant/attempt` for a failed attempt), each with
- * an embedded `stream`; live deltas arrive only as process-local
- * `agent/assistant-stream` frames and are never durable.
+ * `assistant/message`, with an embedded `stream`; live deltas arrive only as
+ * process-local `agent/assistant-stream` frames and are never durable.
+ * `assistant/attempt` records a failed or retried attempt and is never final.
  *
  * This reader therefore: (1) waits for the settled event, (2) reassembles text
  * from the embedded stream, and (3) optionally reports still-pending tool calls
@@ -17,8 +17,10 @@
  */
 
 /** Durable event types that carry settled assistant output. */
-const SETTLED_TYPES = new Set(['assistant/message', 'assistant/attempt'])
+const SETTLED_TYPES = new Set(['assistant/message'])
 const TURN_EVENT_TYPES = new Set(['tool/call', 'tool/result', 'turn/end', ...SETTLED_TYPES])
+
+const isPureSilent = text => /^\[SILENT\]$/i.test(text.trim())
 
 /**
  * Sum the text of every text content block in a settled assistant message.
@@ -79,11 +81,14 @@ export function readAssistantReply({ events, afterSeq = -1 }) {
   let turnError
   let inTurn = false
   let turnSettled = false
+  let turnEvents = []
   /** @type {Map<string, string>} */
   const pending = new Map()
 
   for (const event of events ?? []) {
     if (typeof event?.seq === 'number' && event.seq <= afterSeq) continue
+    if (event?.type === 'turn/start') turnEvents = [event]
+    else turnEvents.push(event)
     switch (event?.type) {
       case 'turn/start':
         // A new turn invalidates anything collected from the previous one.
@@ -111,6 +116,10 @@ export function readAssistantReply({ events, afterSeq = -1 }) {
           turnSettled = false
         } else {
           turnSettled = true
+          if (reason?.kind === 'completed' && isPureSilent(text)) {
+            const recovered = replyBeforeSilent(turnEvents)
+            if (recovered !== undefined) text = recovered.text
+          }
         }
         break
       }
@@ -158,12 +167,11 @@ export function readAssistantReply({ events, afterSeq = -1 }) {
  * Older/unknown event shapes keep the existing behavior rather than guessing.
  */
 function replyBeforeSilent(events) {
-  const pureSilent = text => /^\[SILENT\]$/i.test(text.trim())
   const body = event => streamText(event.data?.stream) || messageText(event.data?.message)
   const outputIndexes = events.flatMap((event, index) =>
     SETTLED_TYPES.has(event.type) && body(event) !== '' ? [index] : [])
   const last = outputIndexes.at(-1)
-  if (last === undefined || !pureSilent(body(events[last]))) return undefined
+  if (last === undefined || !isPureSilent(body(events[last]))) return undefined
 
   function completeMessage(index) {
     const event = events[index], data = event.data, message = data?.message
@@ -195,7 +203,7 @@ function replyBeforeSilent(events) {
   }
 
   if (!completeMessage(last)) return undefined
-  const candidate = outputIndexes.findLast(index => index < last && !pureSilent(body(events[index])))
+  const candidate = outputIndexes.findLast(index => index < last && !isPureSilent(body(events[index])))
   if (candidate === undefined || !completeMessage(candidate)) return undefined
   // A later human instruction may retract the earlier answer. Do not walk past
   // tool work, failed attempts, or an unverified silent step to resurrect it.
@@ -204,7 +212,7 @@ function replyBeforeSilent(events) {
     if (event.type === 'assistant/attempt' || event.type === 'tool/call' || event.type === 'tool/result'
       || (event.type === 'user/message' && event.data?.source?.kind === 'user')
       || typeof event.surfaceOp === 'object') return undefined
-    if (event.type === 'assistant/message' && (!pureSilent(body(event)) || !completeMessage(i))) return undefined
+    if (event.type === 'assistant/message' && (!isPureSilent(body(event)) || !completeMessage(i))) return undefined
   }
   return { text: messageText(events[candidate].data.message), seq: events[candidate].seq }
 }
@@ -275,7 +283,7 @@ export function readSettledTurns({ events, afterSeq = -1 }) {
         if (typeof event.seq === 'number' && event.seq > current.settledSeq) {
           current.settledSeq = event.seq
         }
-        const recovered = reason?.kind === 'completed' && /^\[SILENT\]$/i.test(current.text.trim())
+        const recovered = reason?.kind === 'completed' && isPureSilent(current.text)
           ? replyBeforeSilent(current.events) : undefined
         turns.push({
           text: recovered?.text ?? current.text,

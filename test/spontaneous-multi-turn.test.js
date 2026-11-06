@@ -94,6 +94,131 @@ test('readSettledTurns captures turnError for failed turns', () => {
   assert.equal(turns[0].settledSeq, 2)
 })
 
+test('readAssistantReply ignores failed attempts as final text', () => {
+  const events = [
+    { seq: 1, type: 'turn/start' },
+    { seq: 2, type: 'assistant/attempt', data: { message: { content: [{ type: 'text', text: '失败尝试的半截文本' }] } } },
+    { seq: 3, type: 'turn/end', data: { reason: { kind: 'completed' } } },
+  ]
+
+  const reply = readAssistantReply({ events, afterSeq: 0 })
+  assert.equal(reply.text, '')
+  assert.equal(reply.turnSettled, true)
+})
+
+test('AgentBridge deliver waits for turn/end after a tool-call transition step', async (t) => {
+  const transition = [
+    { seq: 1, type: 'turn/start' },
+    { seq: 2, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '我先看一下文件。' }] } } },
+    { seq: 3, type: 'tool/call', data: { callId: 'read-1', name: 'read' } },
+  ]
+  const complete = [
+    ...transition,
+    { seq: 4, type: 'tool/result', data: { message: { source: { callId: 'read-1' }, content: [{ type: 'text', text: 'file body' }] } } },
+    { seq: 5, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '文件的实际结论。' }] } } },
+    { seq: 6, type: 'turn/end', data: { reason: { kind: 'completed' } } },
+  ]
+  let phase = 0
+  const agent = {
+    session: {
+      id: 'session-1',
+      snapshotEvents: () => {
+        if (phase === 0) return []
+        if (phase === 1) {
+          phase = 2
+          return transition
+        }
+        return complete
+      },
+    },
+    followup: () => { phase = 1 },
+  }
+  const bridge = new AgentBridge({
+    ctx: { get: () => undefined },
+    lines: { active: () => 'session-1', title: () => undefined },
+    eventPollFastMs: 1,
+    eventPollMs: 1,
+    maxWaitMs: 500,
+  })
+  t.after(() => bridge.dispose())
+  bridge.sessions.set('session-1', {
+    agent,
+    conversationId: 'chat',
+    lastDeliveredSeq: -1,
+    busy: false,
+    queue: [],
+    cancelled: false,
+    auditSeq: -1,
+    auditCalls: new Map(),
+    spontaneousSending: false,
+    dispose: async () => {},
+  })
+
+  const result = await bridge.deliver({ conversationId: 'chat', text: '读取文件' })
+  assert.equal(result.text, '文件的实际结论。')
+})
+
+test('AgentBridge late-reply wait still ignores a transition before turn/end', async (t) => {
+  const transition = [
+    { seq: 1, type: 'turn/start' },
+    { seq: 2, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '正在运行测试。' }] } } },
+    { seq: 3, type: 'tool/call', data: { callId: 'test-1', name: 'bash' } },
+  ]
+  const complete = [
+    ...transition,
+    { seq: 4, type: 'tool/result', data: { message: { source: { callId: 'test-1' }, content: [{ type: 'text', text: 'ok' }] } } },
+    { seq: 5, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '测试已全部通过。' }] } } },
+    { seq: 6, type: 'turn/end', data: { reason: { kind: 'completed' } } },
+  ]
+  let phase = 0
+  const agent = {
+    session: {
+      id: 'session-1',
+      snapshotEvents: () => {
+        if (phase === 0) return []
+        if (phase === 1) {
+          phase = 2
+          return transition
+        }
+        return complete
+      },
+    },
+    followup: () => { phase = 1 },
+  }
+  const late = []
+  const bridge = new AgentBridge({
+    ctx: { get: () => undefined },
+    lines: { active: () => 'session-1', title: () => undefined },
+    eventPollFastMs: 1,
+    eventPollMs: 1,
+    maxWaitMs: 0,
+    lateReplyMaxWaitMs: 500,
+  })
+  t.after(() => bridge.dispose())
+  bridge.sessions.set('session-1', {
+    agent,
+    conversationId: 'chat',
+    lastDeliveredSeq: -1,
+    busy: false,
+    queue: [],
+    cancelled: false,
+    auditSeq: -1,
+    auditCalls: new Map(),
+    spontaneousSending: false,
+    dispose: async () => {},
+  })
+
+  await bridge.deliver({
+    conversationId: 'chat',
+    text: '运行测试',
+    onLateReply: async value => { late.push(value) },
+  })
+  assert.deepEqual(late, [
+    { kind: 'timeout-notice' },
+    { kind: 'reply', text: '测试已全部通过。' },
+  ])
+})
+
 test('AgentBridge spontaneous poll delivers Turn 1 text and suppresses Turn 2 [SILENT] without losing Turn 1', async () => {
   const delivered = []
   const bridge = new AgentBridge({

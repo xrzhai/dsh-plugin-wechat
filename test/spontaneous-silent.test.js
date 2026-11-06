@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { AgentBridge } from '../src/agent-bridge.js'
+import { readAssistantReply } from '../src/session-reader.js'
 
 // Durable event shapes from DSH agent-loop 0.2.2-rc.1, not a live model or network.
 // Pinned upstream sources and limits: ../docs/silent-reply-recovery.md.
@@ -59,6 +60,14 @@ test('a completed reply survives a later silent step of the same turn once', asy
   assert.equal(f.delivered.length, 1)
   assert.ok(f.logs.some(line => line.includes('recovered')))
   assert.ok(f.logs.every(line => !line.includes('Important reminder') && !line.includes('PRIVATE')))
+})
+
+test('readAssistantReply recovers a completed reply before a same-turn silent step', () => {
+  const events = turn([step(1, 'Important reminder'), step(2, '[SILENT]')])
+  const reply = readAssistantReply({ events, afterSeq: 0 })
+  assert.equal(reply.text, 'Important reminder')
+  assert.equal(reply.turnSettled, true)
+  assert.equal(reply.settledSeq, events.at(-1).seq)
 })
 
 test('only the latest completed reply is retained, never concatenating drafts', async t => {
