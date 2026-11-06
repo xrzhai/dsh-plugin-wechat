@@ -110,11 +110,13 @@ async function sendTextChunks(transport, config, message, chunks, pendingFiles =
           conversationId: message.conversationId,
           text: pending,
           segments: pendingChunks,
+          deliveryUncertain: error?.deliveryUncertain === true,
           contextToken: message.contextToken,
           maxMessageLength: config.maxMessageLength,
         })
 
-        runtime.warn(`send failed (${String(error?.message ?? error)}); queued ${pending.length} chars for retry`)
+        const action = error?.deliveryUncertain === true ? 'parked for manual review' : 'queued for retry'
+        runtime.warn(`send failed (${String(error?.message ?? error)}); ${action} (${pending.length} chars)`)
         return false
       }
       throw error
