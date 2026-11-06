@@ -107,7 +107,6 @@ test('apply routes notify HTTP requests to the latest conversation and returns 5
     notifyEnabled: true,
     notifyPort: 47832,
     notifyToken: TOKEN,
-    knowledgeEnabled: false,
     mediaEnabled: false,
     typingIndicator: false,
     metricsExport: false,
@@ -185,7 +184,6 @@ test('apply routes notify HTTP requests to the latest conversation and returns 5
   apply(ctx, {
     enabled: true,
     allowedSenders: ['owner'],
-    knowledgeEnabled: false,
     notifyEnabled: true,
     notifyToken: TOKEN,
     notifyPort: 47832,

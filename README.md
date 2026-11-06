@@ -85,7 +85,6 @@
   ```
   扫码登录不需要命令，直接用「大肥鱼 → 微信账号 → 扫码登录微信」。
 - **`ffmpeg` 系统不自带。** 想发 mp3/m4a/ogg 语音条、想给视频抽帧，先 `brew install ffmpeg`。没装时这两条路会降级：音频退成文件发送，视频抽帧静默跳过；wav 和 silk 走内置编码器，不受影响。
-- **`/say` 是本机语音合成，macOS 独占。** 用系统自带的 `say` + `afconvert`，不联网、不花钱，也不需要 ffmpeg。
 - **语音识别（ASR）别用系统 Python。** `/usr/bin/python3` 是 3.9，且没有 `mlx-whisper`。用 DSH 自带的 3.12：
   ```sh
   ~/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/python/bin/python -m pip install mlx-whisper

@@ -121,8 +121,6 @@ export async function sendProducedFiles(params) {
  *   `durable: false` marks a transient note (progress, timeout notice): if it
  *   fails it is dropped, never queued. Everything else defaults to durable.
  */
-export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
-
 export async function sendChunked(transport, config, message) {
   // SILENT is a host control reply, not a user-facing message. Ordinary and
   // late replies share this boundary but bypass the spontaneous-turn filter.
@@ -144,16 +142,8 @@ export async function sendChunked(transport, config, message) {
     conversationId: message.conversationId,
     text,
   })
-  // `bubbles` is the human-pacing split (already plain text, one entry per
-  // bubble). Without it this is the plain length-based chunking every other
-  // send has always used. A bubble that is still over the length cap is cut
-  // again, so pacing can never produce an oversized message.
-  const chunks = Array.isArray(message.bubbles) && message.bubbles.length > 0
-    ? message.bubbles.flatMap((bubble) => chunkText(bubble, config.maxMessageLength))
-    : chunkText(text, config.maxMessageLength)
-  const gapMs = Number(message.gapMs)
+  const chunks = chunkText(text, config.maxMessageLength)
   for (let index = 0; index < chunks.length; index += 1) {
-    if (index > 0 && Number.isFinite(gapMs) && gapMs > 0) await sleep(gapMs)
     // Everything downstream of here talks to a Channel, not a transport: the
     // shape of a text send lives in one place (src/channel.js) instead of being
     // re-derived by every caller.
@@ -166,7 +156,7 @@ export async function sendChunked(transport, config, message) {
     } catch (error) {
       // A send that fails here used to lose the text forever: the model had
       // already written it and nothing held a copy. Queue the exact unsent
-      // bubbles, not their concatenation: the outbox retries them one by one and
+      // chunks, not their concatenation: the outbox retries them one by one and
       // records progress after each success, so neither a retry nor a restart
       // can resend the successful prefix or create one oversized message.
       const pendingChunks = chunks.slice(index)

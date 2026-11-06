@@ -29,7 +29,7 @@ for (const source of ['profile', 'overlay', 'default']) {
       configureWeixinStateDir()
       fs.rmSync(root, { recursive: true, force: true })
     })
-    apply(ctx, { enabled: false, cwd: source === 'profile' ? custom : '', knowledgeEnabled: false, notifyEnabled: false })
+    apply(ctx, { enabled: false, cwd: source === 'profile' ? custom : '', notifyEnabled: false })
     const controller = ctx.get('weixinLoginController')
     assert.ok(controller, 'the real apply path must wire the workspace resolver')
     const expected = path.join(source === 'default' ? path.join(root, 'sessions') : custom, 'AGENTS.md')

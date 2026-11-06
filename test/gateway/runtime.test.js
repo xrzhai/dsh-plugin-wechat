@@ -106,7 +106,7 @@ function fixture(t, { enabled = false, baseEnabled = true, allowedSenders = ['te
     fs.rmSync(root, { recursive: true, force: true })
   })
   beforeApply?.(root)
-  apply(ctx, { enabled: baseEnabled, allowedSenders, allowedChats, knowledgeEnabled: false, notifyEnabled: false, mediaEnabled: false, typingIndicator: false })
+  apply(ctx, { enabled: baseEnabled, allowedSenders, allowedChats, notifyEnabled: false, mediaEnabled: false, typingIndicator: false })
   const controller = ctx.get('configController')
   const login = ctx.get('weixinLoginController')
   assert.ok(controller instanceof ConfigController)
@@ -115,6 +115,29 @@ function fixture(t, { enabled = false, baseEnabled = true, allowedSenders = ['te
   const message = (id) => ({ id, type: 'text', text: 'Hello', senderId: 'test-user', conversationId: 'test-user', contextToken: 'synthetic-context', timestamp: Date.now() })
   return { root, ctx, controller, login, prepared, started, stopped, sessions, sent, dispose, message }
 }
+
+test('retired away state cannot intercept private messages or be rewritten by the gateway', async (t) => {
+  const contents = JSON.stringify({
+    schemaVersion: 1,
+    accounts: {
+      [ACCOUNT]: { startedAt: Date.now(), until: Date.now() + 3_600_000, note: 'synthetic-away', missed: [], replied: {} },
+    },
+  })
+  const f = fixture(t, {
+    enabled: true,
+    beforeApply: (root) => {
+      fs.writeFileSync(path.join(root, 'away.json'), contents)
+      fs.writeFileSync(configFile(), JSON.stringify({ enabled: true, awayAutoReply: true }))
+    },
+  })
+  await until(() => f.started.length === 1, 'transport starts')
+  await f.started[0].testInbound(f.message('retired-away'))
+  assert.equal(f.sessions.length, 1, 'private message reaches host session creation')
+  assert.equal(fs.readFileSync(path.join(f.root, 'away.json'), 'utf8'), contents)
+  assert.ok(f.sent.every((message) => !String(message.text).includes('synthetic-away')))
+  await f.dispose()
+  assert.equal(fs.readFileSync(path.join(f.root, 'away.json'), 'utf8'), contents)
+})
 
 test('a stranger cannot enroll when the global sender allowlist is configured', async (t) => {
   const f = fixture(t, { enabled: true })
@@ -575,4 +598,51 @@ test('disposal drains a stop already initiated by disabling the gateway', async 
   await disposing
   assert.equal(finished, true)
   assert.equal(f.controller.onConfigChanged, undefined)
+})
+
+
+for (const scenario of [
+  { name: 'disabled groups', groupChatEnabled: false, senderId: 'test-user', conversationId: 'allowed-group' },
+  { name: 'unmentioned groups', groupChatEnabled: true, groupReplyWhen: 'mention', senderId: 'test-user', conversationId: 'allowed-group' },
+  { name: 'unauthorized group sender', groupChatEnabled: true, senderId: 'stranger', conversationId: 'allowed-group' },
+  { name: 'unauthorized group chat', groupChatEnabled: true, senderId: 'test-user', conversationId: 'denied-group' },
+]) {
+  test(scenario.name + ' cannot revive retired summaries or keyword replies', async t => {
+    const summaries = []
+    const f = fixture(t, {
+      enabled: true,
+      allowedChats: ['allowed-group', 'test-user'],
+      summarize: async (...args) => { summaries.push(args); return { text: 'retired summary' } },
+      beforeApply: () => fs.writeFileSync(configFile(), JSON.stringify({
+        enabled: true,
+        groupChatEnabled: scenario.groupChatEnabled,
+        groupReplyWhen: scenario.groupReplyWhen ?? 'all',
+        groupSummaryEnabled: true,
+        groupSummaryEvery: 4,
+        groupKeywords: '^Hello$ => retired keyword reply',
+      })),
+    })
+    await until(() => f.started.length === 1, 'transport starts')
+    for (let i = 0; i < 4; i += 1) {
+      await f.started[0].testInbound({ ...f.message('retired-group-' + i), senderId: scenario.senderId, conversationId: scenario.conversationId })
+    }
+    await tick()
+    assert.deepEqual(summaries, [])
+    assert.equal(f.sessions.length, 0)
+    assert.deepEqual(f.sent, [])
+    await f.started[0].testInbound(f.message('retained-private-message'))
+    assert.equal(f.sessions.length, 1, 'private messages still reach the host')
+    assert.deepEqual(summaries, [])
+  })
+}
+
+test('explicitly enabled and authorized basic group messages still reach the host', async t => {
+  const f = fixture(t, {
+    enabled: true,
+    allowedChats: ['allowed-group'],
+    beforeApply: () => fs.writeFileSync(configFile(), JSON.stringify({ enabled: true, groupChatEnabled: true, groupReplyWhen: 'all' })),
+  })
+  await until(() => f.started.length === 1, 'transport starts')
+  await f.started[0].testInbound({ ...f.message('retained-basic-group'), conversationId: 'allowed-group' })
+  assert.equal(f.sessions.length, 1)
 })

@@ -643,24 +643,11 @@ const COMMANDS = [
     helpKey: 'help.status',
     run: (state) => runStatus(state),
   },
-  { id: 'help', pattern: /^\/(?:help|帮助|指令)$/i, build: identity, run: ({ context }) => buildCommandsHelp(context?.t) },
-  // 离开模式：一段有截止时间的缺席。命令只负责开启/结束；窗口内的拦截在
-  // 入站路径上，否则「不回消息」仍然会花掉每条消息的一次模型调用。
-  {
-    id: 'away',
-    pattern: /^\/away(?:\s+([\s\S]+))?$/i,
-    build: (match) => ({ arg: match[1] ?? '' }),
-    helpRank: 20,
-    helpKey: 'help.away',
-  },
-  { id: 'back', pattern: /^\/back$/i, build: identity, helpRank: 21, helpKey: 'help.back' },
+  { id: 'help', pattern: /^\/(?:help|帮助|指令)(?:\s+(all))?$/i, build: (m) => ({ all: Boolean(m[1]) }), run: ({ context, command }) => buildCommandsHelp(context?.t, { all: command.all }) },
   { id: 'diag', pattern: /^\/diag(?:\s+([\S\s]+))?$/i, build: (match) => ({ arg: match[1]?.trim() ?? '' }), helpRank: 22, helpKey: 'help.diag' },
   { id: 'outbox', pattern: /^\/outbox(?:\s+([\s\S]+))?$/, build: (m) => ({ arg: m[1] ?? '' }), helpRank: 23, helpKey: 'help.outbox' },
   { id: 'quiet', pattern: /^\/quiet(?:\s+([\s\S]+))?$/, build: (m) => ({ arg: m[1] ?? '' }), helpRank: 24, helpKey: 'help.quiet' },
-  { id: 'say', pattern: /^\/say(?:\s+([\s\S]+))?$/, build: (m) => ({ arg: m[1] ?? '' }), helpRank: 32, helpKey: 'help.say' },
-  { id: 'draft', pattern: /^\/draft(?:\s+([\s\S]+))?$/i, build: (m) => ({ arg: m[1] ?? '' }), helpRank: 32, helpKey: 'help.draft' },
   { id: 'snooze', pattern: /^\/snooze(?:\s+(\S+))?$/, build: (m) => ({ arg: m[1] ?? '' }), helpRank: 25, helpKey: 'help.snooze' },
-  { id: 'habit', pattern: /^\/habit(?:\s+([\s\S]+))?$/i, build: (m) => ({ arg: m[1] ?? '' }), helpRank: 26, helpKey: 'help.habit' },
   { id: 'media', pattern: /^\/media(?:\s+([\s\S]+))?$/i, build: (m) => ({ arg: m[1] ?? '' }), helpRank: 27, helpKey: 'help.media' },
   { id: 'usage', pattern: /^\/usage$/i, build: identity, helpRank: 26, helpKey: 'help.usage' },
   // `/remind 明天 9:00 内容`：时间本身可能带空格（`明天 9:00`、`下周一 10点`），
@@ -704,15 +691,11 @@ const COMMANDS = [
     helpKey: 'help.subscribecancel',
   },
   { id: 'config', pattern: /^\/config$/i, build: identity, helpRank: 26, helpKey: 'help.config' },
-  { id: 'keyword', pattern: /^\/(?:keyword|关键词)(?:\s+([\S\s]+))?$/i, build: (match) => ({ arg: match[1]?.trim() ?? '' }), helpRank: 22, helpKey: 'help.keyword' },
-  { id: 'todo', pattern: /^\/(?:todo|待办)(?:\s+([\S\s]+))?$/i, build: (match) => ({ arg: match[1]?.trim() ?? '' }), helpRank: 11, helpKey: 'help.todo' },
-  { id: 'later', pattern: /^\/(?:later|稍后读|稍后)(?:\s+([\S\s]+))?$/i, build: (match) => ({ arg: match[1]?.trim() ?? '' }), helpRank: 12, helpKey: 'help.later' },
   { id: 'send', pattern: /^\/send(?:\s+([\S\s]+))?$/i, build: (match) => ({ arg: match[1]?.trim() ?? '' }), helpRank: 13, helpKey: 'help.send' },
 ]
 
 /** Commands answered by the inbound handler's persona bundle (state root lives there). */
-const PERSONA_COMMANDS = new Set(['keyword', 'export', 'away', 'back', 'todo', 'later', 'send', 'diag', 'outbox', 'quiet', 'usage', 'habit', 'media', 'config', 'draft',
-  'say',
+const PERSONA_COMMANDS = new Set(['export', 'send', 'diag', 'outbox', 'quiet', 'usage', 'media', 'config',
 ])
 
 /**
@@ -722,16 +705,18 @@ const PERSONA_COMMANDS = new Set(['keyword', 'export', 'away', 'back', 'todo', '
  *
  * @param {(key: string) => string} [t]
  */
-export function buildCommandsHelp(t = (key) => translate(key, undefined)) {
+export function buildCommandsHelp(t = (key) => translate(key, undefined), { all = false } = {}) {
+  const frequent = new Set(['new', 'list', 'use', 'cancel', 'compact', 'status', 'send'])
   return [
     t('help.header'),
     ...COMMANDS
-      .filter((rule) => rule.helpKey !== undefined)
+      .filter((rule) => rule.helpKey !== undefined && (all || frequent.has(rule.id)))
       .sort((left, right) => (left.helpRank ?? 99) - (right.helpRank ?? 99))
       .map((rule) => {
         const line = t(rule.helpKey)
         return line === rule.helpKey && rule.helpText ? rule.helpText : line
       }),
+    ...(!all ? [t('help.more'), t('help.example')] : []),
   ].join('\n')
 }
 

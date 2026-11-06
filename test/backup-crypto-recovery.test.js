@@ -20,9 +20,9 @@ function fixture(t) {
 }
 
 function writeArchiveState(root) {
-  fs.mkdirSync(path.join(root, 'memory'), { recursive: true })
+  fs.mkdirSync(path.join(root, 'sessions'), { recursive: true })
   fs.writeFileSync(path.join(root, 'config.json'), '{"source":"archive"}\n')
-  fs.writeFileSync(path.join(root, 'memory', 'remember.txt'), 'archive memory\n')
+  fs.writeFileSync(path.join(root, 'sessions', 'memory.md'), 'archive memory\n')
   fs.writeFileSync(path.join(root, RECOVERY_NAME), '{"source":"archive","items":[null')
 }
 
@@ -37,7 +37,7 @@ test('sealed restore protects a different recovery while ordinary files keep ove
   const files = sealFixture(f)
   const liveRecovery = '{"source":"live","items":[{"id":"r1"}]}\n'
   fs.writeFileSync(path.join(f.root, 'config.json'), '{"source":"live"}\n')
-  fs.writeFileSync(path.join(f.root, 'memory', 'remember.txt'), 'live memory\n')
+  fs.writeFileSync(path.join(f.root, 'sessions', 'memory.md'), 'live memory\n')
   fs.writeFileSync(path.join(f.root, RECOVERY_NAME), liveRecovery)
 
   const now = Date.parse('2026-11-05T04:05:06Z')
@@ -48,7 +48,7 @@ test('sealed restore protects a different recovery while ordinary files keep ove
   })
 
   assert.equal(fs.readFileSync(path.join(f.root, 'config.json'), 'utf8'), '{"source":"archive"}\n')
-  assert.equal(fs.readFileSync(path.join(f.root, 'memory', 'remember.txt'), 'utf8'), 'archive memory\n')
+  assert.equal(fs.readFileSync(path.join(f.root, 'sessions', 'memory.md'), 'utf8'), 'archive memory\n')
   assert.equal(fs.readFileSync(path.join(f.root, RECOVERY_NAME), 'utf8'), liveRecovery)
   assert.equal(result.restored, 2)
   assert.equal(result.recoveryConflicts.length, 1)

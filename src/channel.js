@@ -9,7 +9,7 @@
 // The contract is deliberately small and shape-compatible with what the
 // transport already does, so wrapping costs nothing at runtime:
 //
-//   channel.capabilities            { text, media, typing, voice, stickers }
+//   channel.capabilities            { text, media, typing, voice }
 //   channel.accountId               the account this channel speaks for
 //   channel.sendText({ conversationId, text, contextToken })
 //   channel.sendMedia({ conversationId, filePath, text, contextToken, cdnBaseUrl, maxBytes })
@@ -26,8 +26,6 @@ const DEFAULT_CAPABILITIES = Object.freeze({
   // it (measured twice, see docs/progress.md), so no channel advertises voice
   // until that changes.
   voice: false,
-  // Weixin has no sticker item type at all: a "sticker" is an image upload.
-  stickers: false,
 });
 
 /**
@@ -72,9 +70,3 @@ export function channelFor(transport) {
   }
   return channel;
 }
-
-/** A channel can send at all only if it can carry text. */
-export function canSendText(channel) {
-  return channel !== undefined && channel.capabilities?.text === true;
-}
-

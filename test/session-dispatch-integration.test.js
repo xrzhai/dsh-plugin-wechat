@@ -229,7 +229,7 @@ test('apply wires saved policy and exact account/chat dispatch notification rout
   let disposed = false
   const dispose = async () => { if (!disposed) { disposed = true; await ctx.fiber.dispose() } }
   t.after(async () => { await dispose(); if (env === undefined) delete process.env.DSH_WEIXIN_STATE_DIR; else process.env.DSH_WEIXIN_STATE_DIR = env; fs.rmSync(root, { recursive: true, force: true }) })
-  apply(ctx, { enabled: true, allowedSenders: ['owner'], knowledgeEnabled: false, notifyEnabled: false, mediaEnabled: false, typingIndicator: false })
+  apply(ctx, { enabled: true, allowedSenders: ['owner'], notifyEnabled: false, mediaEnabled: false, typingIndicator: false })
   await until(() => started.length === 2)
   await tick()
   const origin = started.find((transport) => transport.accountId === accounts[0])
@@ -315,7 +315,7 @@ test('dispatch notifications keep long code inline as text, never as a lossy att
   let disposed = false
   const dispose = async () => { if (!disposed) { disposed = true; await ctx.fiber.dispose() } }
   t.after(async () => { await dispose(); if (env === undefined) delete process.env.DSH_WEIXIN_STATE_DIR; else process.env.DSH_WEIXIN_STATE_DIR = env; fs.rmSync(root, { recursive: true, force: true }) })
-  apply(ctx, { enabled: true, allowedSenders: ['owner'], knowledgeEnabled: false, notifyEnabled: false, mediaEnabled: false, typingIndicator: false })
+  apply(ctx, { enabled: true, allowedSenders: ['owner'], notifyEnabled: false, mediaEnabled: false, typingIndicator: false })
   await until(() => started.length === 1)
   await tick()
   // Attaching a live controller is what creates the SessionDispatcher; drive one

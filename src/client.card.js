@@ -59,26 +59,24 @@ window.__ModuleLoader__.load({
 			 * which is itself checked against the schema. Three sources, two guards.
 			 */
 			const CONFIG_EFFECTS = {
-				// This mirrors the host table. Schema-backed dormant fields may still say
-				// "live"; the label describes mapping availability, not a wired feature.
 				"enabled": "live",
 				"sessionDispatcherEnabled": "live", "sessionDispatcherSenders": "live", "sessionDispatcherTargets": "live", "protectedSessions": "live", "readOnlyPaths": "live",
 				"allowedSenders": "live", "allowedChats": "live",
 				"chatProvider": "live", "chatModel": "live", "documentExtract": "live",
 				"ocrEnabled": "live", "ocrCommand": "live", "ocrTimeoutMs": "live", "ocrMaxChars": "live", "documentTextChars": "live",
-				"knowledgeHits": "live", "ttsVoice": "live",
-				"groupChatEnabled": "live", "groupReplyWhen": "live", "groupKeywords": "live",
-				"groupSummaryEnabled": "live", "groupSummaryEvery": "live",
-				"pricePer1kInputYuan": "live", "pricePer1kOutputYuan": "live", "usageAwarenessEnabled": "live",
+
+				"groupChatEnabled": "live", "groupReplyWhen": "live",
+
+				"pricePer1kInputYuan": "live", "pricePer1kOutputYuan": "live",
 				"videoFrames": "live", "locale": "live",
 				"toolNotices": "live", "quietHoursEnabled": "live", "quietHoursStart": "live", "quietHoursEnd": "live",
 				"senderDailyLimit": "live",
 				"retentionJournalDays": "live", "retentionAuditDays": "live", "retentionMediaDays": "live", "retentionExportsDays": "live", "retentionLogsDays": "live",
-				"dryRun": "live", "metricsExport": "live", "backupEnabled": "live", "backupKeep": "live",
-				"awayAutoReply": "live", "mediaMaxBytes": "live", "backgroundDailyLimit": "live", "busyMessageMode": "live",
+				"metricsExport": "live", "backupEnabled": "live", "backupKeep": "live",
+				"mediaMaxBytes": "live", "backgroundDailyLimit": "live", "busyMessageMode": "live",
 				"accountId": "restart", "cwd": "restart", "workspaceTitle": "restart",
 				"maxMessageLength": "restart", "sendIntervalMs": "restart", "sendCooldownMs": "restart", "voiceOutbound": "restart", "messageJournal": "restart",
-				"sideProvider": "restart", "sideModel": "restart", "knowledgeEnabled": "restart", "groupBotNames": "restart",
+				"sideProvider": "restart", "sideModel": "restart", "groupBotNames": "restart",
 				"richContent": "restart", "codeFileThreshold": "restart", "senderRatePerMinute": "restart", "maxQueuedPerConversation": "restart",
 				"notifyEnabled": "restart", "notifyPort": "restart", "notifyToken": "restart",
 				"webhookUrl": "restart", "webhookSecret": "restart", "webhookTimeoutMs": "restart",

@@ -39,7 +39,6 @@ async function fixture(t) {
     backupEnabled: false,
     cdnBaseUrl: 'https://cdn.invalid',
     documentExtract: false,
-    knowledgeEnabled: false,
     markdownMode: 'off',
     mediaEnabled: false,
     metricsExport: false,

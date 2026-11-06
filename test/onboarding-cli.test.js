@@ -181,7 +181,7 @@ test('doctor dry-run and fix create active directories without creating or repla
   const dryRun = run('bin/doctor.mjs', fixture, ['--offline', '--dry-run'])
   assert.equal(dryRun.status, 0, dryRun.output)
   assert.match(dryRun.output, /created sessions\//)
-  assert.match(dryRun.output, /created knowledge\//)
+  assert.doesNotMatch(dryRun.output, /created knowledge\//)
   assert.equal(fs.existsSync(path.join(fixture.state, 'sessions')), false)
   assert.equal(fs.existsSync(path.join(fixture.state, 'knowledge')), false)
   assert.equal(fs.existsSync(path.join(fixture.state, 'memory')), false)
@@ -189,7 +189,7 @@ test('doctor dry-run and fix create active directories without creating or repla
   const fixed = run('bin/doctor.mjs', fixture, ['--offline', '--fix'])
   assert.equal(fixed.status, 0, fixed.output)
   assert.equal(fs.statSync(path.join(fixture.state, 'sessions')).isDirectory(), true)
-  assert.equal(fs.statSync(path.join(fixture.state, 'knowledge')).isDirectory(), true)
+  assert.equal(fs.existsSync(path.join(fixture.state, 'knowledge')), false)
   assert.equal(fs.existsSync(path.join(fixture.state, 'memory')), false)
 
   const persona = path.join(fixture.state, 'sessions', 'AGENTS.md')
