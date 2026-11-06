@@ -48,6 +48,9 @@ window.__ModuleLoader__.load({
 				useLocaleText,
 			} = deps;
 			const LOGOUT_CONFIRM_PREFIX = "确定退出登录";
+			const saveText = (t) => t("Save", "保存");
+			const cancelText = (t) => t("Cancel", "取消");
+			const retryText = (t) => t("Retry", "重试");
 
 			/**
 			 * When a saved option actually takes effect.
@@ -62,28 +65,16 @@ window.__ModuleLoader__.load({
 				"enabled": "live",
 				"sessionDispatcherEnabled": "live", "sessionDispatcherSenders": "live", "sessionDispatcherTargets": "live", "protectedSessions": "live", "readOnlyPaths": "live",
 				"allowedSenders": "live", "allowedChats": "live",
-				"chatProvider": "live", "chatModel": "live", "documentExtract": "live",
-				"ocrEnabled": "live", "ocrCommand": "live", "ocrTimeoutMs": "live", "ocrMaxChars": "live", "documentTextChars": "live",
-
 				"groupChatEnabled": "live", "groupReplyWhen": "live",
-
-				"pricePer1kInputYuan": "live", "pricePer1kOutputYuan": "live",
-				"videoFrames": "live", "locale": "live",
-				"toolNotices": "live", "quietHoursEnabled": "live", "quietHoursStart": "live", "quietHoursEnd": "live",
-				"senderDailyLimit": "live",
-				"retentionJournalDays": "live", "retentionAuditDays": "live", "retentionMediaDays": "live", "retentionExportsDays": "live", "retentionLogsDays": "live",
-				"metricsExport": "live", "backupEnabled": "live", "backupKeep": "live",
-				"mediaMaxBytes": "live", "backgroundDailyLimit": "live", "busyMessageMode": "live",
+				"locale": "live", "senderDailyLimit": "live", "busyMessageMode": "live",
 				"accountId": "restart", "cwd": "restart", "workspaceTitle": "restart",
-				"maxMessageLength": "restart", "sendIntervalMs": "restart", "sendCooldownMs": "restart", "voiceOutbound": "restart", "messageJournal": "restart",
-				"sideProvider": "restart", "sideModel": "restart", "groupBotNames": "restart",
+				"maxMessageLength": "restart", "sendIntervalMs": "restart", "sendCooldownMs": "restart",
+				"groupBotNames": "restart",
 				"richContent": "restart", "codeFileThreshold": "restart", "senderRatePerMinute": "restart", "maxQueuedPerConversation": "restart",
-				"notifyEnabled": "restart", "notifyPort": "restart", "notifyToken": "restart",
-				"webhookUrl": "restart", "webhookSecret": "restart", "webhookTimeoutMs": "restart",
-				"toolAudit": "restart", "markdownMode": "restart", "sourceContext": "restart", "readLinks": "restart",
+				"markdownMode": "restart", "sourceContext": "restart",
 				"progressAfterMs": "restart", "progressToolAfterMs": "restart", "progressEveryMs": "restart", "maxTurnWaitMs": "restart", "eventPollMs": "restart",
 				"typingIndicator": "restart", "mediaEnabled": "restart",
-				"maxMediaBytes": "restart", "maxInboundMediaBytes": "restart", "cdnBaseUrl": "restart", "asr": "restart",
+				"maxMediaBytes": "restart", "maxInboundMediaBytes": "restart", "cdnBaseUrl": "restart",
 			};
 
 			/** A saved option's effect, in words the user can act on. */
@@ -674,7 +665,7 @@ window.__ModuleLoader__.load({
 			};
 
 			const editAllowlist = (account) => {
-				const current = (account.allowedSenders ?? []).join(", ");
+				const current = (account.accountAllowedSenders ?? []).join(", ");
 				setEditing({ accountId: account.accountId, kind: "allowlist", draft: current });
 			};
 
@@ -687,7 +678,7 @@ window.__ModuleLoader__.load({
 					if (kind === "label") {
 						await callRemote(() => ctx.remote.weixin.label(accountId, draft));
 					} else {
-						await callRemote(() => ctx.remote.weixin.allowlist(accountId, draft, ""));
+						await callRemote(() => ctx.remote.weixin.allowlist(accountId, draft));
 					}
 					setEditing(null);
 					await refreshStatus();
@@ -785,10 +776,18 @@ window.__ModuleLoader__.load({
 									style: { fontSize: 12, color: C.labelSecondary },
 								}, account.accountId) : null,
 								registryError ? createElement("span", { role: "alert", style: noticeStyle }, account.registryError) : null,
+								!registryError ? createElement("span", { style: { fontSize: 12, color: C.labelSecondary } },
+									(account.accountAllowedSenders?.length > 0 ? t("Allowed contacts", "允许联系人") : t("Allowed contacts (global)", "允许联系人（全局）")) + ": " +
+									(Array.isArray(account.allowedSenders) ? (account.allowedSenders.join(", ") || "—") : t("unavailable", "无法读取"))) : null,
 								account.paused ? createElement("span", { style: pillStyle("idle") }, t("paused", "已暂停")) : null,
 								account.sessionExpired === true ? createElement("span", { style: pillStyle("bad") }, t("session expired", "登录已过期")) : null,
 								seen ? createElement("span", { style: { fontSize: 12, color: C.labelSecondary } }, seen) : null,
 								createElement("span", { style: { flex: 1 } }),
+								createElement("button", {
+									onClick: () => editAllowlist(account),
+									disabled: busy || registryError,
+									style: buttonStyleFor(busy || registryError),
+								}, t("Edit contacts", "编辑联系人")),
 								createElement("button", {
 									onClick: () => renameAccount(account),
 									disabled: registryError,
@@ -822,12 +821,12 @@ window.__ModuleLoader__.load({
 											onClick: () => void submitEditing(),
 											disabled: busy,
 											style: buttonStyleFor(busy),
-										}, t("Save", "保存")),
+										}, saveText(t)),
 										createElement("button", {
 											onClick: () => setEditing(null),
 											disabled: busy,
 											style: buttonStyleFor(busy),
-										}, t("Cancel", "取消")))
+										}, cancelText(t)))
 									: null);
 						}))
 				: null;
@@ -861,7 +860,7 @@ window.__ModuleLoader__.load({
 						createElement("span", null, statusError || t(
 							"Failed to connect to WeChat service. Retry, or restart DSH if you just upgraded.",
 							"微信服务连接失败，请重试；若刚安装或升级插件，请重启 DSH。")),
-						createElement("button", { onClick: refreshStatus, style: buttonStyleFor(false) }, t("Retry", "重试")))
+						createElement("button", { onClick: refreshStatus, style: buttonStyleFor(false) }, retryText(t)))
 					: null,
 
 				// One row per bound account: identity, liveness, controls.
@@ -965,7 +964,7 @@ window.__ModuleLoader__.load({
 										createElement("button", { onClick: copyLink, style: buttonStyle },
 											copied ? t("Copied", "已复制") : t("Copy link", "复制链接")))
 								: null,
-							createElement("button", { onClick: cancel, style: buttonStyle }, t("Cancel", "取消")))
+							createElement("button", { onClick: cancel, style: buttonStyle }, cancelText(t)))
 					: null,
 
 				state.phase === "needcode"
@@ -981,7 +980,7 @@ window.__ModuleLoader__.load({
 									style: { ...inputStyle, maxWidth: 160 },
 								}),
 								createElement("button", { onClick: submitCode, style: primaryButtonStyle }, t("Submit", "提交")),
-								createElement("button", { onClick: cancel, style: buttonStyle }, t("Cancel", "取消"))))
+								createElement("button", { onClick: cancel, style: buttonStyle }, cancelText(t))))
 					: null,
 
 				state.phase === "blocked" && message
@@ -1211,10 +1210,6 @@ window.__ModuleLoader__.load({
 				"enabled",
 				"cwd",
 				"workspaceTitle",
-				"chatProvider",
-				"chatModel",
-				"sideProvider",
-				"sideModel",
 				"busyMessageMode",
 				"allowedSenders",
 				"typingIndicator",
@@ -1327,7 +1322,7 @@ window.__ModuleLoader__.load({
 			if (groups.length === 0) {
 				return createElement("div", { style: panelStyle },
 					createElement("p", { role: error ? "alert" : undefined, style: hintStyle }, error || t("Loading options…", "正在读取配置…")),
-					error ? createElement("button", { onClick: load, style: buttonStyleFor(false) }, t("Retry", "重试")) : null);
+					error ? createElement("button", { onClick: load, style: buttonStyleFor(false) }, retryText(t)) : null);
 			}
 
 			const renderField = (field) => {
@@ -1579,7 +1574,7 @@ window.__ModuleLoader__.load({
 						onClick: save,
 						disabled: busy || dirtyPaths.length === 0,
 						style: dirtyPaths.length === 0 || busy ? buttonStyleFor(true) : primaryButtonStyle,
-					}, busy ? t("Saving…", "保存中…") : t("Save", "保存")),
+					}, busy ? t("Saving…", "保存中…") : saveText(t)),
 					createElement("button", { onClick: resetAll, disabled: busy, style: buttonStyleFor(busy) },
 						t("Reset all", "全部恢复默认")),
 					dirtyPaths.length > 0

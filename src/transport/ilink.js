@@ -387,9 +387,6 @@ export class ILinkTransport {
    * @param {number} [options.sendCooldownMs]  Cooldown armed by repeated failures.
    * @param {import('../message/rate-limit.js').OutboundPacer} [options.pacer]
    *   Test seam: a pre-built pacer (the tests inject a fake clock through it).
-   * @param {boolean} [options.voiceOutbound]  Audio attachments go out as Weixin
-   *   voice messages (SILK) instead of file attachments. Default true; a known
-   *   voice failure falls back to the file path inside {@link sendMedia}.
    * @param {object} [options.outbound]  Outbound-media implementation. Test
    *   seam for the dynamically imported media module.
    * @param {ReturnType<typeof createInboundPendingStore>} [options.pendingStore]
@@ -420,7 +417,6 @@ export class ILinkTransport {
       log: this.log,
       warn: this.errLog,
     })
-    this.voiceOutbound = options.voiceOutbound !== false
     this.outbound = options.outbound
     // The poll call is injectable so the resilience test can make one round
     // reject without a network double.
@@ -892,8 +888,7 @@ export class ILinkTransport {
   async sendMedia({ filePath, conversationId, contextToken, cdnBaseUrl, text, caption }) {
     const mediaCaption = caption ?? text
     const outbound = this.outbound ?? await import('../media/outbound.js')
-    const { sendOutboundMedia, sendOutboundVoice, mediaFallbackParamsAfterVoiceError, mediaSendOptions } = outbound
-    const { isVoiceCandidate } = await import('../media/voice-encode.js')
+    const { sendOutboundMedia, mediaSendOptions } = outbound
     const opts = mediaSendOptions({
       baseUrl: this.baseUrl,
       token: this.token,
@@ -915,33 +910,13 @@ export class ILinkTransport {
         opts,
         ...(mediaCaption === undefined || mediaCaption === '' ? {} : { text: mediaCaption }),
       }
-      // Audio rides the voice path (SILK voice_item) instead of file_item.
-      // A known voice failure degrades to the file path; an indeterminate
-      // network outcome stops here because retrying could deliver both shapes.
-      if (this.voiceOutbound && isVoiceCandidate(filePath)) {
-        try {
-          result = await sendOutboundVoice(mediaParams)
-        } catch (voiceError) {
-          const fallbackParams = mediaFallbackParamsAfterVoiceError(mediaParams, voiceError)
-          if (fallbackParams === undefined) {
-            this.log(`voice send outcome is uncertain (${String(voiceError?.message ?? voiceError)}); not retrying ${filePath} as a file to avoid duplicate delivery`)
-            throw voiceError
-          }
-          const caption = voiceError.captionState === 'sent' ? '; caption already sent' : ''
-          this.log(`voice send failed (${String(voiceError?.message ?? voiceError)}); sending ${filePath} as a file instead${caption}`)
-          result = await sendOutboundMedia(fallbackParams)
-        }
-      } else {
-        result = await sendOutboundMedia(mediaParams)
-      }
+      result = await sendOutboundMedia(mediaParams)
     } catch (error) {
       this.pacer.noteFailure()
       throw error
     }
     this.pacer.noteSuccess()
-    // The sendmessage response fields ride along in `result` (voice spreads
-    // them; see sendOutboundVoice). They are the only way to tell "the server
-    // accepted it" from "the server delivered it" from the log alone.
+    // The response records server acceptance, not delivery to the phone.
     const server = typeof result.ret === 'number' ? ` (server ret=${result.ret}${result.errmsg ? `, errmsg=${result.errmsg}` : ''}${result.server_message_id === undefined ? '' : `, server_message_id=${result.server_message_id}`})` : ''
     this.log(`sent ${result.kind} media ${filePath} to ${conversationId}${server}`)
     return result

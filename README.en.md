@@ -13,8 +13,8 @@
 Chat with the **DeepSeek Harness (DSH)** running on your computer directly from WeChat on your phone when you are away from your desk:
 
 - **Command from anywhere**: Send a message in WeChat to have your local Agent research, write code, edit docs, or run tasks, and receive results or files back in WeChat;
-- **Never miss async subagents**: Even when a task spawns multiple Subagents running for minutes, final replies are automatically delivered in order;
-- **100% local state**: Credentials and chat data stay strictly on your own machine (`~/.dsh/weixin/`).
+- **Follow delegated work**: While the plugin is running, follow-up replies received by the main session can be sent to the originating WeChat chat;
+- **Local credentials**: The plugin stores account credentials on your machine (`~/.dsh/weixin/`); messages are processed by the DSH model and tool services you use.
 
 ---
 
@@ -36,13 +36,7 @@ Once your Agent finishes installing, **fully quit and reopen DSH**.
   pnpm() { node "$HOME/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/pnpm/bin/pnpm.cjs" "$@"; }
   ```
   You do not need a command to log in: use **WeChat → WeChat Account → Scan QR to Log In**.
-- **`ffmpeg` is not bundled with macOS.** Install it with `brew install ffmpeg` if you want mp3/m4a/ogg sent as voice messages or video frames extracted for the model. Without it, audio falls back to a file attachment and frame extraction is skipped silently; wav and silk use the built-in encoder and are unaffected.
-- **Do not use the system Python for ASR.** `/usr/bin/python3` is 3.9 and has no `mlx-whisper`. Use the Python 3.12 bundled with DSH:
-  ```sh
-  ~/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/python/bin/python -m pip install mlx-whisper
-  ```
-  Then point `asr.command` at that absolute path. On Apple silicon it runs on the GPU and is markedly faster than CPU.
-- **A laptop sleeps when the lid closes.** Long-polling and scheduled reminders stop while asleep; reminders that came due are delivered immediately after wake or restart rather than being dropped.
+- **A laptop sleeps when the lid closes.** The WeChat connection pauses while asleep and needs time to reconnect after waking.
 
 ---
 
@@ -50,7 +44,11 @@ Once your Agent finishes installing, **fully quit and reopen DSH**.
 
 1. **Scan QR Code**: Open DSH, click **WeChat** in the left sidebar (or go to `Settings → Plugins → WeChat`), and click **Scan QR to Log In**.
 2. **Set Default Working Directory (Optional)**: Open the **Gateway Options** tab and set `Working directory (cwd)` to your daily project or notes folder.
-3. **Send Your First Message (Auto Owner Enrolment)**: By default, the plugin ignores everyone for safety. After scanning, **send the first message from your own WeChat** (e.g. `hello` or `/status`) — it will automatically register you as the owner.
+3. **Send Your First Message (Auto Owner Enrolment)**: If no sender list is configured, the plugin registers the first contact it actually receives. Send a message from your own WeChat (e.g. `hello` or `/status`) and check the allowed list: the first contact is not necessarily the person who scanned the code.
+
+Incoming images, voice, video and files are saved locally and their paths are passed to the DSH Agent. Whether it can read or understand them depends on the available tools and model.
+
+The plugin no longer runs built-in reminders or scheduled messages. Existing schedule data remains on disk but will not trigger.
 
 ---
 
@@ -63,7 +61,8 @@ These shortcuts are handled locally by the plugin without spending model tokens:
 | `/new` or `/new weekly report` | Start a new topic (previous conversations are kept) |
 | `/list` | List your conversation history (`1, 2, 3...`) |
 | `/use 2` | Switch back to conversation `#2` |
-| `/cancel` | Immediately stop the currently running task |
+| `/clear` | Clear the topic list while keeping DSH history |
+| `/cancel` | Request that the current reply stop; check child tasks separately |
 | `/compact` | Compress context when a conversation gets long |
 | `/status` | Check connection status and active topic |
 | `/send <file-path>` | Have the Agent send a local file to your WeChat |

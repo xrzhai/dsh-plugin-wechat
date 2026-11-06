@@ -83,26 +83,26 @@ export function ensureSessionsDir() {
  * the assistant reads when it needs to and edits when it learns something —
  * no always-injected memory engine.
  */
-export const DEFAULT_AGENT_INSTRUCTIONS = `# 大肥鱼 · 微信里的 AI 伙伴
+export const DEFAULT_AGENT_INSTRUCTIONS = `# 大肥鱼 · 微信里的远程调度师
 
-你是「大肥鱼」，用户在微信里的 AI 伙伴，也是帮他打理日常和电脑的小助手。说话像老朋友，别用客服腔。
+你是「大肥鱼」，用户在微信里的远程调度师。接单、澄清、派活、跟进并交付结果；说话自然直接，别用客服腔。
 
 ## 说话方式
 - 微信屏幕小：默认 1~3 个短段落，80~180 字，结论先行；不要长篇大论，不要堆表格和多层列表。
 - 有温度，接得住情绪；除非用户说「展开讲讲」，只给最核心的判断。
 
 ## 你能做
-- 记事情、设提醒（到点主动发微信提醒你）。
-- 查资料、读文件、写东西、整理信息。
-- 需要时在电脑上干活（跑命令、改文件）；动手前先确认，删改前先说清楚。
+- 记事情、查资料、读文件、写东西、整理信息。
+- 在授权范围内跑命令、改文件，并使用宿主提供的执行和委派能力。
+- 根据实际执行记录跟进任务，说明已知进展与无法确认的情况。
 
 ## 你的记忆：memory.md
-- 记性放在同目录的 \`memory.md\` 里。**按需读取**——要回忆用户偏好、称呼、重要日期时再打开看，不用每轮都读全。
+- 记性放在同目录的 \`memory.md\` 里。**按需读取**——要回忆用户偏好或称呼时再打开看，不用每轮都读全。
 - 学到值得长期记住的事（称呼、喜好、忌讳、重要日子、约定），就主动补进 \`memory.md\`。
 - 用户说「记住…」时也是写进 \`memory.md\`，不要另开一套记忆。
 
 ## 第一次聊天（重要）
-第一次和用户说话时，先读一下 \`memory.md\` 里的「第一次见面」清单，照着做：简单自我介绍，再自然地聊 2~3 个问题（怎么称呼你、想让我长期记住什么、要不要固定提醒），把答案填进 \`memory.md\` 的「关于你」。
+当用户表示第一次使用，或主动问你是谁、能做什么时，简单介绍自己并先处理请求；不要把新话题当成第一次使用。需要了解称呼时，再按需查看 \`memory.md\`。
 
 ## 边界
 - 只服务被授权的用户；不确定的操作先问，删除或对外发送前必须确认。
@@ -112,16 +112,11 @@ export const DEFAULT_AGENT_INSTRUCTIONS = `# 大肥鱼 · 微信里的 AI 伙伴
 /**
  * The starter memory note. It is data the assistant maintains, not instructions
  * the gateway injects — the persona tells the model to read it on demand. Kept
- * as a fill-in template with a one-time "第一次见面" checklist.
+ * as a short fill-in template.
  */
 export const DEFAULT_MEMORY_FILE = `# 大肥鱼 的记忆
 
 > 这是大肥鱼自己维护的备忘。需要回忆用户偏好时按需读一读，学到新的事就补进来。
-
-## 第一次见面（大肥鱼照着做，做完把这段删掉）
-- 先简单介绍自己：我叫大肥鱼，能帮你记事、设提醒、查资料、在电脑上干活。
-- 再自然地问 2~3 个问题：怎么称呼你？有什么想让我长期记住的？要不要固定提醒？
-- 把答案填到下面的「关于你」。
 
 ## 关于你
 - 称呼：
@@ -238,9 +233,8 @@ export function readSavedConfig() {
  *
  * Precedence: the saved file written by the settings card is the newer
  * statement. A saved value wins unless it is the schema's empty form
- * (`undefined`, `''`, `[]`, `{}`); `false` and `0` are real values. `asr`
- * merges one level deeper, and an explicit non-empty composition
- * `allowedSenders` stays authoritative.
+ * (`undefined`, `''`, `[]`, `{}`); `false` and `0` are real values. An explicit
+ * non-empty composition `allowedSenders` stays authoritative.
  *
  * Loader schema defaults must not overwrite explicit saved preferences.
  *
@@ -267,24 +261,6 @@ export function withSavedConfig(config) {
   ) {
     merged.allowedSenders = saved.allowedSenders
   }
-  // `asr` needs the same protection, one level deeper. Its schema defaults are
-  // `command: ''`, `args: []`, `env: {}`, `model: ''` — so a host that passes
-  // the schema-instantiated config (which is every host: the loader validates
-  // the composition through schemastery before `apply` sees it) arrives with an
-  // `asr` object whose `command` is the empty string. Spread-merging that over
-  // the saved section erased the operator's real command and left the bridge
-  // undefined while `config.json` still showed it — the "voice notes arrive but
-  // say `no ASR bridge is configured`" symptom (observed 2026-10-16).
-  //
-  // The rule is per field and deliberately conservative: a saved value always
-  // outranks the composition UNLESS the saved value is itself the empty form.
-  // `withSavedConfig` cannot tell a schema default from a value the operator
-  // wrote in the YAML — both arrive as plain values on `config` — so the only
-  // safe reading is "the settings page is the newer, more specific statement".
-  // That is also how the top-level merge already behaves for every key the
-  // composition omits. `false` and `0` are real values and are never treated as
-  // empty, so an operator who switched transcription off keeps it off.
-  const savedAsr = saved.asr
   const isPlainObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
   const isEmptyDefault = (value) =>
     value === undefined ||
@@ -292,19 +268,12 @@ export function withSavedConfig(config) {
     (Array.isArray(value) && value.length === 0) ||
     (isPlainObject(value) && Object.keys(value).length === 0)
 
-  if (isPlainObject(savedAsr) && isPlainObject(config?.asr)) {
-    const asr = { ...config.asr }
-    for (const [key, savedValue] of Object.entries(savedAsr)) {
-      if (!isEmptyDefault(savedValue)) asr[key] = savedValue
-    }
-    merged.asr = asr
-  }
   // The same rule now applies to the top level: a saved value beats the
-  // schema-instantiated default the loader passed. `asr` and `allowedSenders`
-  // keep the rules above; `null` counts as "not set here", while `false` and
+  // schema-instantiated default the loader passed. `allowedSenders` keeps the
+  // rule above; `null` counts as "not set here", while `false` and
   // `0` are real values.
   for (const [key, savedValue] of Object.entries(saved)) {
-    if (key === 'asr' || key === 'allowedSenders') continue
+    if (key === 'allowedSenders') continue
     if (savedValue === null || isEmptyDefault(savedValue)) continue
     merged[key] = savedValue
   }

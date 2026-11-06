@@ -221,7 +221,7 @@ function git(cwd, env, args) {
   return result.stdout
 }
 
-function releaseFixture(t) {
+function releaseFixture(t, { omitIndex = false } = {}) {
   const npmCli = findNpmCli()
   const base = tempBase(t, 'release-dry-run-fixture-')
   const root = path.join(base, 'project')
@@ -242,7 +242,7 @@ function releaseFixture(t) {
   })
   fs.writeFileSync(path.join(root, 'pnpm-lock.yaml'), LOCKFILE)
   fs.writeFileSync(path.join(root, 'src', 'client.js'), `const PLUGIN_VERSION = "${CURRENT_VERSION}";\nexport {}\n`)
-  fs.writeFileSync(path.join(root, 'src', 'index.js'), 'export {}\n')
+  if (!omitIndex) fs.writeFileSync(path.join(root, 'src', 'index.js'), 'export {}\n')
   fs.writeFileSync(path.join(root, 'cordis.patch.yml'), '- insert:\n    - id: release-fixture\n')
   fs.writeFileSync(
     path.join(root, 'README.md'),
@@ -256,10 +256,7 @@ function releaseFixture(t) {
   fs.copyFileSync(RELEASE_CLI, path.join(root, 'bin', 'release.mjs'))
   fs.copyFileSync(path.join(sourceBin, 'lib', 'profile-pin.mjs'), path.join(root, 'bin', 'lib', 'profile-pin.mjs'))
   fs.copyFileSync(path.join(sourceBin, 'lib', 'install-profile.mjs'), path.join(root, 'bin', 'lib', 'install-profile.mjs'))
-  writeExecutable(
-    path.join(root, 'bin', 'asr-bridge.py'),
-    '#!/usr/bin/env python3\nimport json\nimport sys\nsys.stdin.readline()\nprint(json.dumps({"ok": False, "error": "fixture"}))\n',
-  )
+  fs.writeFileSync(path.join(root, 'bin', 'install.mjs'), 'export {}\n')
 
   const env = isolatedEnv(base)
   if (npmCli !== undefined) installNpmAndGhFixtures(binDir, env, npmCli)
@@ -282,7 +279,7 @@ for (const tool of ['pnpm', 'git', 'tar']) {
 }
 const dryRunSkip = dryRunMissing.length > 0 ? `missing ${dryRunMissing.join(', ')}` : false
 
-test('release dry-run restores every version file and removes its artifact', { skip: dryRunSkip, timeout: 30_000 }, (t) => {
+test('release dry-run checks the package without ASR and restores the fixture', { skip: dryRunSkip, timeout: 30_000 }, (t) => {
   const fixture = releaseFixture(t)
   const before = snapshotTree(fixture.root)
   const npmProbe = spawnSync(
@@ -306,6 +303,8 @@ test('release dry-run restores every version file and removes its artifact', { s
   assert.match(output, /pnpm-lock\.yaml is current with package\.json 1\.6\.2/)
   assert.match(output, /package\.json 1\.6\.2 → 9\.9\.9/)
   assert.match(output, /client\.js PLUGIN_VERSION 1\.6\.2 → 9\.9\.9/)
+  assert.match(output, /files, no dev artifacts/)
+  assert.match(output, /every packaged file is world-readable/)
   assert.match(output, /tarball ready: dsh-plugin-wechat-9\.9\.9\.tgz/)
   assert.deepEqual(snapshotTree(fixture.root), before)
   assert.equal(git(fixture.root, fixture.env, ['status', '--porcelain']), '')
@@ -313,4 +312,21 @@ test('release dry-run restores every version file and removes its artifact', { s
     fs.readdirSync(fixture.root).filter((name) => name.endsWith('.tgz')),
     [],
   )
+})
+
+test('release dry-run rejects a package missing the entry point and restores the fixture', { skip: dryRunSkip, timeout: 30_000 }, (t) => {
+  const fixture = releaseFixture(t, { omitIndex: true })
+  const before = snapshotTree(fixture.root)
+  const result = spawnSync(process.execPath, [path.join(fixture.root, 'bin', 'release.mjs'), NEXT_VERSION, '--dry-run'], {
+    cwd: fixture.root,
+    env: fixture.env,
+    encoding: 'utf8',
+    timeout: 25_000,
+    windowsHide: true,
+  })
+  const output = `${result.stdout ?? ''}${result.stderr ?? ''}`
+
+  assert.equal(result.status, 1, output)
+  assert.match(output, /the tarball is missing package\/src\/index\.js/)
+  assert.deepEqual(snapshotTree(fixture.root), before)
 })

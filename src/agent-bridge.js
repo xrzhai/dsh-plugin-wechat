@@ -19,7 +19,6 @@
  *    instead of opening a fresh one.
  * @module dsh-weixin/agent-bridge
  */
-import { createHash } from 'node:crypto'
 import { readAssistantReply, readSettledTurns, describePending } from './session-reader.js'
 import { CATALOG } from './i18n.js'
 import { redactSecrets } from './credentials.js'
@@ -100,20 +99,6 @@ export function sessionIdFor(conversationId, accountId) {
 }
 
 /**
- * Recognize `/steer <instruction>` and return the instruction, or undefined
- * when the text is not a steer command.
- *
- * @param {string} text
- * @returns {string | undefined}
- */
-export function parseSteerCommand(text) {
-  const match = /^\s*\/steer(?:\s+([\s\S]+))?\s*$/.exec(String(text ?? ''))
-  if (match === null) return undefined
-  const instruction = (match[1] ?? '').trim()
-  return instruction === '' ? undefined : instruction
-}
-
-/**
  * @typedef {Object} AgentBridgeOptions
  * @property {any} ctx            Cordis context of the plugin.
  * @property {string} [cwd]       Working directory the agent operates in.
@@ -128,15 +113,6 @@ export function parseSteerCommand(text) {
  * @property {number} [pollMs]           Session-log polling interval.
  * @property {SessionLines} [lines]      Session-line index. Defaults to the
  *   on-disk store, so a bridge built without one still supports `/new`.
- * @property {(entry: { kind: 'tool/call' | 'tool/result', accountId: string,
- *   conversationId: string, sessionId: string, senderId?: string, tool?: string,
- *   callId?: string, args?: unknown, ok?: boolean, aborted?: boolean,
- *   durationMs?: number, at: number }) => void} [onToolAudit] Called once per
- *   tool event observed during a turn. The plugin wires this to the on-disk
- *   audit log; tests use it to assert what a turn would have recorded. Absent
- *   means "no audit", which is the default so a bare bridge writes nothing.
- *   An `ok:false, aborted:true` result is emitted by the bridge itself for a
- *   call the host never finished because `/cancel` interrupted the turn.
  */
 
 export class AgentBridge {
@@ -177,27 +153,6 @@ export class AgentBridge {
     // Session lines: which of a conversation's sessions the next message goes
     // to. Injectable so tests do not touch the operator's real state root.
     this.lines = options.lines ?? new SessionLines({ warn: (message) => this.errLog(message) })
-    // Tool audit sink. The bridge owns the event stream (it is the only place
-    // that polls the session log), so it is the only place that can say which
-    // tool ran; where the lines go is the caller's decision.
-    this.onToolAudit = options.onToolAudit
-    // ⑥ Background budget: the caller decides whether a background model call
-    // may run right now, and learns when one actually started. `summarize` is
-    // the single door every background job goes through, so the gate lives
-    // here instead of in six call sites.
-    this.allowBackground = options.allowBackground
-    this.onBackgroundCall = options.onBackgroundCall
-    // 用量账本：每一次真正跑完的模型回合都从这两个入口（deliver / summarize）
-    // 报一次字符数。token 由调用方折算 —— 桥知道「说了什么、回了什么」，不知道
-    // 真实 usage（宿主不给），所以这里只提供素材，不下结论。
-    this.onUsage = options.onUsage
-    // C15: fired for every tool/call the audit scan sees, with the conversation
-    // attached, so the caller can warn the owner in WeChat without parsing the
-    // audit log. Separate from onToolAudit because it must run even when the
-    // audit log is turned off.
-    this.onToolCall = options.onToolCall
-    // C20: the conversation's own route, when the operator pinned one.
-    this.chatRoute = options.chatRoute
     this.onSpontaneousReply = options.onSpontaneousReply
     this.spontaneousPollMs =
       Number.isFinite(options.spontaneousPollMs) && options.spontaneousPollMs > 0
@@ -220,7 +175,7 @@ export class AgentBridge {
         const record = this.sessions.get(agent?.session?.id)
         if (!record || record.agent !== agent) return undefined
         return { accountId: record.accountId, conversationId: record.conversationId,
-          senderId: record.auditMeta?.senderId, isSideSession: record.isSideSession || record.dispatchSenderMixed === true }
+          senderId: record.turnSource?.senderId, isSideSession: record.dispatchSenderMixed === true }
       },
       notify: options.onDispatchReply,
       warn: this.errLog,
@@ -296,14 +251,11 @@ export class AgentBridge {
       ...statusContext,
       cancelRunningTurn: () => this.#cancelRunningTurn(key, conversationId, accountId),
       compactSession: (arg) => this.#compactSession(conversationId, accountId, arg),
-      executeHostCommand: (raw, name) => this.#executeHostCommand(conversationId, accountId, raw, name),
     })
     // `undefined` means the command existed but had nothing to say (`/是` with no
     // pending question): the caller must treat the message as ordinary chat.
     if (reply === undefined) return undefined
-    // /summary resolves through a side session and answers asynchronously; the
-    // caller that awaits command replies handles the promise, and no async
-    // command can be /clear, so the sync bookkeeping below stays untouched.
+    // Some command handlers return a promise.
     if (reply instanceof Promise) return reply
     // `/clear` orphans the line that was active: its session id is no longer
     // in the list and the fresh line has a different id, so the old in-memory
@@ -398,25 +350,6 @@ export class AgentBridge {
     return '当前环境暂时不能手动整理前文，请稍后再试。'
   }
 
-  async #executeHostCommand(conversationId, accountId, raw, name) {
-    try {
-      const commands = this.ctx.get('commands')
-      if (commands && typeof commands.execute === 'function') {
-        const record = await this.attach(conversationId, accountId)
-        if (!record.busy) {
-          const out = await commands.execute(record.agent, raw, [], AbortSignal.timeout(60_000))
-          if (out?.result?.text) {
-            record.lastDeliveredSeq = this.#lastSeq(record.agent)
-            return out.result.text
-          }
-        }
-      }
-    } catch (error) {
-      this.errLog(`host command /${name} failed: ${String(error)}`)
-    }
-    return `未知指令：/${name}（发送 /help 查看可用指令）`
-  }
-
   /**
    * Session lines recorded for a conversation, for the settings card.
    * @param {string} conversationId
@@ -472,16 +405,9 @@ export class AgentBridge {
    * only inside a DSH profile; a profile showing a different shape degrades to
    * running without the listener rather than failing to load.
    *
-   * @param {{ provider: string, model: string }} [routeOverride] run this
-   *   session on a different provider/model — what the background model setting
-   *   uses, so background summarising cannot spend the conversation's model.
    */
-  async #setup(routeOverride) {
-    // C20: the caller's route (a side session's own model) wins; otherwise the
-    // conversation route this plugin was configured with; otherwise the host's
-    // default. `chatRoute()` returns undefined when nothing is configured, so a
-    // deployment that never touched the setting behaves exactly as before.
-    const route = routeOverride ?? this.chatRoute?.() ?? (await this.#route())
+  async #setup() {
+    const route = await this.#route()
     const agentOptions =
       route === undefined
         ? undefined
@@ -543,22 +469,16 @@ export class AgentBridge {
    *
    * @param {string} conversationId
    * @param {string} [accountId] owning bot account; bare key when absent
-   * @param {{ sessionId?: string, sideMeta?: { parentSession?: string, origin?: string } }} [options]
-   *   `sessionId` attaches an EXPLICIT session instead of the conversation's
-   *   active line (the scheduled subscription side session); `sideMeta` adds
-   *   header-admitted meta (parentSession/origin) so the side session files
-   *   under its conversation instead of the top level.
    */
-  async attach(conversationId, accountId, options = {}) {
-    const isSide = Boolean(options.sessionId || options.sideMeta)
-    const sessionId = options.sessionId ?? this.#activeSessionId(conversationId, accountId)
+  async attach(conversationId, accountId) {
+    const sessionId = this.#activeSessionId(conversationId, accountId)
     const existing = this.sessions.get(sessionId)
     if (existing !== undefined) {
-      if (!isSide && conversationId) {
+      if (conversationId) {
         existing.conversationId = conversationId
         if (accountId !== undefined) existing.accountId = accountId
       }
-      if (!isSide) this.sessionDispatcher.mount(existing.agent)
+      this.sessionDispatcher.mount(existing.agent)
       return existing
     }
 
@@ -570,26 +490,26 @@ export class AgentBridge {
     const inflight = this.attachPromises.get(sessionId)
     if (inflight !== undefined) return inflight
 
-    const creation = this.#attachNew(sessionId, options.sideMeta, options.route)
+    const creation = this.#attachNew(sessionId)
     this.attachPromises.set(sessionId, creation)
     try {
       const record = await creation
-      if (!isSide && conversationId) {
+      if (conversationId) {
         record.conversationId = conversationId
         if (accountId !== undefined) record.accountId = accountId
       }
-      if (!isSide) this.sessionDispatcher.mount(record.agent)
+      this.sessionDispatcher.mount(record.agent)
       return record
     } finally {
       this.attachPromises.delete(sessionId)
     }
   }
 
-  async #attachNew(sessionId, sideMeta, route) {
+  async #attachNew(sessionId) {
     const agents = this.#agents()
     if (agents === undefined) throw new Error('the agents service is unavailable')
 
-    const { agentOptions, setup } = await this.#setup(route)
+    const { agentOptions, setup } = await this.#setup()
     /** @type {{ agent: any, dispose: () => Promise<void> }} */
     let handle
     /** Created here rather than adopted, so {@link #create} already filed it. */
@@ -606,11 +526,11 @@ export class AgentBridge {
           ...(agentOptions === undefined ? {} : { agentOptions }),
         })
       } catch {
-        handle = await this.#create(sessionId, setup, agentOptions, sideMeta)
+        handle = await this.#create(sessionId, setup, agentOptions)
         created = true
       }
     } else {
-      handle = await this.#create(sessionId, setup, agentOptions, sideMeta)
+      handle = await this.#create(sessionId, setup, agentOptions)
       created = true
     }
 
@@ -646,20 +566,14 @@ export class AgentBridge {
     // `cancelled` is set by `/cancel` for the duration of one turn: it tells
     // the reply wait that the abort it will observe is wanted, so it must not
     // be reported as a model failure. Cleared when the turn settles.
-    // `auditSeq` is the last event seq already audited, so a poll that sees the
-    // same tool call twice does not write it twice. `auditCalls` pairs a
-    // tool/result back to the tool/call that started it, for the duration.
     const record = {
       agent: handle.agent,
       dispose: handle.dispose,
       busy: false,
       queue: [],
       cancelled: false,
-      auditSeq: -1,
-      auditCalls: new Map(),
       lastDeliveredSeq: this.#lastSeq(handle.agent),
       spontaneousSending: false,
-      isSideSession: Boolean(sideMeta),
     }
     this.sessions.set(sessionId, record)
     // Resume can resurrect a session this plugin never filed (created by an
@@ -670,7 +584,7 @@ export class AgentBridge {
     return record
   }
 
-  async #create(sessionId, setup, agentOptions, sideMeta) {
+  async #create(sessionId, setup, agentOptions) {
     const agents = this.#agents()
     if (typeof agents.create !== 'function') throw new Error('the agents service cannot create sessions')
     // The session's cwd must equal the Workspace path byte for byte, because
@@ -690,9 +604,6 @@ export class AgentBridge {
       // one would fail validation ("header origin must be \"subagent\"").
       meta: {
         ...(cwd === undefined ? {} : { cwd }),
-        // Side sessions (scheduled subscriptions) file under their conversation:
-        // origin 'subagent' + a parent is the only admitted child shape.
-        ...(sideMeta === undefined ? {} : sideMeta),
       },
       setup,
       signal: AbortSignal.timeout(this.createTimeoutMs),
@@ -755,17 +666,13 @@ export class AgentBridge {
     const mode = busyMessageMode === 'steer' ? 'steer' : 'queue'
 
     if (record.busy) {
-      // `/steer <instruction>` is always an injection, whatever the mode: the
-      // command exists precisely to reach a turn that is already running.
-      const steerCommand = parseSteerCommand(text)
-      if (mode === 'steer' || steerCommand !== undefined) {
+      if (mode === 'steer') {
         // A second group sender must not inherit the first sender's dispatcher
         // permission by steering their still-running controller turn.
-        if (senderId !== record.auditMeta?.senderId) record.dispatchSenderMixed = true
-        const payload = steerCommand !== undefined ? steerCommand : text
+        if (senderId !== record.turnSource?.senderId) record.dispatchSenderMixed = true
         const createUserMessage = await loadCreateUserMessage()
         record.agent.steer?.(
-          createUserMessage({ content: [{ type: 'text', text: payload }], source: { kind: 'user' } }),
+          createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }),
         )
         // The steered turn keeps running; the caller's awaitReply is for a
         // turn this delivery did not start, so return immediately with a
@@ -780,7 +687,7 @@ export class AgentBridge {
     try {
       const createUserMessage = await loadCreateUserMessage()
       const before = this.#lastSeq(record.agent)
-      this.#beginAuditTurn(record, { accountId, conversationId, senderId })
+      this.#beginTurn(record, { accountId, conversationId, senderId })
       // followup() wakes the driver for a turn; inject() would only queue
       // context, and steer() would wait for the next step boundary.
       record.agent.followup(
@@ -788,13 +695,7 @@ export class AgentBridge {
       )
       const settled = await this.#awaitReply({ record, before, onProgress, signal, onLateReply })
       record.lastDeliveredSeq = Math.max(record.lastDeliveredSeq ?? -1, this.#lastSeq(record.agent))
-      this.onUsage?.({
-        kind: 'chat',
-        accountId,
-        conversationId,
-        prompt: text,
-        reply: typeof settled?.text === 'string' ? settled.text : '',
-      })
+
       return settled
     } finally {
       record.lastDeliveredSeq = Math.max(record.lastDeliveredSeq ?? -1, this.#lastSeq(record.agent))
@@ -803,70 +704,6 @@ export class AgentBridge {
       // turn's reply entirely.
       record.cancelled = false
       await this.#drainQueue({ record, conversationId, onProgress, signal })
-    }
-  }
-
-  /**
-   * Run a scheduled prompt in a separate host session and return its reply.
-   * The conversation and selected route determine the reusable side session.
-   * Delivery belongs to the caller; this method never sends to WeChat.
-   * Returns undefined while that side session is busy.
-   *
-   * @param {object} params
-   * @param {string} params.conversationId
-   * @param {string} [params.accountId]
-   * @param {string} params.prompt
-   * @returns {Promise<{ text: string, sessionId: string } | undefined>}
-   */
-  async summarize({ conversationId, accountId, prompt, sessionPrefix = 'wx-mem-', route }) {
-    // ⑥ 预算闸门先于一切：被挡下的调用不 attach、不排队、不计费。
-    const verdict = this.allowBackground?.()
-    if (verdict?.allowed === false) {
-      this.log?.(`background model call skipped: ${verdict.reason ?? 'background budget exhausted'}`)
-      return undefined
-    }
-    this.onBackgroundCall?.()
-    const key = scopedLineKey(accountId, conversationId)
-    // The route is part of the identity: a session created under one model
-    // cannot be re-pointed at another, so changing the background model has to
-    // start a fresh side session instead of quietly reusing the old one.
-    const identity = route === undefined ? key : `${key}|${route.provider}/${route.model}`
-    const digest = createHash('sha1').update(identity).digest('hex').slice(0, 16)
-    const sessionId = `${sessionPrefix}${digest}`
-    const record = await this.attach(conversationId, accountId, {
-      sessionId,
-      ...(route === undefined ? {} : { route }),
-      sideMeta: {
-        origin: 'subagent',
-        parentSession: this.#activeSessionId(conversationId, accountId),
-      },
-    })
-    if (record.busy) {
-      this.log?.(`background call skipped: side session ${sessionId} is busy`)
-      return undefined
-    }
-    record.busy = true
-    try {
-      const createUserMessage = await loadCreateUserMessage()
-      const before = this.#lastSeq(record.agent)
-      this.#beginAuditTurn(record, { accountId, conversationId })
-      record.agent.followup(
-        createUserMessage({ content: [{ type: 'text', text: prompt }], source: { kind: 'user' } }),
-      )
-      // No onProgress / onLateReply: a summary must stay silent toward WeChat.
-      const settled = await this.#awaitReply({ record, before })
-      this.onUsage?.({
-        kind: 'summarize',
-        accountId,
-        conversationId,
-        prompt,
-        reply: typeof settled?.text === 'string' ? settled.text : '',
-        route,
-      })
-      return settled
-    } finally {
-      record.busy = false
-      record.cancelled = false
     }
   }
 
@@ -915,7 +752,7 @@ export class AgentBridge {
     if (entry.accountId !== undefined) record.accountId = entry.accountId
     if (entry.onSpontaneousReply !== undefined) record.onSpontaneousReply = entry.onSpontaneousReply
     const before = this.#lastSeq(record.agent)
-    this.#beginAuditTurn(record, {
+    this.#beginTurn(record, {
       accountId: entry.accountId,
       conversationId: entry.conversationId ?? conversationId,
       senderId: entry.senderId,
@@ -951,142 +788,9 @@ export class AgentBridge {
     }
   }
 
-  /**
-   * Start a fresh audit cursor for a turn that is about to run.
-   *
-   * The cursor is the last event seq already audited, so a poll that sees the
-   * same tool call twice writes one line, and a turn never re-audits the
-   * conversation's earlier history. The meta rides on the record because the
-   * turn is serialized (one busy lock per line) — a queued turn overwrites it
-   * when it starts, which is exactly when the previous turn has finished.
-   *
-   * @param {any} record
-   * @param {{ accountId?: string, conversationId?: string, senderId?: string }} meta
-   */
-  #beginAuditTurn(record, meta) {
-    record.auditSeq = -1
-    record.auditCalls = new Map()
-    record.auditMeta = meta
+  #beginTurn(record, meta) {
+    record.turnSource = meta
     record.dispatchSenderMixed = record.agent?.status === 'running' || !meta.senderId
-  }
-
-  /**
-   * Close the calls a cancelled turn never finished.
-   *
-   * Measured on a real account (2026-10-23 23:29): `/cancel` during a
-   * `sleep 120` left `tool/call bash` in the audit with no `tool/result` ever
-   * following it — the turn was aborted, so the host had nothing to report, and
-   * the bridge returned before its next poll could have seen one. An
-   * unterminated call is the worst line for the file to end on, because "did
-   * that destructive command actually run?" is exactly what the audit exists to
-   * answer. So the interruption is recorded, as `ok:false, aborted:true` with
-   * the time the call had been running.
-   *
-   * @param {any} record
-   */
-  #auditAbandoned(record) {
-    const sink = this.onToolAudit
-    if (sink === undefined || record.auditCalls.size === 0) return
-    const meta = { ...(record.auditMeta ?? {}), sessionId: record.agent?.session?.id ?? '' }
-    const now = Date.now()
-    for (const [callId, call] of record.auditCalls) {
-      try {
-        sink({
-          kind: 'tool/result',
-          at: now,
-          ...meta,
-          tool: call.tool,
-          callId,
-          ok: false,
-          aborted: true,
-          durationMs: Math.max(0, now - call.at),
-        })
-      } catch (failure) {
-        this.errLog(`tool audit sink failed: ${String(failure)}`)
-      }
-    }
-    // Cleared so a stale entry cannot fabricate a result for an unrelated later
-    // call that happens to reuse the id.
-    record.auditCalls.clear()
-  }
-
-  /**
-   * Turn this poll's new events into audit lines.
-   *
-   * Called before the reply is read, so a fast turn that settles in the same
-   * poll still gets its tools audited. One line per `tool/call` (tool, args,
-   * who, when) and one per `tool/result` (ok, duration) joined by `callId`:
-   * two lines rather than one mutable record keeps the file append-only.
-   *
-   * A throwing sink must never fail the turn — the audit is observation.
-   *
-   * @param {any} record
-   * @param {readonly any[]} events snapshotEvents() of the current poll
-   * @param {number} before last seq before the turn started
-   */
-  #auditEvents(record, events, before) {
-    const sink = this.onToolAudit
-    if (sink === undefined) return
-    // The session id is read at emit time, not at turn start: `/new` can switch
-    // the line's active session while a message waits in the queue, and the
-    // audit must name the session the tool actually ran in.
-    const meta = { ...(record.auditMeta ?? {}), sessionId: record.agent?.session?.id ?? '' }
-    for (const event of events ?? []) {
-      if (typeof event?.seq !== 'number') continue
-      if (event.seq <= before || event.seq <= record.auditSeq) continue
-      try {
-        if (event.type === 'tool/call') {
-          const callId = event.data?.callId
-          const tool = typeof event.data?.name === 'string' ? event.data.name : 'tool'
-          if (typeof callId === 'string') {
-            record.auditCalls.set(callId, { tool, at: typeof event.time === 'number' ? event.time : Date.now() })
-          }
-          sink({
-            kind: 'tool/call',
-            at: Date.now(),
-            ...meta,
-            tool,
-            ...(typeof callId === 'string' ? { callId } : {}),
-            args: event.data?.arguments,
-          })
-          // C15: the same event feeds the "dangerous tool" notice. It rides the
-          // audit scan because that is the only place the plugin ever sees a
-          // tool call at all; a throwing listener must not break the turn.
-          if (this.onToolCall !== undefined) {
-            try {
-              this.onToolCall({
-                ...meta,
-                conversationId: meta.conversationId ?? record.conversationId ?? '',
-                accountId: meta.accountId ?? record.accountId,
-                tool,
-                ...(typeof callId === 'string' ? { callId } : {}),
-                args: event.data?.arguments,
-              })
-            } catch (failure) {
-              this.errLog(`tool call listener failed: ${String(failure)}`)
-            }
-          }
-        } else if (event.type === 'tool/result') {
-          const callId = event.data?.message?.source?.callId
-          const known = typeof callId === 'string' ? record.auditCalls.get(callId) : undefined
-          const error = event.data?.message?.source?.error ?? event.data?.error
-          const durationMs = known !== undefined && typeof event.time === 'number' ? event.time - known.at : undefined
-          sink({
-            kind: 'tool/result',
-            at: Date.now(),
-            ...meta,
-            ...(known === undefined ? {} : { tool: known.tool }),
-            ...(typeof callId === 'string' ? { callId } : {}),
-            ok: error === undefined,
-            ...(durationMs === undefined ? {} : { durationMs }),
-          })
-          if (typeof callId === 'string') record.auditCalls.delete(callId)
-        }
-      } catch (failure) {
-        this.errLog(`tool audit sink failed: ${String(failure)}`)
-      }
-      record.auditSeq = event.seq
-    }
   }
 
   #lastSeq(agent) {
@@ -1154,12 +858,12 @@ export class AgentBridge {
         // A cancelled turn ends with whatever the host already wrote (the
         // aborted tool's own result may be there) and never with an assistant
         // message, so this is the last poll that will ever look at its events.
-        this.#auditEvents(record, record.agent.session?.snapshotEvents?.() ?? [], before)
-        this.#auditAbandoned(record)
+
+
         return { text: '', sessionId, cancelled: true }
       }
       const events = record.agent.session?.snapshotEvents?.() ?? []
-      this.#auditEvents(record, events, before)
+
       const reply = readAssistantReply({ events, afterSeq: before })
       if (reply.turnReason !== undefined && reply.turnReason !== 'completed') {
         if (reply.turnReason === 'error') logTurnError(this.errLog, sessionId, reply)
@@ -1221,12 +925,12 @@ export class AgentBridge {
       // A cancelled turn is over; the late wait must not keep polling for a
       // reply the user explicitly asked not to receive.
       if (record.cancelled === true) {
-        this.#auditEvents(record, record.agent.session?.snapshotEvents?.() ?? [], before)
-        this.#auditAbandoned(record)
+
+
         return { text: '', sessionId, late: true }
       }
       const events = record.agent.session?.snapshotEvents?.() ?? []
-      this.#auditEvents(record, events, before)
+
       const reply = readAssistantReply({ events, afterSeq: before })
       if (reply.turnReason !== undefined && reply.turnReason !== 'completed') {
         const status = reply.turnReason
@@ -1279,7 +983,7 @@ export class AgentBridge {
       if (events.length === 0) continue
 
       const afterSeq = record.lastDeliveredSeq ?? -1
-      this.#auditEvents(record, events, afterSeq)
+
       const turns = readSettledTurns({ events, afterSeq })
       for (const turn of turns) {
         if (turn.turnReason === 'error') logTurnError(this.errLog, sessionId, turn)

@@ -1,127 +1,74 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { createChannel } from '../src/channel.js'
-import {
-  OutboundMediaError,
-  mediaFallbackParamsAfterVoiceError,
-} from '../src/media/outbound.js'
 import { ILinkTransport } from '../src/transport/ilink.js'
 
-function fixture({ voice, media }) {
-  const logs = []
+function fixture(sendOutboundMedia) {
+  const pacerCalls = []
   const transport = new ILinkTransport({
     accountId: 'synthetic-media-account',
     baseUrl: 'https://api.invalid',
     token: ['synthetic', 'access', 'token'].join('-'),
-    log: (line) => logs.push(line),
+    cdnBaseUrl: 'https://cdn.invalid',
     pacer: {
-      acquire: async () => {},
-      noteSuccess: () => {},
-      noteFailure: () => {},
+      acquire: async () => pacerCalls.push('acquire'),
+      noteSuccess: () => pacerCalls.push('success'),
+      noteFailure: () => pacerCalls.push('failure'),
     },
     outbound: {
-      mediaSendOptions: () => ({}),
-      mediaFallbackParamsAfterVoiceError,
-      sendOutboundVoice: voice,
-      sendOutboundMedia: media,
+      mediaSendOptions: (params) => params,
+      sendOutboundMedia,
     },
   })
-  return { logs, transport }
+  return { transport, pacerCalls }
 }
 
-test('channel text reaches the real transport as the voice caption', async () => {
-  const voiceCalls = []
-  const mediaCalls = []
-  const f = fixture({
-    voice: async (params) => {
-      voiceCalls.push(params)
-      return { kind: 'voice', ret: 0 }
-    },
-    media: async (params) => { mediaCalls.push(params) },
+test('channel sends audio as an ordinary file and preserves its caption and routing', async () => {
+  const calls = []
+  const f = fixture(async (params) => {
+    calls.push(params)
+    return { kind: 'file', ret: 0 }
   })
-
   const result = await createChannel(f.transport).sendMedia({
     filePath: 'synthetic.wav',
     conversationId: 'synthetic-peer',
     text: 'caption',
+    contextToken: 'synthetic-context',
   })
 
-  assert.equal(voiceCalls.length, 1)
-  assert.equal(voiceCalls[0].text, 'caption')
-  assert.equal(mediaCalls.length, 0)
-  assert.equal(result.kind, 'voice')
+  assert.equal(result.kind, 'file')
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].filePath, 'synthetic.wav')
+  assert.equal(calls[0].to, 'synthetic-peer')
+  assert.equal(calls[0].text, 'caption')
+  assert.equal(calls[0].contextToken, 'synthetic-context')
+  assert.equal(calls[0].cdnBaseUrl, 'https://cdn.invalid')
+  assert.equal(calls[0].opts.accountId, 'synthetic-media-account')
+  assert.deepEqual(f.pacerCalls, ['acquire', 'success'])
 })
 
-test('failure before the caption is sent falls back with the caption preserved', async () => {
-  const mediaCalls = []
-  const f = fixture({
-    voice: async () => {
-      throw new OutboundMediaError('transcode failed', 'send-failed', {
-        captionState: 'not-sent',
-        voiceState: 'not-attempted',
-      })
-    },
-    media: async (params) => {
-      mediaCalls.push(params)
-      return { kind: 'file', ret: 0 }
-    },
-  })
-
+test('a direct caption overrides text for a regular media attachment', async () => {
+  const calls = []
+  const f = fixture(async (params) => { calls.push(params); return { kind: 'file' } })
   await f.transport.sendMedia({
+    filePath: 'synthetic.mp3',
+    conversationId: 'synthetic-peer',
+    text: 'older text',
+    caption: 'chosen caption',
+  })
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].text, 'chosen caption')
+  assert.deepEqual(f.pacerCalls, ['acquire', 'success'])
+})
+
+test('a failed media send is reported once without an automatic duplicate retry', async () => {
+  let calls = 0
+  const f = fixture(async () => { calls += 1; throw new Error('synthetic upload failure') })
+  await assert.rejects(f.transport.sendMedia({
     filePath: 'synthetic.wav',
     conversationId: 'synthetic-peer',
     caption: 'caption',
-  })
-
-  assert.equal(mediaCalls.length, 1)
-  assert.equal(mediaCalls[0].text, 'caption')
-})
-
-test('failure after the caption was sent falls back without repeating it', async () => {
-  const mediaCalls = []
-  const f = fixture({
-    voice: async () => {
-      throw new OutboundMediaError('voice rejected', 'send-failed', {
-        captionState: 'sent',
-        voiceState: 'rejected',
-      })
-    },
-    media: async (params) => {
-      mediaCalls.push(params)
-      return { kind: 'file', ret: 0 }
-    },
-  })
-
-  await f.transport.sendMedia({
-    filePath: 'synthetic.wav',
-    conversationId: 'synthetic-peer',
-    caption: 'caption',
-  })
-
-  assert.equal(mediaCalls.length, 1)
-  assert.equal(mediaCalls[0].text, '')
-})
-
-test('an uncertain network outcome does not trigger a duplicate-prone file fallback', async () => {
-  const mediaCalls = []
-  const f = fixture({
-    voice: async () => {
-      throw new OutboundMediaError('request timed out', 'send-failed', {
-        captionState: 'sent',
-        voiceState: 'unknown',
-      })
-    },
-    media: async (params) => { mediaCalls.push(params) },
-  })
-
-  await assert.rejects(
-    f.transport.sendMedia({
-      filePath: 'synthetic.wav',
-      conversationId: 'synthetic-peer',
-      caption: 'caption',
-    }),
-    /request timed out/,
-  )
-  assert.equal(mediaCalls.length, 0)
-  assert.match(f.logs.join('\n'), /outcome is uncertain.*avoid duplicate delivery/)
+  }), /synthetic upload failure/)
+  assert.equal(calls, 1)
+  assert.deepEqual(f.pacerCalls, ['acquire', 'failure'])
 })

@@ -41,19 +41,16 @@ function fixture(t, { enabled = true, registry } = {}) {
 test('attach mounts only main controllers, deduplicates tools and fences other agents', async (t) => {
   const f = fixture(t)
   const main = await f.bridge.attach('chat', 'account')
-  main.auditMeta = { senderId: 'owner' }
+  main.turnSource = { senderId: 'owner' }
   const tools = f.registrations.get(main.agent.session.id)
   assert.deepEqual([...tools.keys()], names)
   assert.equal(await f.bridge.attach('chat', 'account'), main)
   assert.equal(tools.size, 3)
-  const side = await f.bridge.attach('chat', 'account', { sessionId: 'wx-mem-fixture', sideMeta: { origin: 'subagent', parentSession: main.agent.session.id } })
-  assert.equal(f.registrations.get(side.agent.session.id).size, 0)
   const other = await f.bridge.attach('other-chat', 'other-account')
   const tool = tools.get('session_list')
   assert.equal(tool.options.when({ agent: main.agent }), true)
   assert.equal(tool.options.when({ agent: other.agent }), false)
   await assert.rejects(tool.definition.execute({}, { agent: other.agent }), /original live Weixin controller/)
-  await assert.rejects(tool.definition.execute({}, { agent: side.agent }), /original live Weixin controller/)
   f.bridge.sessionDispatcher.host.list = async () => []
   assert.deepEqual(await tool.definition.execute({}, { agent: main.agent }), { sessions: [], truncated: false })
   f.policy.sessionDispatcherEnabled = false
@@ -64,7 +61,7 @@ test('attach mounts only main controllers, deduplicates tools and fences other a
   await assert.rejects(tool.definition.execute({}, { agent: main.agent }), /not authorized/)
   await f.bridge.dispose()
   assert.equal(tools.size, 0)
-  assert.equal(f.disposed.length, 3)
+  assert.equal(f.disposed.length, 2)
   assert.equal(f.bridge.sessionDispatcher.mounts.size, 0)
 })
 
@@ -108,7 +105,7 @@ test('late opt-in mounts tools on existing controller without recreating session
 test('dispatcher tools and ordered spontaneous replies coexist on the same controller', async (t) => {
   const f = fixture(t)
   const main = await f.bridge.attach('chat', 'account')
-  main.auditMeta = { senderId: 'owner' }
+  main.turnSource = { senderId: 'owner' }
   const tools = f.registrations.get(main.agent.session.id)
   assert.deepEqual([...tools.keys()], names)
   f.bridge.sessionDispatcher.host.list = async () => []
@@ -181,12 +178,12 @@ test('mixed-sender steering fences controller tools for the entire running turn'
   f.policy.sessionDispatcherSenders.push('other-owner')
   const main = await f.bridge.attach('group', 'account')
   main.busy = true
-  main.auditMeta = { senderId: 'owner' }
+  main.turnSource = { senderId: 'owner' }
   f.bridge.sessionDispatcher.host.list = async () => []
   const tool = f.registrations.get(main.agent.session.id).get('session_list').definition
   const steer = async (senderId) => {
     try {
-      await f.bridge.deliver({ conversationId: 'group', accountId: 'account', text: '/steer synthetic direction', senderId })
+      await f.bridge.deliver({ conversationId: 'group', accountId: 'account', text: 'synthetic direction', busyMessageMode: 'steer', senderId })
     } catch (error) {
       // The optional LLM package is absent in this fixture. The trust fence
       // must already be set before that lazy dependency is loaded.

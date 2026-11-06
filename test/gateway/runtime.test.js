@@ -11,9 +11,7 @@ import { ILinkTransport } from '../../src/transport/ilink.js'
 import { ConfigController } from '../../src/config-remote.js'
 import { configureWeixinStateDir, configFile, stateDir } from '../../src/state.js'
 import { lockFile } from '../../src/instance-lock.js'
-import { readReminders, writeReminders } from '../../src/message/scheduler.js'
-import { readSubscriptions, writeSubscriptions } from '../../src/message/subscriptions.js'
-import { createOutbox } from '../../src/message/outbox.js'
+import { createOutbox, FLUSH_INTERVAL_MS } from '../../src/message/outbox.js'
 import { INBOUND_NOT_ACCEPTED } from '../../src/message/inbound-pending.js'
 import { saveWeixinAccount, registerWeixinAccountId } from '../../vendor/openclaw-weixin/auth/accounts.js'
 
@@ -31,33 +29,9 @@ async function until(predicate, label) {
   }
   assert.ok(predicate(), label)
 }
-async function untilEventually(predicate, label, timeoutMs = 3_000) {
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    if (predicate()) return
-    await tick(10)
-  }
-  assert.ok(predicate(), label)
-}
-
-function seedSubscription(root, prompt) {
-  writeSubscriptions(root, {
-    seq: 1,
-    items: [{
-      id: 's1',
-      accountId: ACCOUNT,
-      conversationId: 'test-user',
-      prompt,
-      kind: 'once',
-      fireAt: Date.now() + 200,
-      createdAt: Date.now(),
-    }],
-  })
-}
-
 // Real Cordis services, persistence, apply(), AgentBridge and gateway wiring.
 // Only the external iLink boundary and host session factory are synthetic.
-function fixture(t, { enabled = false, baseEnabled = true, allowedSenders = ['test-user'], allowedChats = [], refresh, stop, beforeApply, summarize, deliver, configOverrides } = {}) {
+function fixture(t, { enabled = false, baseEnabled = true, allowedSenders = ['test-user'], allowedChats = [], refresh, stop, beforeApply, deliver, configOverrides, captureOutboxTick = false } = {}) {
   const env = Object.fromEntries(['DSH_WEIXIN_STATE_DIR', 'OPENCLAW_STATE_DIR', 'CLAWDBOT_STATE_DIR'].map((key) => [key, process.env[key]]))
   const root = fs.mkdtempSync(path.join(stateDir(), 'runtime-'))
   process.env.DSH_WEIXIN_STATE_DIR = root
@@ -71,7 +45,15 @@ function fixture(t, { enabled = false, baseEnabled = true, allowedSenders = ['te
   const sessions = []
   const sent = []
   const media = []
-  if (summarize !== undefined) t.mock.method(AgentBridge.prototype, 'summarize', summarize)
+  let outboxTick
+  if (captureOutboxTick) {
+    const originalSetInterval = globalThis.setInterval
+    t.mock.method(globalThis, 'setInterval', (callback, delay, ...args) => {
+      // The outbox starts before the lock heartbeat, which uses the same delay.
+      if (delay === FLUSH_INTERVAL_MS && outboxTick === undefined) outboxTick = callback
+      return originalSetInterval(callback, delay, ...args)
+    })
+  }
   if (deliver !== undefined) t.mock.method(AgentBridge.prototype, 'deliver', deliver)
   t.mock.method(ILinkTransport.prototype, 'refreshConfig', async function () {
     prepared.push(this)
@@ -118,7 +100,7 @@ function fixture(t, { enabled = false, baseEnabled = true, allowedSenders = ['te
   assert.equal(typeof controller.onConfigChanged, 'function')
   assert.equal(typeof login.onAccountControlChange, 'function')
   const message = (id) => ({ id, type: 'text', text: 'Hello', senderId: 'test-user', conversationId: 'test-user', contextToken: 'synthetic-context', timestamp: Date.now() })
-  return { root, ctx, controller, login, prepared, started, stopped, sessions, sent, media, dispose, message }
+  return { root, ctx, controller, login, prepared, started, stopped, sessions, sent, media, dispose, message, runOutbox: () => outboxTick() }
 }
 
 test('a recent unrelated file is not sent, while a referenced result still is', async (t) => {
@@ -195,6 +177,49 @@ test('retired away state cannot intercept private messages or be rewritten by th
   assert.ok(f.sent.every((message) => !String(message.text).includes('synthetic-away')))
   await f.dispose()
   assert.equal(fs.readFileSync(path.join(f.root, 'away.json'), 'utf8'), contents)
+})
+
+test('starting and disabling the gateway preserves inactive legacy user data', async (t) => {
+  const fireAt = Date.now() + 40
+  const files = new Map([
+    ['reminders.json', Buffer.from(JSON.stringify({ schemaVersion: 1, seq: 1, items: [{
+      id: 'r1', accountId: ACCOUNT, conversationId: 'test-user', text: 'synthetic reminder', fireAt,
+    }] }))],
+    ['subscriptions.json', Buffer.from(JSON.stringify({ schemaVersion: 1, seq: 1, items: [{
+      id: 's1', accountId: ACCOUNT, conversationId: 'test-user', prompt: 'synthetic subscription', kind: 'once', fireAt,
+    }] }))],
+    ['journal/journal-2000-01-01.jsonl', Buffer.from('{"text":"synthetic historical message"}\n')],
+    ['backups/2000-01-01/sessions.json', Buffer.from('{"synthetic":"backup"}\n')],
+    ['backups/2000-01-01/archive.bin', Buffer.from([0, 1, 127, 255])],
+  ])
+  const f = fixture(t, {
+    enabled: true,
+    beforeApply(root) {
+      for (const [relative, contents] of files) {
+        const file = path.join(root, relative)
+        fs.mkdirSync(path.dirname(file), { recursive: true })
+        fs.writeFileSync(file, contents)
+        if (relative.startsWith('journal/')) fs.utimesSync(file, new Date('2000-01-01'), new Date('2000-01-01'))
+      }
+    },
+  })
+  const assertPreserved = () => {
+    for (const [relative, contents] of files) assert.deepEqual(fs.readFileSync(path.join(f.root, relative)), contents, relative)
+  }
+  await until(() => f.started.length === 1, 'transport starts')
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  assertPreserved()
+  assert.deepEqual(f.sessions, [], 'legacy subscriptions do not start host sessions')
+  assert.deepEqual(f.sent, [], 'legacy schedules do not send messages')
+  assert.deepEqual(f.media, [])
+
+  await saveEnabled(f.controller, false)
+  assert.equal(f.started[0].testRunning, false)
+  await f.dispose()
+  assertPreserved()
+  assert.deepEqual(f.sessions, [])
+  assert.deepEqual(f.sent, [])
+  assert.deepEqual(f.media, [])
 })
 
 test('a stranger cannot enroll when the global sender allowlist is configured', async (t) => {
@@ -396,7 +421,7 @@ test('a registry failure after dedupe is reported as uncertain, not completed', 
     if (String(target) === file && ++reads === 3) throw Object.assign(new Error('synthetic read failure'), { code: 'EIO' })
     return originalStat.call(this, target, ...args)
   })
-  await assert.rejects(f.started[0].testInbound(f.message('registry-late-read-failure')), { code: 'ACCOUNT_REGISTRY_UNREADABLE' })
+  await assert.rejects(f.started[0].testInbound(f.message('registry-late-read-failure')), { name: 'RegistryReadError' })
   assert.equal(f.sessions.length, 0)
   assert.deepEqual(f.sent, [])
 })
@@ -404,52 +429,34 @@ test('a registry failure after dedupe is reported as uncertain, not completed', 
 test('an unreadable registry at startup does not start an account transport', async (t) => {
   const corrupt = '{startup-corrupt\n'
   const f = fixture(t, { enabled: true, beforeApply: (root) => fs.writeFileSync(path.join(root, 'accounts-registry.json'), corrupt) })
-  await until(() => f.login.remindersProvider !== undefined, 'runtime setup finishes')
-  await tick()
+  await f.dispose()
   assert.equal(f.started.length, 0)
   assert.equal(f.prepared.length, 0)
   assert.equal(fs.readFileSync(path.join(f.root, 'accounts-registry.json'), 'utf8'), corrupt)
 })
 
-test('corrupt registry blocks scheduled generation and reminders while a transport is live', async (t) => {
-  let summaries = 0
-  const f = fixture(t, { enabled: true, summarize: async () => { summaries += 1; return { text: 'must not send' } } })
-  await until(() => f.started.length === 1 && f.login.subscriptionScheduler !== undefined, 'runtime starts')
-  const file = path.join(f.root, 'accounts-registry.json')
-  const corrupt = '{synthetic-corrupt-registry\n'
-  fs.writeFileSync(file, corrupt)
-  f.login.remindersProvider.schedule({ accountId: ACCOUNT, conversationId: 'test-user', text: 'blocked reminder', fireAt: Date.now() - 1 })
-  f.login.subscriptionScheduler.schedule({ accountId: ACCOUNT, conversationId: 'test-user', prompt: 'blocked subscription', when: { ok: true, kind: 'once', fireAt: Date.now() - 1 } })
-  await tick()
-  await tick()
-  assert.equal(summaries, 0)
-  assert.deepEqual(f.sent, [])
-  assert.equal(readReminders(f.root).items.length, 1)
-  assert.equal(readSubscriptions(f.root).items.length, 1)
-  assert.equal(fs.readFileSync(file, 'utf8'), corrupt)
-})
-
 test('outbox retry waits while the authorization registry is corrupt', async (t) => {
-  const f = fixture(t, { enabled: true })
-  await until(() => f.started.length === 1 && typeof f.login.outboxFlush === 'function', 'runtime starts')
+  const f = fixture(t, { enabled: true, captureOutboxTick: true })
+  await until(() => f.started.length === 1, 'runtime starts')
   const queue = createOutbox({ stateRoot: f.root, transportFor: () => undefined })
   queue.enqueue({ accountId: ACCOUNT, conversationId: 'test-user', text: 'synthetic queued reply' })
   const file = path.join(f.root, 'accounts-registry.json')
   fs.writeFileSync(file, '{broken')
-  const blocked = await f.login.outboxFlush({ force: true })
-  assert.equal(blocked.sent, 0)
-  assert.equal(blocked.remaining, 1)
+  f.runOutbox()
+  await tick()
+  await tick()
+  assert.equal(queue.pending().length, 1)
   assert.deepEqual(f.sent, [])
   assert.equal(fs.readFileSync(file, 'utf8'), '{broken')
   fs.writeFileSync(file, '{}')
-  const restored = await f.login.outboxFlush({ force: true })
-  assert.equal(restored.sent, 1)
+  f.runOutbox()
+  await until(() => f.sent.length === 1 && queue.pending().length === 0, 'queued reply sent after registry recovery')
   assert.equal(f.sent[0].text, 'synthetic queued reply')
 })
 
 test('outbox stops between segments if registry becomes corrupt during delivery', async (t) => {
-  const f = fixture(t, { enabled: true })
-  await until(() => f.started.length === 1 && typeof f.login.outboxFlush === 'function', 'runtime starts')
+  const f = fixture(t, { enabled: true, captureOutboxTick: true })
+  await until(() => f.started.length === 1, 'runtime starts')
   const queue = createOutbox({ stateRoot: f.root, transportFor: () => undefined })
   queue.enqueue({ accountId: ACCOUNT, conversationId: 'test-user', segments: ['first', 'second'] })
   const file = path.join(f.root, 'accounts-registry.json')
@@ -458,10 +465,11 @@ test('outbox stops between segments if registry becomes corrupt during delivery'
     delivered.push(message.text)
     fs.writeFileSync(file, '{broken after first segment')
   }
-  const result = await f.login.outboxFlush({ force: true })
+  f.runOutbox()
+  await until(() => queue.pending()[0]?.nextSegment === 1, 'first segment persisted')
+  await tick()
   assert.deepEqual(delivered, ['first'])
-  assert.equal(result.sent, 0)
-  assert.equal(result.remaining, 1)
+  assert.equal(queue.pending().length, 1)
   assert.equal(queue.pending()[0].nextSegment, 1)
   assert.equal(fs.readFileSync(file, 'utf8'), '{broken after first segment')
 })
@@ -517,255 +525,6 @@ test('apply starts from saved disabled state; real save enables, disables and fe
   assert.equal(f.login.onAccountControlChange, undefined)
   assert.equal(f.login.onAccountBound, undefined)
   assert.equal(fs.existsSync(lockFile(f.root)), false)
-})
-
-test('a persisted due reminder survives missing startup transport and wakes when it becomes live', async (t) => {
-  const fireAt = Date.now() - 1
-  const f = fixture(t, {
-    beforeApply: (root) => writeReminders(root, {
-      seq: 1,
-      items: [{
-        id: 'r1',
-        accountId: ACCOUNT,
-        conversationId: 'test-user',
-        text: 'delayed startup',
-        fireAt,
-        createdAt: new Date(fireAt - 60_000).toISOString(),
-      }],
-    }),
-  })
-  await tick()
-  assert.equal(f.sent.length, 0)
-  assert.equal(readReminders(f.root).items[0].id, 'r1')
-
-  await saveEnabled(f.controller, true)
-  await until(() => f.sent.some((message) => message.text === '（提醒：delayed startup）'), 'reminder sent after transport starts')
-  await until(() => readReminders(f.root).items.length === 0, 'delivered reminder removed')
-})
-
-test('a reminder due while its account is paused is sent after resume', async (t) => {
-  const f = fixture(t, { enabled: true })
-  await until(() => f.started.length === 1, 'transport starts')
-  await f.login.pause(ACCOUNT)
-  assert.equal(f.started[0].testRunning, false)
-
-  const scheduled = f.login.remindersProvider.schedule({
-    accountId: ACCOUNT,
-    conversationId: 'test-user',
-    text: 'resume delivery',
-    fireAt: Date.now() - 1,
-  })
-  assert.equal(scheduled.id, 'r1')
-  await tick()
-  assert.equal(f.sent.length, 0)
-  assert.equal(readReminders(f.root).items[0].id, 'r1')
-
-  await f.login.resume(ACCOUNT)
-  await until(() => f.sent.some((message) => message.text === '（提醒：resume delivery）'), 'reminder sent after resume')
-  await until(() => readReminders(f.root).items.length === 0, 'resumed reminder removed')
-})
-
-test('fire entry rejects a committed pause before the transport removal callback', async (t) => {
-  let summaries = 0
-  const f = fixture(t, {
-    enabled: true,
-    summarize: async () => { summaries += 1; return { text: 'must not generate' } },
-  })
-  await until(() => f.started.length === 1 && f.login.subscriptionScheduler !== undefined, 'runtime starts')
-  const releaseControl = deferred()
-  const originalControl = f.login.onAccountControlChange
-  f.login.onAccountControlChange = async (accountId) => {
-    await releaseControl.promise
-    return originalControl?.(accountId)
-  }
-
-  await f.login.pause(ACCOUNT)
-  assert.equal(f.started[0].testRunning, true)
-  f.login.remindersProvider.schedule({
-    accountId: ACCOUNT,
-    conversationId: 'test-user',
-    text: 'paused entry',
-    fireAt: Date.now() - 1,
-  })
-  f.login.subscriptionScheduler.schedule({
-    accountId: ACCOUNT,
-    conversationId: 'test-user',
-    prompt: 'paused entry',
-    when: { ok: true, kind: 'once', fireAt: Date.now() - 1 },
-  })
-  await tick()
-  await tick()
-  assert.deepEqual(f.sent, [])
-  assert.equal(summaries, 0)
-  assert.equal(readReminders(f.root).items.length, 1)
-  assert.equal(readSubscriptions(f.root).items.length, 1)
-
-  releaseControl.resolve()
-  await until(() => f.started[0].testRunning === false, 'paused transport stops after callback release')
-  f.login.onAccountControlChange = originalControl
-})
-
-test('fire entry rejects committed disablement before the transport removal callback', async (t) => {
-  let summaries = 0
-  const f = fixture(t, {
-    enabled: true,
-    summarize: async () => { summaries += 1; return { text: 'must not generate' } },
-  })
-  await until(() => f.started.length === 1 && f.login.subscriptionScheduler !== undefined, 'runtime starts')
-  const configCommitted = deferred()
-  const releaseConfig = deferred()
-  const originalChanged = f.controller.onConfigChanged
-  f.controller.onConfigChanged = async () => {
-    configCommitted.resolve()
-    await releaseConfig.promise
-    return originalChanged?.()
-  }
-
-  const saving = saveEnabled(f.controller, false)
-  await configCommitted.promise
-  assert.equal(f.started[0].testRunning, true)
-  f.login.remindersProvider.schedule({
-    accountId: ACCOUNT,
-    conversationId: 'test-user',
-    text: 'disabled entry',
-    fireAt: Date.now() - 1,
-  })
-  f.login.subscriptionScheduler.schedule({
-    accountId: ACCOUNT,
-    conversationId: 'test-user',
-    prompt: 'disabled entry',
-    when: { ok: true, kind: 'once', fireAt: Date.now() - 1 },
-  })
-  await tick()
-  await tick()
-  assert.deepEqual(f.sent, [])
-  assert.equal(summaries, 0)
-  assert.equal(readReminders(f.root).items.length, 1)
-  assert.equal(readSubscriptions(f.root).items.length, 1)
-
-  releaseConfig.resolve()
-  await saving
-  f.controller.onConfigChanged = originalChanged
-})
-
-test('a subscription generated while its account pauses is not sent to the stopped transport', async (t) => {
-  const generated = deferred()
-  const released = deferred()
-  const summaries = []
-  const f = fixture(t, {
-    enabled: true,
-    beforeApply: (root) => seedSubscription(root, 'pause during generation'),
-    summarize: async () => {
-      summaries.push('summarize')
-      if (summaries.length === 1) {
-        generated.resolve()
-        await released.promise
-        return { text: 'stale generation' }
-      }
-      return { text: 'after resume' }
-    },
-  })
-  await until(() => f.started.length === 1, 'subscription runtime starts')
-  await generated.promise
-
-  await f.login.pause(ACCOUNT)
-  released.resolve()
-  await tick()
-  await tick()
-  assert.deepEqual(f.sent, [])
-  assert.equal(readSubscriptions(f.root).items.length, 1)
-
-  await f.login.resume(ACCOUNT)
-  await untilEventually(() => f.sent.some((message) => message.text === 'after resume'), 'subscription sends after resume')
-  assert.ok(f.sent.every((message) => message.text !== 'stale generation'))
-  assert.deepEqual(readSubscriptions(f.root).items, [])
-})
-
-test('a subscription generated while the gateway is disabled waits for re-enable', async (t) => {
-  const generated = deferred()
-  const released = deferred()
-  const summaries = []
-  const f = fixture(t, {
-    enabled: true,
-    beforeApply: (root) => seedSubscription(root, 'disable during generation'),
-    summarize: async () => {
-      summaries.push('summarize')
-      if (summaries.length === 1) {
-        generated.resolve()
-        await released.promise
-        return { text: 'disabled generation' }
-      }
-      return { text: 'after enable' }
-    },
-  })
-  await until(() => f.started.length === 1, 'subscription runtime starts')
-  await generated.promise
-
-  await saveEnabled(f.controller, false)
-  released.resolve()
-  await tick()
-  await tick()
-  assert.deepEqual(f.sent, [])
-  assert.equal(readSubscriptions(f.root).items.length, 1)
-
-  await saveEnabled(f.controller, true)
-  await untilEventually(() => f.sent.some((message) => message.text === 'after enable'), 'subscription sends after enable')
-  assert.ok(f.sent.every((message) => message.text !== 'disabled generation'))
-  assert.deepEqual(readSubscriptions(f.root).items, [])
-})
-
-test('a subscription generation cannot cross an account transport replacement', async (t) => {
-  const generated = deferred()
-  const released = deferred()
-  const summaries = []
-  const f = fixture(t, {
-    enabled: true,
-    beforeApply: (root) => seedSubscription(root, 'restart during generation'),
-    summarize: async () => {
-      summaries.push('summarize')
-      if (summaries.length === 1) {
-        generated.resolve()
-        await released.promise
-        return { text: 'stale generation' }
-      }
-      return { text: 'new transport' }
-    },
-  })
-  await until(() => f.started.length === 1, 'subscription runtime starts')
-  const oldTransport = f.started[0]
-  await generated.promise
-
-  await f.login.pause(ACCOUNT)
-  await f.login.resume(ACCOUNT)
-  await until(() => f.started.length === 2, 'replacement transport starts')
-  released.resolve()
-  await untilEventually(() => f.sent.some((message) => message.text === 'new transport'), 'subscription sends through replacement transport')
-  assert.equal(oldTransport.testRunning, false)
-  assert.ok(f.sent.every((message) => message.text !== 'stale generation'))
-  assert.deepEqual(readSubscriptions(f.root).items, [])
-})
-
-test('a subscription generation settling after plugin stop cannot send', async (t) => {
-  const generated = deferred()
-  const released = deferred()
-  const f = fixture(t, {
-    enabled: true,
-    beforeApply: (root) => seedSubscription(root, 'stop during generation'),
-    summarize: async () => {
-      generated.resolve()
-      await released.promise
-      return { text: 'late after stop' }
-    },
-  })
-  await until(() => f.started.length === 1, 'subscription runtime starts')
-  await generated.promise
-
-  await f.dispose()
-  released.resolve()
-  await tick()
-  await tick()
-  assert.deepEqual(f.sent, [])
-  assert.equal(readSubscriptions(f.root).items.length, 1)
 })
 
 test('real reset restores composition instead of saved disabled startup overlay', async (t) => {
@@ -885,12 +644,10 @@ for (const scenario of [
   { name: 'unauthorized group sender', groupChatEnabled: true, senderId: 'stranger', conversationId: 'allowed-group' },
   { name: 'unauthorized group chat', groupChatEnabled: true, senderId: 'test-user', conversationId: 'denied-group' },
 ]) {
-  test(scenario.name + ' cannot revive retired summaries or keyword replies', async t => {
-    const summaries = []
+  test(scenario.name + ' cannot reach the host or receive a reply', async t => {
     const f = fixture(t, {
       enabled: true,
       allowedChats: ['allowed-group', 'test-user'],
-      summarize: async (...args) => { summaries.push(args); return { text: 'retired summary' } },
       beforeApply: () => fs.writeFileSync(configFile(), JSON.stringify({
         enabled: true,
         groupChatEnabled: scenario.groupChatEnabled,
@@ -905,12 +662,10 @@ for (const scenario of [
       await f.started[0].testInbound({ ...f.message('retired-group-' + i), senderId: scenario.senderId, conversationId: scenario.conversationId })
     }
     await tick()
-    assert.deepEqual(summaries, [])
     assert.equal(f.sessions.length, 0)
     assert.deepEqual(f.sent, [])
     await f.started[0].testInbound(f.message('retained-private-message'))
     assert.equal(f.sessions.length, 1, 'private messages still reach the host')
-    assert.deepEqual(summaries, [])
   })
 }
 

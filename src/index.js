@@ -18,99 +18,40 @@
  * @module dsh-weixin
  */
 import z from '@deepseek-ai/schemastery'
-import { fileURLToPath } from 'node:url'
-import fs from 'node:fs'
-import { dirname, join, basename, resolve as resolvePath } from 'node:path'
-import { configureWeixinStateDir, accountsDir, configFile, readSavedConfig, ensureSessionsDir, sessionsDir, inboxDir, stateDir, withSavedConfig } from './state.js'
-import { quietDelay } from './message/quiet-hours.js'
-import {
-  MAX_TEMP_QUIET_MS,
-  clearTempQuiet,
-  describeTempQuiet,
-  readTempQuiet,
-  setTempQuiet,
-  tempQuietDelay,
-} from './message/temp-quiet.js'
-import { buildDiagReport } from './message/diag.js'
-import { MAX_RECENT_ERRORS, buildDiagExport } from './message/diag-export.js'
-import { detectHostVersion, hostStatus } from './host-compat.js'
-import { buildUsageReport } from './message/usage.js'
-import { readBudget } from './budget.js'
-import { createRequire } from 'node:module'
-import { describeConfigEffect } from './config-effect.js'
-
-// 服务端也要知道自己的版本（`/diag` 用），但 client.js 是浏览器入口，不能 import。
-const PLUGIN_VERSION = createRequire(import.meta.url)('../package.json').version
-import { DEFAULT_RETENTION, SWEEP_INTERVAL_MS, describeSweep, sweepRetention } from './message/retention.js'
-import { DEFAULT_KEEP, createBackup } from './backup.js'
+import { basename } from 'node:path'
+import { configureWeixinStateDir, accountsDir, readSavedConfig, ensureSessionsDir, sessionsDir, withSavedConfig } from './state.js'
 import { HEARTBEAT_MS, acquireInstanceLock, heartbeatInstanceLock, releaseInstanceLock } from './instance-lock.js'
-import { createOutbox, formatOutbox, CONTEXT_TOKEN_TTL_MS } from './message/outbox.js'
+import { createOutbox, CONTEXT_TOKEN_TTL_MS } from './message/outbox.js'
 import { createGatewayControl } from './gateway-control.js'
 import { configureOutbound, sendChunked } from './outbound.js'
-import { HOOK_POINTS, createHooks } from './hooks.js'
-import { createMetrics, exportMetricsSnapshot } from './metrics.js'
 import { ensureSecretModes, redactSecrets } from './credentials.js'
 import { neutralizeTags } from './message/fence.js'
 import { quoteBlock } from './message/quote.js'
-import { readScope, scopedConfig } from './config-scope.js'
 import { DEFAULT_MAX_QUEUE, DEFAULT_PER_MINUTE, createSenderLimiter } from './message/sender-limit.js'
 import { createSenderDailyLimiter } from './message/sender-daily.js'
-import { recordStranger } from './message/strangers.js'
 import { isAllowedSender, denialReason } from './security/allowlist.js'
 import { ILinkTransport } from './transport/ilink.js'
 import { AgentBridge } from './agent-bridge.js'
-import { appendJournal } from './message/journal.js'
-import { appendToolAudit, readToolAudit } from './message/audit.js'
 import { DEFAULT_SEND_INTERVAL_MS, DEFAULT_COOLDOWN_MS } from './message/rate-limit.js'
 
-/**
- * Module-level outbound journal sink, wired once in setup (see sendChunked).
- * `sendChunked` is a module-level function with no apply scope, so the wiring
- * has to cross scopes exactly once — null before setup means "not recording".
- */
-let journalOutboundRef = null
-
-/** The durable outbox for undelivered text; set once the plugin's setup runs. */
-let hooks
-/** Counters the settings card reads (src/metrics.js); process lifetime only. */
-let metrics
-let metricsTimer
-/** ④ One audit line per unfamiliar shape per conversation, not one per message. */
-const unknownItemSeen = new Set()
 let outbox
 import { MessageDeduper } from './message/dedupe.js'
 import { INBOUND_NOT_ACCEPTED } from './message/inbound-pending.js'
-import { extractUrls, fetchLinkText, describeLinkResults } from './message/links.js'
-import { ReminderScheduler, parseWhen } from './message/scheduler.js'
-import { createWebhookSender } from './webhook.js'
-import { backgroundBudget, recordBackgroundCall } from './budget.js'
-import { createMediaCommands } from './message/media-archive.js'
 import { startAccounts } from './startup.js'
 import { createSendCommands } from './message/send-file.js'
-import { SubscriptionScheduler, formatStamp } from './message/subscriptions.js'
 import { allowedMediaDirs, deliverOutboundMedia, DEFAULT_MAX_MEDIA_BYTES } from './media/outbound.js'
-import { AsrBridge, DEFAULT_ASR_TIMEOUT_MS, resolveAsrSettings } from './media/asr.js'
-import { DEFAULT_DOCUMENT_CHARS, extractDocumentTextAsync } from './media/document.js'
-import { resolveOcrSettings, extractImageText } from './media/ocr.js'
 import { WeixinLoginController } from './login-remote.js'
-import { AsrController } from './asr-remote.js'
 import { ConfigController } from './config-remote.js'
 import { isAccountPaused, touchAccount, allowlistForAccount, readRegistry, registryFile, RegistryReadError, enrolFirstContact } from './account-registry.js'
 import { mapWithConcurrency } from './concurrency.js'
 // `/cancel` is the one message the transport must be able to deliver while a
 // turn is still running; the predicate lives beside the parser so the two
 // cannot drift apart.
-import { isInterruptCommand, readLines, mostRecentConversationId } from './sessions.js'
+import { isInterruptCommand } from './sessions.js'
 
 import { groupReplyPolicy } from './message/groups.js'
-import { classifyToolCall, noticeText } from './message/tool-guard.js'
-import { createTranslator, resolveLocale } from './i18n.js'
-import { routeFor, sideRouteFor } from './model-route.js'
-import { readJournalRange, renderChatMarkdown, writeChatExport } from './message/chat-export.js'
-import { createNotifyServer, DEFAULT_NOTIFY_PORT, ensureNotifyToken } from './notify.js'
-import { describeUnknownItems, firstSighting } from './message/unknown-items.js'
+import { createTranslator } from './i18n.js'
 import { statePaths } from './state-layout.js'
-import { recordUsage } from './message/usage-ledger.js'
 
 // The vendored logger is the only channel guaranteed to land on disk at INFO:
 // ctx.logger can drop levels depending on the host's exporter config, and a
@@ -121,22 +62,11 @@ import {
   DEFAULT_CDN_BASE_URL,
   DEFAULT_MAX_INBOUND_MEDIA_BYTES,
   downloadInboundMedia,
-  downloadInboundVoice,
   describeInboundMedia,
   describeMediaFailures,
 } from './media/inbound.js'
 
 export const name = 'dsh-weixin'
-
-/**
- * Directory this file was loaded from — the plugin package root (one level
- * above `src/`), in the repository, in a profile install, and in an npm install
- * alike. The shipped ASR bridge lives at `<root>/bin/asr-bridge.py`, and the
- * operator is invited to point `asr.args` at that path; using this as the
- * child's cwd makes a *relative* bridge path work too, regardless of the
- * directory the DSH host happened to be started in.
- */
-const PLUGIN_ROOT = resolvePath(dirname(fileURLToPath(import.meta.url)), '..')
 
 /**
  * 一条消息里的附件同时下载几个。
@@ -145,14 +75,6 @@ const PLUGIN_ROOT = resolvePath(dirname(fileURLToPath(import.meta.url)), '..')
  * 入站消息很少带更多附件，而且每个附件都要落盘。
  */
 const INBOUND_DOWNLOAD_CONCURRENCY = 3
-
-/**
- * 文档抽取与 OCR 同时跑几个。
- *
- * 这两个都可能起子进程（OCR 桥、pdftotext），比下载贵得多，所以故意低于
- * 下载的并发度：宁可慢一点，也不要一次起十个进程把机器拖住。
- */
-const INBOUND_EXTRACT_CONCURRENCY = 2
 
 /**
  * `agents` is required: without it there is no session to drive, so the plugin
@@ -182,65 +104,15 @@ export const Config = z.object({
   maxMessageLength: z.number().default(1500).description('Maximum characters per outbound Weixin message.'),
   sendIntervalMs: z.number().min(1).default(DEFAULT_SEND_INTERVAL_MS).description('Minimum interval between two outbound Weixin sends, in milliseconds. Raising it costs latency on a chunked reply; lowering it moves closer to the measured send-ban threshold (about twenty messages in a few minutes).'),
   sendCooldownMs: z.number().min(1).default(DEFAULT_COOLDOWN_MS).description('How long to stop sending after three consecutive send failures, in milliseconds. Hammering a rejecting server is what turns a temporary rejection into an account ban.'),
-  voiceOutbound: z.boolean().default(false).description(
-    'Send audio attachments (wav, mp3, m4a, ogg, flac, silk, ...) as Weixin voice messages instead of file attachments. wav and silk are transcoded in-process; the rest need ffmpeg on PATH. A voice send that FAILS falls back to the plain file path — but the iLink server currently ACCEPTS a bot voice_item (ret=0) without ever delivering it (measured 2026-06 and again 2026-10-26 with a fresh token; upload and send both succeed), so with this on an audio attachment can silently vanish. Off by default until the server actually delivers bot voice.',
-  ),
-  messageJournal: z.boolean().default(true).description('Record recent inbound and outbound messages (message journal, shown on the settings card).'),
-  // C20: the conversation gets the good model; background work (group
-  // summaries and subscription fires) can use a cheaper route without
-  // touching the chat. Resolution is purpose route, side route, legacy
-  // route where supported, then the host default; it does not imply chat.
-  chatProvider: z.string().default('').description('主对话模型 provider：留空沿用 DSH 当前会话模型。只填 provider 或只填 model 都不生效。'),
-  chatModel: z.string().default('').description('主对话模型 model：和 chatProvider 一起填才生效。'),
-  sideProvider: z.string().default('').description('后台任务模型 provider：定时订阅使用；留空使用 DSH 默认模型。'),
-  sideModel: z.string().default('').description('后台任务模型 model：和 sideProvider 一起填才生效。'),
-  documentExtract: z.boolean().default(true).description('Extract the text of an inbound document (docx/txt/md/csv/json) into the turn, instead of only telling the model where it was saved. PDF needs the optional pdfjs-dist package; without it a PDF is only described by its path.'),
-  ocrEnabled: z.boolean().default(false).description('Run an external OCR command on inbound images and put the text into the turn. Off by default: the plugin ships no OCR engine.'),
-  ocrCommand: z.string().default('').description('Absolute path to an OCR executable. It is called with the image path as its only argument; stdout must be the text. A small wrapper script is the intended way to adapt tesseract or a cloud CLI.'),
-  ocrTimeoutMs: z.number().default(20000).description('Kill the OCR command after this many milliseconds.'),
-  ocrMaxChars: z.number().default(2000).description('Keep at most this many characters of OCR text per image.'),
-  documentTextChars: z.number().min(200).max(20000).default(4000).description('How many characters of an inbound document to put into the prompt; the rest is cut with a note.'),
   groupChatEnabled: z.boolean().default(false).description('参加群聊：开启后才会在群里回话。默认关闭——一个对每条群消息都答的机器人，在真群里就是刷屏。私聊不受影响。'),
-  pricePer1kInputYuan: z.number().min(0).default(0).description('估算花费用：每千输入 token 多少元（0 表示不算钱，只显示 token）。'),
-  pricePer1kOutputYuan: z.number().min(0).default(0).description('估算花费用：每千输出 token 多少元。'),
   groupReplyWhen: z.string().default('mention').description('群里什么时候回：mention 只答被叫到的时候，all 每条都答。iLink 不给 @ 列表，因此按首行里的机器人名字匹配。'),
   groupBotNames: z.string().default('').description('群里额外的称呼，用逗号分隔。iLink 不提供机器人的群昵称，想让「@小助手」生效就得在这里写上它。'),
-  videoFrames: z.boolean().default(true).description('收到视频时用本机 ffmpeg 抽几帧静图交给模型（模型读不了视频，但能看图）。需要的机器上装了 ffmpeg；抽帧失败只影响那一条视频的内容理解，文件照常保存。'),
   richContent: z.boolean().default(true).description('富内容：长代码块作为文件附件发出、Markdown 表格转成对齐文本。微信只有纯文本气泡，这两处是 Markdown 里最容易在纯文本里变形的东西。'),
   codeFileThreshold: z.number().min(200).max(20000).default(1200).description('代码块超过多少字就改成发文件；更短的留在气泡里（两行代码读起来比附件顺）。'),
-  // C15: the plugin cannot veto a tool call (DSH exposes no approval hook to
-  // plugins), so it does the honest half: tell the owner when a turn reaches
-  // for something that writes, deletes or runs a command, while /cancel can
-  // still stop whatever comes next.
-  // C33: the catalogue covers user-visible chatter (command help, notices);
-  // logs stay English because they are read in files by one operator.
   locale: z.string().default('zh').description('界面与微信里回复的语言：zh（中文，默认）或 en（English）。日志始终英文。'),
-  toolNotices: z.boolean().default(true).description('危险工具提醒：Agent 要执行写文件、删文件、跑命令之类的工具时，先在微信里告诉你一声（/cancel 可中止后续步骤）。插件无法在工具执行前拦截，这一步可能已经跑了。'),
-  quietHoursEnabled: z.boolean().default(false).description('免打扰时段：到点的定时发送（/remind 提醒和 /subscribe 订阅）若落在时段内，推迟到时段结束时发出。回复消息不受影响。'),
-  quietHoursStart: z.string().default('23:00').description('免打扰开始时间，HH:mm（24 小时制）。'),
-  quietHoursEnd: z.string().default('07:00').description('免打扰结束时间，HH:mm（24 小时制）；与开始时间相同视为未配置。'),
-  senderRatePerMinute: z.number().min(0).default(DEFAULT_PER_MINUTE).description('每个发送者每分钟最多几条消息；0 表示不限。超过时回一句「慢一点」，并写审计。'),
+  senderRatePerMinute: z.number().min(0).default(DEFAULT_PER_MINUTE).description('每个发送者每分钟最多几条消息；0 表示不限。超过时回一句「慢一点」。'),
   senderDailyLimit: z.number().min(0).default(0).description('每个发送者每天最多被回复几次（按账号分开算；0 表示不限）。到量后当天不再回应，并在群里也按人算。'),
   maxQueuedPerConversation: z.number().min(0).default(DEFAULT_MAX_QUEUE).description('单个会话允许排队等回复的消息条数；0 表示不限制。超过的直接拒收，避免越堆越多。'),
-  retentionJournalDays: z.number().min(0).default(180).description('消息流水保留天数；0 表示不自动清理。'),
-  retentionAuditDays: z.number().min(0).default(90).description('工具审计保留天数；0 表示不清理。'),
-  retentionMediaDays: z.number().min(0).default(30).description('收到的图片/文件/语音保留天数；0 表示不清理。'),
-  retentionExportsDays: z.number().min(0).default(60).description('/export 导出的 Markdown 保留天数；0 表示不清理。'),
-  retentionLogsDays: z.number().min(0).default(30).description('vendor 每日日志保留天数；0 表示不清理。'),
-  metricsExport: z.boolean().default(true).description('每 30 秒把指标写到状态目录的 metrics.json / metrics.prom，方便外部抓取（npm run metrics 读取）。'),
-  backupEnabled: z.boolean().default(true).description('每天自动备份一次状态目录（账号凭证、会话记录、提醒、配置及历史数据）；备份在 <状态目录>/backups，含登录凭证，请勿外传。'),
-  backupKeep: z.number().min(1).max(60).default(DEFAULT_KEEP).description('保留最近几份自动备份；更旧的会被删掉。'),
-  notifyEnabled: z.boolean().default(false).description('本地通知桥：开启后向 http://127.0.0.1:47832/notify POST 一句话就能推到你的微信（构建、备份、cron 用）。只绑回环地址、必须带 token、不经过模型。'),
-  notifyPort: z.number().min(1).max(65535).default(DEFAULT_NOTIFY_PORT).description('通知桥监听端口；脚本里的 URL 要跟着改。'),
-  notifyToken: z.string().default('').description('通知桥的 token；留空则首次启动自动生成，存在 <状态目录>/notify.json（0600），不要外传。'),
-  webhookUrl: z.string().default('').description('出站 webhook：收到消息/回复发出时向这个 http(s) URL POST 一条 JSON。留空关闭。'),
-  webhookSecret: z.string().default('').description('出站 webhook 的 HMAC 密钥；填了就带 X-Weixin-Signature: sha256=<hex>，对原始 body 签名。'),
-  webhookTimeoutMs: z.number().default(5000).description('出站 webhook 的超时毫秒数；失败只记日志，不影响回复。'),
-  mediaMaxBytes: z.number().min(0).default(0).description('入站媒体的总容量上限（字节）；超过就从最旧的开始删。0 表示不限。'),
-  backgroundDailyLimit: z.number().default(0).description('每天允许的后台模型调用次数上限（订阅等后台任务都算）；0 表示不限。主对话不受影响。'),
-  toolAudit: z.boolean().default(true).description(
-    'Append one JSONL line per tool the agent runs (tool name, truncated arguments, which Weixin account/conversation/sender caused it, and whether the result carried an error) under <state>/audit/. Off by default nothing would ever answer "who ran that destructive tool yesterday"; a missing directory or a full disk only warns, it never fails a turn.',
-  ),
   markdownMode: z
     .union([z.const('strip'), z.const('off')])
     .default('strip')
@@ -248,9 +120,8 @@ export const Config = z.object({
   busyMessageMode: z
     .union([z.const('queue'), z.const('steer')])
     .default('steer')
-    .description('What happens to a message that arrives while a reply is still being written: "queue" waits and delivers it as the next turn, "steer" injects it into the running turn. "/steer <instruction>" always injects.'),
+    .description('What happens to a message that arrives while a reply is still being written: "queue" waits and delivers it as the next turn, "steer" injects it into the running turn.'),
   sourceContext: z.boolean().default(false).description('Prepend a <weixin_source …> block to each prompt so the agent knows the message came from WeChat and who sent it.'),
-  readLinks: z.boolean().default(true).description('When an inbound message contains http(s) links, fetch each one and fold the readable text into the prompt, so the agent can answer questions about the page. A link that fails to fetch is reported to the agent as one line, never as a failed message.'),
   progressAfterMs: z.number().default(20_000).description('Send the first progress note to the user after this many milliseconds (a turn that is only thinking).'),
   progressToolAfterMs: z.number().min(0).default(8_000).description('Send the first progress note sooner - after this many milliseconds - when a tool is actually running. 0 disables the early note.'),
   progressEveryMs: z.number().default(60_000).description('Re-send a changed progress note at most this often, so tool changes stay visible without repeating an unchanged state.'),
@@ -272,93 +143,7 @@ export const Config = z.object({
     .description(
       'Weixin CDN root for inbound media downloads and outbound uploads. Empty means "not configured here", which lets a saved account record supply it before falling back to the upstream default.',
     ),
-  asr: z
-    .object({
-      enabled: z.boolean().default(true).description('Transcribe inbound voice messages; false keeps them as SILK/WAV files only.'),
-      command: z
-        .string()
-        .default('')
-        .description(
-          'Executable of a line-oriented ASR bridge (one JSON request per line on stdin, one JSON response per line on stdout). Empty disables transcription.',
-        ),
-      args: z.array(z.string()).default([]).description('Arguments passed to the ASR bridge executable.'),
-      timeoutMs: z.number().default(DEFAULT_ASR_TIMEOUT_MS).description('Give up on one transcription after this many milliseconds.'),
-      env: z
-        .dict(z.string())
-        .default({})
-        .description('Extra environment for the ASR bridge, e.g. HF_HOME, DSH_WEIXIN_ASR_MODEL or DSH_WEIXIN_ASR_LANGUAGE.'),
-      model: z
-        .string()
-        .default('')
-        .description(
-          'Whisper model location for transcription. A Hugging Face repo id (mlx-community/whisper-small-mlx) or an absolute path to a local model directory. Empty lets the ASR bridge default apply.',
-        ),
-      modelDir: z
-        .string()
-        .default('')
-        .description(
-          'Directory where downloadable voice models are stored and looked up. Empty defaults to ~/.dsh/weixin/asr-models.',
-        ),
-      hfProxy: z
-        .string()
-        .default('')
-        .description(
-          'Proxy for the model downloader (e.g. http://127.0.0.1:7897). HTTPS destinations are tunnelled with CONNECT. Leave empty to connect directly, which is what the default mirror needs. Set this only on a network that cannot reach the mirror at all: the download is then exactly as fast as the proxy, and no faster.',
-        ),
-      hfEndpoint: z
-        .string()
-        .default('https://hf-mirror.com')
-        .description(
-          'Endpoint the model downloader fetches from. Defaults to https://hf-mirror.com, which is reachable from mainland China without a proxy and serves weights at high speed. Set it to https://huggingface.co to use the official site, or to a corporate mirror. The download is a plain HTTP transfer: it is exactly as fast as the route to this host, and no faster.',
-        ),
-    })
-    .default({})
-    .description('Voice transcription through an external bridge process. Absent or empty command means voice notes are delivered as files.'),
 })
-
-/**
- * @param {any} ctx
- * @param {z.infer<typeof Config>} config
- */
-/**
- * 记一次模型回合的消耗（估算）。
- *
- * token 由提示词与回复的字符数折算 —— 插件不在模型请求链路上，宿主的 usage
- * 分片不会经过我们，所以这是估不完的估算，只会小于账单；卡片的「账单」页签也
- * 必须这么写。模型名是「我们请求的那条路由」，不是宿主最终选用的那个。
- *
- * @param {string} stateRoot
- * @param {object} live  运行时配置（单价、路由都由使用者填写）
- * @param {(line: string) => void} warn
- * @param {{ kind: string, accountId: string, conversationId: string, prompt?: string,
- *   reply?: string, route?: { provider?: string, model?: string } }} usage
- */
-function recordModelUsage(stateRoot, live, warn, { kind, accountId, conversationId, prompt, reply, route }) {
-  // 一条路由只有 provider 与 model 都填了才真的生效（同 schema 的说明），
-  // 所以账本也按同样的规则写名字：只填一半等于没填，记成「默认」。
-  const pair = (provider, model) =>
-    typeof provider === 'string' && provider !== '' && typeof model === 'string' && model !== ''
-      ? `${provider}/${model}`
-      : ''
-  const requested = typeof route?.model === 'string' && route.model !== ''
-    ? pair(route.provider ?? live.sideProvider, route.model)
-    : kind === 'chat'
-      ? pair(live.chatProvider, live.chatModel)
-      : pair(live.sideProvider, live.sideModel)
-  try {
-    recordUsage(stateRoot, {
-      accountId,
-      conversationId,
-      route: kind,
-      model: requested === '' ? '默认' : requested,
-      prompt: typeof prompt === 'string' ? prompt : '',
-      reply: typeof reply === 'string' ? reply : '',
-      warn,
-    })
-  } catch (error) {
-    warn(`usage ledger write failed: ${String(error)}`)
-  }
-}
 
 export function apply(ctx, config) {
 
@@ -410,8 +195,8 @@ export function apply(ctx, config) {
     log('disabled by configuration; registering the settings services and starting no loop')
   }
 
-  // Settings-page services: QR login orchestration, ASR model management, and
-  // the options form. Registered regardless of enabled so a disabled plugin can
+  // Settings-page services: QR login orchestration and the options form.
+  // Registered regardless of enabled so a disabled plugin can
   // still be configured and logged in from the UI before being turned on.
   //
   // Kept in a variable because the poll loop reports a refused session back to
@@ -443,23 +228,6 @@ export function apply(ctx, config) {
     warn(`settings login service unavailable: ${String(error)}`)
     loginController = undefined
   }
-  // Kept in a variable because the settings UI can change the model directory
-  // at runtime (setModelDir); the ASR bridge must use the current value, not
-  // the one the process started with.
-  let asrController
-  try {
-    // Same as the login controller above: the Service constructor registers
-    // itself, and passing the instance to `ctx.plugin()` throws. That throw used
-    // to be swallowed here too, which silently disabled the whole ASR service.
-    asrController = new AsrController(ctx, {
-      modelDir: config.asr?.modelDir?.trim() || undefined,
-      hfEndpoint: config.asr?.hfEndpoint?.trim() || undefined,
-      hfProxy: config.asr?.hfProxy?.trim() || undefined,
-    })
-  } catch (error) {
-    warn(`settings ASR service unavailable: ${String(error)}`)
-    asrController = undefined
-  }
   // The settings form's view of every configurable option. It is handed the
   // *merged* config so the form can show effective values, and it reads the
   // saved overlay itself on every call — so a value written from the form, or
@@ -487,25 +255,10 @@ export function apply(ctx, config) {
      * @type {Map<string, ILinkTransport>}
      */
     const transports = new Map()
-    // C15: one notice per tool per conversation per window. A turn that runs
-    // ten bash commands is still one turn, and a stuck loop must not become a
-    // stream of warnings.
-    const noticedTools = new Map()
-    /** Same tool, same conversation: stay quiet for ten minutes. */
-    const TOOL_NOTICE_WINDOW_MS = 10 * 60_000
     /** @type {AgentBridge | undefined} */
     let bridge
-    /** @type {AsrBridge | undefined} */
-    let asrBridge
     /** @type {string} */
     let cwd
-    let reminderScheduler
-    let subscriptionScheduler
-    let retentionTimer
-    let notifyBridge
-    /** @type {Array<() => void>} */
-    const offWebhook = []
-    const backupTimers = []
     let lockHeartbeat
     // Declared in apply() scope on purpose: bringUpLoop() builds the gate
     // closure and is a sibling of setup(), not a child of it.
@@ -555,9 +308,6 @@ export function apply(ctx, config) {
           // replies keep the user's richContent setting untouched.
           await sendChunked(transport, { ...current, richContent: false }, { conversationId, text, contextToken: '' })
         },
-        // 账本：桥每完成一个真正跑完的回合就报一次（谁会调用由它决定，写去哪
-        // 由这里决定 —— 桥不认识 stateRoot）。
-        onUsage: (usage) => recordModelUsage(stateRoot, withSavedConfig(config), warn, usage),
         progressAfterMs: config.progressAfterMs,
         progressToolAfterMs: config.progressToolAfterMs,
         progressEveryMs: config.progressEveryMs,
@@ -567,47 +317,6 @@ export function apply(ctx, config) {
         errLog: (line) => {
           warn(line)
           fileLog.warn(`dsh-weixin: ${redactSecrets(String(line))}`)
-        },
-        // Tool audit lands on disk, not in the log: the log rotates away, and
-        // the question this answers ("who triggered that tool, with what
-        // arguments") is asked after the fact. Wired here rather than inside
-        // the bridge so the bridge stays testable without a state root.
-        ...(config.toolAudit === false
-          ? {}
-          : { onToolAudit: (entry) => appendToolAudit(stateRoot, entry, { warn }) }),
-        // C15: the honest half of "approve tools in WeChat". The plugin cannot
-        // veto a call, but it can say so while the turn is still running, and
-        // /cancel stops everything after the call in flight. One notice per
-        // tool per turn: a turn that runs ten bash commands is still one turn.
-        // C20: the conversation's route, re-read per turn so a card edit lands
-        // without restarting the plugin.
-        chatRoute: () => routeFor('chat', withSavedConfig(config)),
-        // ⑥ 后台预算：0 = 不限；读实时配置，卡片改完下一次调用就生效。
-        allowBackground: () => {
-          const live = withSavedConfig(config)
-          const limit = Number(live.backgroundDailyLimit) || 0
-          if (limit <= 0) return { allowed: true, used: 0, limit: 0 }
-          return backgroundBudget(stateRoot, { limit, warn })
-        },
-        onBackgroundCall: () => recordBackgroundCall(stateRoot, { warn }),
-        onToolCall: (entry) => {
-          if (withSavedConfig(config).toolNotices === false) return
-          const verdict = classifyToolCall({ tool: entry.tool, args: entry.args })
-          if (verdict.dangerous === false) return
-          const key = `${entry.conversationId}|${entry.sessionId}|${verdict.tool}`
-          const seen = noticedTools.get(key)
-          const bucket = seen === undefined || Date.now() - seen > TOOL_NOTICE_WINDOW_MS ? 0 : seen
-          if (bucket !== 0) return
-          noticedTools.set(key, Date.now())
-          const liveTransport = transports.get(entry.accountId)
-          if (liveTransport === undefined) return
-          // Fire and forget: this runs inside the turn's event scan, so a slow
-          // send must never hold the turn. The transport falls back to the
-          // typing ticket when no context token is at hand.
-          void sendChunked(liveTransport, withSavedConfig(config), {
-            conversationId: entry.conversationId,
-            text: noticeText(verdict, resolveLocale(withSavedConfig(config).locale)),
-          }).catch((failure) => warn(`tool notice failed: ${String(failure)}`))
         },
         onSpontaneousReply: async ({ accountId: targetAccountId, conversationId: targetConvId, text: spontaneousText }) => {
           if (!spontaneousText || !String(spontaneousText).trim()) return
@@ -643,30 +352,7 @@ export function apply(ctx, config) {
         },
       })
 
-      // C20: background side sessions (subscriptions, proactive) get their own
-      // route; without one they fall back to the host default, so a single cheap
-      // model covers everything that is not the conversation.
-      const sideRoute = () => sideRouteFor(config)
-
-      // Voice transcription is opt-in and out of tree: with no bridge configured
-      // this stays undefined and voice notes are delivered as files, exactly as
-      // they were before ASR existed. The process is started lazily by the first
-      // voice message (model load costs seconds), so an unused install pays
-      // nothing for it.
-      const asrSettings = resolveAsrSettings(config, asrController?.modelDir, PLUGIN_ROOT)
-      asrBridge =
-        asrSettings === undefined ? undefined : new AsrBridge(asrSettings, { log: (line) => log(line), warn: (line) => warn(line) })
-      if (asrBridge !== undefined) log(`voice transcription enabled via ${asrSettings.command}`)
-
-      // 免打扰时段: the gate reads the LIVE config at fire time (the card can
-      // flip the window mid-flight), reusing withSavedConfig so the saved
-      // settings outrank the composition exactly like everywhere else.
-      // One writer per state directory. A second DSH window used to overwrite
-      // this one's files silently; now it says so once and carries on (the
-      // writes are atomic, so the damage is bounded to last-writer-wins).
-      // The outbox: a reply that could not be delivered is written to disk and
-      // retried, because a reminder nobody receives is worse than one sent late.
-    outbox = createOutbox({
+      outbox = createOutbox({
         stateRoot,
         transportFor: (accountId) => !cancelled && gatewayEnabled() && !isAccountPaused(accountId) ? transports.get(accountId) : undefined,
         warn,
@@ -686,45 +372,6 @@ export function apply(ctx, config) {
         limit: Number(withSavedConfig(config).senderDailyLimit ?? 0),
         warn,
       }).check(accountId, senderId)
-      // The bus is built once per plugin start. Its first subscriber exists to
-      // fix a real gap: refusals used to reach only the host logger, never the
-      // log file the operator actually reads.
-      hooks = createHooks({ warn })
-      hooks.on(HOOK_POINTS.inboundRefused, (event) => {
-        fileLog.info(`refused ${event.reason} message from ${event.senderId} in ${event.conversationId}`)
-      })
-      // Numbers, not log lines: every question about behaviour used to need a
-      // grep. These four counters answer most of them, and the card reads the
-      // snapshot (src/metrics.js keeps it in memory only).
-      metrics = createMetrics()
-      metrics.observe(hooks, {
-        inboundAccepted: 'inbound.accepted',
-        inboundRefused: 'inbound.refused',
-        outboundSettled: 'outbound.settled',
-        turnSettled: 'turn.settled',
-      })
-      if (loginController !== undefined) {
-        loginController.metricsSnapshot = () => ({
-          ...metrics.snapshot(),
-          pendingOutbox: typeof outbox?.pending === 'function' ? outbox.pending().length : 0,
-        })
-      }
-      if (loginController !== undefined) {
-        loginController.outboxFlush = (options) => outbox.flush(options)
-        loginController.outboxDropItem = (id) => outbox.drop(id)
-      }
-      // The registry lives in memory; this timer is the only thing that makes it
-      // readable from outside the process. 30s matches what a local scraper
-      // expects, and the two files are tiny. `npm run metrics` is the read side.
-      metricsTimer = setInterval(() => {
-        if (withSavedConfig(config).metricsExport === false) return
-        void exportMetricsSnapshot(stateRoot, {
-          ...metrics.snapshot(),
-          gauges: { ...metrics.snapshot().gauges, 'outbox.pending': typeof outbox?.pending === 'function' ? outbox.pending().length : 0 },
-        }, { warn })
-      }, 30_000)
-      metricsTimer.unref?.()
-
       const lock = acquireInstanceLock(stateRoot, { warn })
       if (lock.acquired === false) {
         warn(
@@ -736,173 +383,7 @@ export function apply(ctx, config) {
         lockHeartbeat.unref?.()
       }
 
-      // 固定免打扰与临时静默是同一道闸：取两者中更晚的结束时刻。
-      // accountId 由调度器在触发时传入；老调用点不传时只按固定时段判。
-      const quietGate = (now, accountId) => Math.max(
-        quietDelay(now, withSavedConfig(config)),
-        tempQuietDelay(now, stateRoot, accountId, { warn }),
-      )
-      const deliveryStillEnabled = (accountId) => !cancelled && gatewayEnabled() && !isAccountPaused(accountId)
-
-      // Retention: state grows all day; a nightly sweep keeps it bounded. It
-      // runs once shortly after start (a laptop is not up at 03:00) and then
-      // daily, unref'd so it never holds the host open.
-      const retentionConfig = () => {
-        const live = withSavedConfig(config)
-        return {
-          journalDays: Number(live.retentionJournalDays ?? DEFAULT_RETENTION.journalDays),
-          auditDays: Number(live.retentionAuditDays ?? DEFAULT_RETENTION.auditDays),
-          mediaDays: Number(live.retentionMediaDays ?? DEFAULT_RETENTION.mediaDays),
-          exportsDays: Number(live.retentionExportsDays ?? DEFAULT_RETENTION.exportsDays),
-          logsDays: Number(live.retentionLogsDays ?? DEFAULT_RETENTION.logsDays),
-        }
-      }
-      const sweep = () => {
-        try {
-          const result = sweepRetention(stateRoot, { retention: retentionConfig(), warn })
-          log(describeSweep(result))
-        } catch (error) {
-          warn(`retention sweep failed: ${String(error?.message ?? error)}`)
-        }
-      }
-      // Backups: retention deletes old files on purpose, and nothing else keeps
-      // a copy. One a day, a few minutes after the sweep so the two never fight
-      // over the same files, and never blocking startup.
-      const takeBackup = () => {
-        try {
-          const live = withSavedConfig(config)
-          if (live.backupEnabled === false) return
-          const result = createBackup(stateRoot, { keep: Number(live.backupKeep ?? DEFAULT_KEEP), warn })
-          log(`backup ${result.id}: ${result.files} file(s)`)
-        } catch (error) {
-          warn(`backup failed: ${String(error?.message ?? error)}`)
-        }
-      }
-      const firstBackup = setTimeout(takeBackup, 5 * 60_000)
-      firstBackup.unref?.()
-      backupTimers.push(firstBackup)
-      backupTimers.push(setInterval(takeBackup, 24 * 60 * 60_000))
-      for (const timer of backupTimers) timer.unref?.()
-
-      const firstSweep = setTimeout(sweep, 60_000)
-      firstSweep.unref?.()
-      retentionTimer = setInterval(sweep, SWEEP_INTERVAL_MS)
-      retentionTimer.unref?.()
-
-      reminderScheduler = new ReminderScheduler({
-        stateRoot,
-        warn,
-        quiet: quietGate,
-        fire: async (reminder) => {
-          if (!deliveryStillEnabled(reminder.accountId)) {
-            throw new Error(`delivery is disabled for ${reminder.accountId}`)
-          }
-          const transport = transports.get(reminder.accountId)
-          if (transport === undefined) {
-            throw new Error(`no live transport for ${reminder.accountId}`)
-          }
-          await sendChunked(transport, config, {
-            conversationId: reminder.conversationId,
-            text: `（提醒：${reminder.text}）`,
-          })
-          log(`reminder ${reminder.id} delivered to ${reminder.conversationId}`)
-        },
-      })
-      if (loginController !== undefined) loginController.remindersProvider = reminderScheduler
-      if (config.messageJournal === true) {
-        journalOutboundRef = (entry) => appendJournal(stateRoot, { dir: 'out', ...entry }, { warn })
-      }
-      // Hand the send path its collaborators once, after both exist: the
-      // journal sink above (null when journalling is off) and the outbox.
-      configureOutbound({ journal: journalOutboundRef, outbox, hooks, warn, snippetsDir: statePaths(stateRoot).snippetsDir.absolute })
-
-      // Scheduled subscriptions use an isolated host side session.
-      const subscriptionBusy = new Set()
-      subscriptionScheduler = new SubscriptionScheduler({
-        stateRoot,
-        warn,
-        quiet: quietGate,
-        fire: async (item) => {
-          if (!deliveryStillEnabled(item.accountId)) {
-            throw new Error(`delivery is disabled for ${item.accountId}`)
-          }
-          const transport = transports.get(item.accountId)
-          if (transport === undefined) {
-            throw new Error(`no live transport for ${item.accountId}`)
-          }
-          if (subscriptionBusy.has(item.conversationId)) {
-            throw new Error(`another subscription fire is running for ${item.conversationId}`)
-          }
-          subscriptionBusy.add(item.conversationId)
-          try {
-            const now = Date.now()
-            const prompt = [
-              `<weixin_subscription>`,
-              `现在是 ${formatStamp(now)}。你之前和对方约定：到这个时间点，就由你主动给对方发一条消息，主题是「${item.prompt}」。`,
-              `直接输出这条消息的正文，就像你在微信里自己发起的一条消息。不要复述或解释这个约定本身。`,
-              `</weixin_subscription>`,
-            ].join('\n')
-            const result = await bridge.summarize({ conversationId: item.conversationId, accountId: item.accountId, prompt, sessionPrefix: 'wx-sub-', route: sideRoute() })
-            if (!deliveryStillEnabled(item.accountId) || transports.get(item.accountId) !== transport) {
-              throw new Error(`subscription ${item.id} origin is no longer live`)
-            }
-            const text = typeof result?.text === 'string' ? result.text.trim() : ''
-            if (text === '' || text === '（已取消）') {
-              log(`subscription ${item.id} produced nothing to send`)
-              return
-            }
-            await sendChunked(transport, config, { conversationId: item.conversationId, text })
-            log(`subscription ${item.id} delivered to ${item.conversationId}`)
-          } finally {
-            subscriptionBusy.delete(item.conversationId)
-          }
-        },
-      })
-      if (loginController !== undefined) loginController.subscriptionScheduler = subscriptionScheduler
-
-      // 本地通知桥: a loopback endpoint so a build, backup or cron job can push
-      // one sentence to WeChat without a model turn. Off by default; the token
-      // is generated once, stored 0600 under the state root, never logged.
-      if (withSavedConfig(config).notifyEnabled === true) {
-        const notifyTokenValue = ensureNotifyToken(stateRoot, { configured: String(withSavedConfig(config).notifyToken ?? ''), warn })
-        if (notifyTokenValue !== '') {
-          notifyBridge = createNotifyServer({
-            token: notifyTokenValue,
-            port: Number(withSavedConfig(config).notifyPort ?? DEFAULT_NOTIFY_PORT),
-            warn,
-            send: async (text) => {
-              const store = readLines()
-              const accountId = [...transports.keys()].find((id) => deliveryStillEnabled(id) && mostRecentConversationId(id, store) !== undefined)
-              if (accountId === undefined) throw new Error('no conversation has ever been spoken in')
-              const conversationId = mostRecentConversationId(accountId, store)
-              const transport = transports.get(accountId)
-              if (transport === undefined || conversationId === undefined) throw new Error('the Weixin transport is not up yet')
-              await sendChunked(transport, withSavedConfig(config), { conversationId, text })
-            },
-          })
-          const boundPort = await notifyBridge.listen()
-          if (boundPort !== undefined) log(`notify bridge listening on http://127.0.0.1:${boundPort}/notify (token in notify.json under the state root)`)
-        }
-      }
-
-      // ⑤ 出站 webhook：订阅两个已经存在的 hook 点，把事件推给外部系统。
-      //    失败只 warn；没有配置就完全不创建 sender。
-      const webhookConfig = withSavedConfig(config)
-      if (String(webhookConfig.webhookUrl ?? '').trim() !== '') {
-        const sender = createWebhookSender({
-          url: webhookConfig.webhookUrl,
-          secret: typeof webhookConfig.webhookSecret === 'string' ? webhookConfig.webhookSecret : '',
-          timeoutMs: webhookConfig.webhookTimeoutMs,
-          warn,
-        })
-        if (sender === undefined) {
-          warn(`webhook URL is not a usable http(s) URL: ${webhookConfig.webhookUrl}`)
-        } else {
-          offWebhook.push(hooks.on(HOOK_POINTS.inboundAccepted, (event) => void sender.send('message.received', event)))
-          offWebhook.push(hooks.on(HOOK_POINTS.outboundSettled, (event) => void sender.send('reply.settled', event)))
-          log('outbound webhook enabled')
-        }
-      }
+      configureOutbound({ outbox, warn, snippetsDir: statePaths(stateRoot).snippetsDir.absolute })
 
     })()
     // A disabled gateway has no startLoop awaiting setup, but setup failures
@@ -1001,7 +482,6 @@ export function apply(ctx, config) {
         // attachment — an operator opts in (schema description has the
         // measurements). The transport still degrades to a file send when a
         // voice upload/send is REJECTED.
-        ...(config.voiceOutbound === true ? { voiceOutbound: true } : {}),
         // `/cancel` must reach the bridge while the turn it targets is still
         // running. Every other message is queued in conversation order by the
         // transport; this one skips the queue for the obvious reason.
@@ -1031,7 +511,7 @@ export function apply(ctx, config) {
           }
           warn(
             error.sessionExpired
-              ? `Weixin session expired for ${account.accountId}: log in again from Settings (or run bin/login.js), then reload`
+              ? `Weixin session expired for ${account.accountId}: log in again from Settings and reload DSH`
               : `Weixin session rejected for ${account.accountId} (${error.message}): log in again, then reload`,
           )
         },
@@ -1049,7 +529,6 @@ export function apply(ctx, config) {
         accountId: account.accountId,
         transport: next,
         bridge,
-        asrBridge,
         seen,
         log,
         warn,
@@ -1058,14 +537,9 @@ export function apply(ctx, config) {
         // Resolved once: the allowlist is a property of the deployment, not of
         // the message, and re-resolving per reply would re-stat every directory.
         mediaDirs: allowedMediaDirs({ cwd, stateDir: stateRoot }),
-        reminderScheduler,
-        subscriptionScheduler,
-        journalInbound: (entry) => appendJournal(stateRoot, { dir: 'in', ...entry }, { warn }),
         senderGate: (senderId) => senderLimiter.check(`${account.accountId}|${senderId}`),
         // 每日配额在账号维度上另算：同一个人在不同账号下各有自己的额度。
         senderDailyGate: (senderId) => senderDailyLimiterFor(account.accountId, senderId),
-        // C20: side sessions (/\summary, subscriptions, proactive) use the
-        // background route; the conversation keeps the chat route.
       })
 
       const previous = transports.get(account.accountId)
@@ -1089,8 +563,6 @@ export function apply(ctx, config) {
         if (transports.get(account.accountId) === next) gateway.stopAccount(account.accountId)
         return
       }
-      reminderScheduler?.wake(account.accountId)
-      subscriptionScheduler?.wake(account.accountId)
       log(`listening as account ${account.accountId} (state: ${stateRoot})`)
     }
 
@@ -1166,15 +638,8 @@ export function apply(ctx, config) {
       // Stop scheduling before transports. A callback already in flight may
       // finish, but its stopped scheduler will not commit or retry the result.
       await setup.catch(() => {})
-      reminderScheduler?.stop()
-      subscriptionScheduler?.stop()
       await gateway.sync()
-      await notifyBridge?.stop()
-      for (const off of offWebhook.splice(0)) off()
-      if (retentionTimer !== undefined) clearInterval(retentionTimer)
-      for (const timer of backupTimers) clearTimeout(timer)
       outbox?.stop()
-      if (metricsTimer !== undefined) clearInterval(metricsTimer)
       if (lockHeartbeat !== undefined) clearInterval(lockHeartbeat)
       releaseInstanceLock(stateRoot)
       if (loginController !== undefined && loginController.onAccountBound === onAccountBound) {
@@ -1184,9 +649,6 @@ export function apply(ctx, config) {
       }
       if (loginController !== undefined && loginController.onAccountControlChange === onAccountControlChange) {
         loginController.onAccountControlChange = undefined
-      }
-      if (loginController !== undefined && loginController.subscriptionScheduler === subscriptionScheduler) {
-        loginController.subscriptionScheduler = undefined
       }
       if (configController !== undefined && configController.onConfigChanged === onConfigChanged) {
         configController.onConfigChanged = undefined
@@ -1201,9 +663,6 @@ export function apply(ctx, config) {
         await t.stop().catch((error) => warn(`transport stop failed for ${id}: ${String(error)}`))
       }
       await gateway.drain()
-      // Before the agent bridge: a transcription in flight is failed through the
-      // ASR disposer, so the inbound handler stops waiting on it promptly.
-      await asrBridge?.dispose().catch((error) => warn(`asr teardown failed: ${String(error)}`))
       await bridge?.dispose().catch((error) => warn(`session teardown failed: ${String(error)}`))
     }
   }, 'dsh-weixin/listen')
@@ -1371,7 +830,6 @@ async function resolveAccounts(config, wantedAccountId, warn) {
  * @param {any} params.config
  * @param {ILinkTransport} params.transport
  * @param {AgentBridge} params.bridge
- * @param {AsrBridge} [params.asrBridge]
  * @param {import('./message/dedupe.js').MessageDeduper} params.seen
  * @param {(line: string) => void} params.log
  * @param {(line: string) => void} params.warn
@@ -1399,7 +857,7 @@ export function weixinSourceBlock(message) {
   return `<weixin_source ${fields.join(' ')} />`
 }
 
-function createInboundHandler({ config, accountId, transport, bridge, asrBridge, seen, log, warn, fileLog, stateRoot, mediaDirs, reminderScheduler, subscriptionScheduler, journalInbound, senderGate, senderDailyGate }) {
+function createInboundHandler({ config, accountId, transport, bridge, seen, log, warn, fileLog, stateRoot, mediaDirs, senderGate, senderDailyGate }) {
   // The effective allowlist is per account: an account-level override in the
   // registry narrows (or replaces) the global list.
   // `accountId` is always set here (bringUpAccount passes it), but the
@@ -1418,179 +876,13 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
   // The handler reads the config for THIS message through this cell so a
   // first-contact enrolment takes effect on the very message that triggered it.
   const effectiveConfig = { current: resolveAccountConfig() }
-  // Per-conversation overrides (config-scope.json) sit on top of the account
-  // config for exactly one message. Re-read on every message so the card can
-  // change a scope without a restart, and rebuilt from the account config so an
-  // override never leaks into the next conversation.
-  const applyScope = (conversationId) => {
-    effectiveConfig.current = scopedConfig(resolveAccountConfig({ failClosed: true }), readScope(stateRoot, accountId, conversationId, { warn }))
-  }
-  // ⑦ `/diag export`：体检包要能发出去。所有 id 换别名、地址与凭据整段抹掉，
-  // 然后写成 stateRoot 下的一个文件 —— 命令回复会走一遍出站附件管线，文件
-  // 跟着文字一起发到当前会话，用户手边就有一份能直接转发的。
-  const exportDiag = () => {
-    const live = effectiveConfig.current
-    // 只带失败的审计行：成功的那些对「为什么出问题」没有解释力，只会占篇幅。
-    let recentErrors = []
-    try {
-      recentErrors = readToolAudit(stateRoot, { limit: 200 })
-        .filter((entry) => entry.ok !== true)
-        .slice(0, MAX_RECENT_ERRORS)
-    } catch {
-      recentErrors = []
-    }
-    const bundle = buildDiagExport({
-      version: PLUGIN_VERSION,
-      nodeVersion: process.version,
-      hostVersion: detectHostVersion(),
-      hostTested: hostStatus(detectHostVersion()).status === 'tested',
-      accountId,
-      accountLabel: effectiveConfig.current.accountLabel ?? undefined,
-      transportUp: transport !== undefined,
-      config: live,
-      reminders: reminderScheduler?.list(accountId)?.length ?? 0,
-      subscriptions: subscriptionScheduler?.list?.(accountId)?.length ?? 0,
-      journalToday: readJournalRange(stateRoot, { accountId, days: 1 }).length,
-      allowlist: Array.isArray(live.allowedSenders) ? live.allowedSenders.length : 0,
-      quietDelayMs: quietDelay(Date.now(), live),
-      recentErrors,
-    })
-    const dir = join(stateDir(), 'diag')
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-')
-    const file = join(dir, `diag-${stamp}.md`)
-    try {
-      fs.mkdirSync(dir, { recursive: true })
-      fs.writeFileSync(file, bundle.text, 'utf8')
-    } catch (error) {
-      warn(`diag export failed: ${String(error)}`)
-      return `体检包写入失败：${String(error)}`
-    }
-    return `已导出体检包（${bundle.sections.length} 节，id 已换成短哈希、地址与凭据已抹掉）：\n${file}\n转发出去之前建议自己扫一眼。`
-  }
-
-  const personaCommands = (conversationId) => {
-    return {
-      // `/usage`：今天花了什么。不调模型，数字全部来自已有状态文件。
-      usage: () => {
-        const live = effectiveConfig.current
-        const today = readJournalRange(stateRoot, { accountId, days: 1 })
-        const chars = today.reduce((sum, entry) => sum + String(entry?.text ?? '').length, 0)
-        let backgroundUsed = 0
-        try {
-          backgroundUsed = readBudget(stateRoot, { warn }).used
-        } catch {
-          backgroundUsed = 0
-        }
-        return buildUsageReport({
-          backgroundUsed,
-          backgroundLimit: Number(live.backgroundDailyLimit ?? 0),
-          outboxPending: typeof outbox?.pending === 'function' ? outbox.pending().length : 0,
-          reminders: reminderScheduler?.list(accountId)?.length ?? 0,
-          subscriptions: subscriptionScheduler?.list?.(accountId)?.length ?? 0,
-          journalEntries: today.length,
-          journalChars: chars,
-        })
-      },
-      // `/quiet`：有尽头的一段「别出声」。固定免打扰管每天同一时段，
-      // 这里管开会/看电影这种临时两小时；到点自动恢复，不用记得关。
-      quiet: (arg) => {
-        const raw = String(arg ?? '').trim()
-        if (raw === '') return describeTempQuiet(readTempQuiet(stateRoot, accountId, { warn }))
-        if (/^(?:off|取消|关|恢复)$/i.test(raw)) {
-          return clearTempQuiet(stateRoot, accountId, { warn }) ? '已恢复：自动回复和提醒都回来了。' : '本来就没有临时静默。'
-        }
-        const plan = parseWhen(raw)
-        if (plan.ok !== true) return `没听懂「${raw}」。用法：/quiet 2h、/quiet 30m、/quiet off。`
-        const span = plan.fireAt - Date.now()
-        if (span < 60_000 || span > MAX_TEMP_QUIET_MS) return '静默时长要在 1 分钟到 24 小时之间。'
-        const quiet = setTempQuiet(stateRoot, accountId, { until: plan.fireAt, warn })
-        return `好，${describeTempQuiet({ ...quiet, setAt: Date.now() })}`
-      },
-      // `/outbox`：出站失败的那条消息去哪了、现在能不能补发。只读队列，不重排。
-      outbox: async (arg) => {
-        if (outbox === undefined) return '重发队列还没准备好（插件还在启动）。'
-        const raw = String(arg ?? '').trim()
-        if (raw === '') return formatOutbox(outbox.pending())
-        if (/^(?:retry|重试)$/i.test(raw)) {
-          const result = await outbox.flush({ force: true })
-          return `已重试：发出 ${result.sent} 条，失败 ${result.failed} 条，还剩 ${result.remaining} 条。`
-        }
-        const drop = /^(?:drop|丢弃|删除)\s+(\S+)$/i.exec(raw)
-        if (drop !== null) {
-          return outbox.drop(drop[1]) ? `已丢弃 ${drop[1]}。` : `队列里没有 ${drop[1]}。`
-        }
-        return '用法：/outbox 查看 · /outbox retry 立即重试 · /outbox drop <id> 丢弃。'
-      },
-      // `/diag`：不调模型的一条自检。用户问「怎么没反应」时，先看闸门。
-      diag: (arg) => {
-        const action = String(arg ?? '').trim()
-        if (/^(export|导出|打包)$/i.test(action)) return exportDiag()
-        const live = effectiveConfig.current
-        return buildDiagReport({
-          version: PLUGIN_VERSION,
-          accountId,
-          transportUp: transport !== undefined,
-          config: live,
-          reminders: reminderScheduler?.list(accountId)?.length ?? 0,
-          subscriptions: subscriptionScheduler?.list?.(accountId)?.length ?? 0,
-          journalToday: readJournalRange(stateRoot, { accountId, days: 1 }).length,
-          allowlist: Array.isArray(live.allowedSenders) ? live.allowedSenders.length : 0,
-          quietDelayMs: quietDelay(Date.now(), live),
-        })
-      },
-      // /export: render this conversation's journal as Markdown. Short
-      // exports ride the normal reply; long ones land in
-      // `<stateRoot>/exports/` and the reply carries the path.
-      export: (rawDays) => {
-        const days = Math.min(365, Math.max(1, Number(rawDays) || 30))
-        const entries = readJournalRange(stateRoot, { accountId, conversationId, days })
-        if (entries.length === 0) return `这个会话在最近 ${days} 天没有消息流水。`
-        const markdown = renderChatMarkdown(entries, { title: `聊天记录 · ${conversationId} · 最近 ${days} 天` })
-        if (markdown.length <= 3000) return markdown
-        const file = writeChatExport(stateRoot, accountId, conversationId, markdown)
-        return `聊天记录比较长（${entries.length} 条，${markdown.length} 字），已导出成文件：\n${file}`
-      },
-      config: () => {
-        // 只描述规则：哪一项保存即生效、哪一项要重启。不读文件、不改任何东西。
-        let savedAt
-        try {
-          savedAt = fs.statSync(configFile()).mtimeMs
-        } catch {
-          savedAt = undefined
-        }
-        return describeConfigEffect({
-          fields: Object.keys(Config.dict ?? {}),
-          configFile: configFile(),
-          savedAt,
-        })
-      },
-      ...createMediaCommands({
-        dir: inboxDir(),
-        conversationId,
-        sendMedia: (params) => transport.sendMedia(params),
-        maxBytes: Number(withSavedConfig(config).mediaMaxBytes ?? 0),
-        clean: (days) => {
-          const live = withSavedConfig(config)
-          const window = days ?? Number(live.retentionMediaDays ?? DEFAULT_RETENTION.mediaDays)
-          const result = sweepRetention(stateRoot, {
-            retention: { journalDays: 0, auditDays: 0, mediaDays: window, exportsDays: 0, logsDays: 0 },
-            warn,
-          })
-          return { removed: result.removed.length, bytes: result.bytes }
-        },
-        warn,
-      }),
-      ...createSendCommands({
-        conversationId,
-        mediaDirs,
-        ...(effectiveConfig.current.maxMediaBytes === undefined ? {} : { maxBytes: effectiveConfig.current.maxMediaBytes }),
-        warn,
-        sendMedia: (params) => transport.sendMedia(params),
-      }),
-    }
-  }
+  const personaCommands = (conversationId) => createSendCommands({
+    conversationId, mediaDirs,
+    ...(effectiveConfig.current.maxMediaBytes === undefined ? {} : { maxBytes: effectiveConfig.current.maxMediaBytes }),
+    warn, sendMedia: (params) => transport.sendMedia(params),
+  })
   return async (message) => {
-    const journaledAt = Date.now()
+    const receivedAt = Date.now()
     // iLink only honours an inbound `context_token` for about ten minutes after
     // the message arrives (issue #9); reusing it past that is answered with
     // `prepare failed`. A long turn, its progress notes and its final reply can
@@ -1603,7 +895,7 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
     const sendToken = async () => {
       const token = message.contextToken
       if (typeof token !== 'string' || token === '') return token
-      if (Date.now() - journaledAt < CONTEXT_TOKEN_TTL_MS) return token
+      if (Date.now() - receivedAt < CONTEXT_TOKEN_TTL_MS) return token
       if (!tokenRefreshed) {
         tokenRefreshed = true
         try {
@@ -1612,42 +904,21 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
       }
       return undefined
     }
-    // Before anything reads the config for this message: layer the
-    // conversation's overrides onto the account config. The registry holds the
+    // Before anything reads the config for this message, resolve the account
+    // authorization. The registry holds the
     // account-level authorization boundary, so an unreadable existing file is a
     // refusal, not an empty registry that falls back to the global allowlist.
     try {
-      applyScope(message.conversationId)
+      effectiveConfig.current = resolveAccountConfig({ failClosed: true })
     } catch (error) {
       if (!(error instanceof RegistryReadError)) throw error
       const detail = String(error?.message ?? error)
-      hooks?.emit(HOOK_POINTS.inboundRefused, {
-        accountId,
-        conversationId: message.conversationId,
-        senderId: message.senderId,
-        reason: 'registry-unreadable',
-      })
+
       warn(`refused message from ${message.senderId}: account authorization registry is unreadable at ${registryFile()}; restore or repair it before retrying (${detail})`)
       fileLog.info(`refused message from ${message.senderId}: account authorization registry is unreadable at ${registryFile()}; restore or repair it before retrying (${detail})`)
       // Nothing has been processed yet. The transport can release its claim
       // back to the durable queue under the gateway's existing contract.
       return INBOUND_NOT_ACCEPTED
-    }
-    // ④ Observe unfamiliar shapes only after the replay-safe authorization read.
-    for (const line of describeUnknownItems(message)) {
-      if (firstSighting(unknownItemSeen, line, `${message.conversationId}|${line}`)) {
-        fileLog.info(`unfamiliar inbound shape: ${line}`)
-        appendToolAudit(stateRoot, { tool: 'weixin/unknown-item', ok: true, summary: line })
-      }
-    }
-    if (config.messageJournal === true && message.type === 'text') {
-      journalInbound?.({
-        at: journaledAt,
-        accountId,
-        conversationId: message.conversationId,
-        senderId: message.senderId,
-        text: message.text,
-      })
     }
     // 1. Truly unknown item kinds (TOOL_CALL_*, anything the protocol adds
     //    later) still get one short notice rather than silence. Media kinds are
@@ -1665,8 +936,7 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
     // 1a-bis. Group policy (C14). The transport already turns a non-blank
     //        group_id into the conversation id; what was missing is that nothing
     //        downstream knew the difference, so the bot answered every message
-    //        in a group chat. Ignored messages are journaled (the turn never
-    //        happens) and counted, and they never reach the sender gate.
+    //        in a group chat. Ignored messages never reach the sender gate.
     const groupDecision = groupReplyPolicy(message, effectiveConfig.current, {
       botNames: [
         accountId,
@@ -1677,13 +947,8 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
     })
 
     if (groupDecision.reply === false) {
-      hooks?.emit(HOOK_POINTS.inboundRefused, {
-        accountId,
-        conversationId: message.conversationId,
-        senderId: message.senderId,
-        reason: groupDecision.reason,
-      })
-      metrics?.inc('group.ignored', 1, groupDecision.reason)
+
+
       log(`group message ignored (${groupDecision.reason}) from ${message.senderId} in ${message.conversationId}`)
       return
     }
@@ -1694,14 +959,7 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
     //     message is answered once per window — silence would read as a bug.
     const gate = typeof senderGate === 'function' ? senderGate(message.senderId) : undefined;
     if (gate !== undefined && gate.allowed === false) {
-      // Observers (file log today, counters later) hear about refusals through
-      // the bus instead of every call site growing its own logging.
-      hooks?.emit(HOOK_POINTS.inboundRefused, {
-        accountId,
-        conversationId: message.conversationId,
-        senderId: message.senderId,
-        reason: 'rate-limit',
-      })
+
       if (gate.shouldWarn === true) {
         await sendChunked(transport, config, {
           conversationId: message.conversationId,
@@ -1710,27 +968,15 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
           }),
           contextToken: message.contextToken,
         }).catch(() => {})
-        appendToolAudit(stateRoot, {
-          at: new Date().toISOString(),
-          tool: 'weixin/rate-limit',
-          ok: false,
-          summary: `sender ${message.senderId} is over the per-minute message limit (${gate.recent} in the last minute)`,
-        }, { warn })
+
       }
       return
     }
 
-    // 1b. 每人每日配额：比「每分钟」长一档，且按账号分开。它故意放在白名单
-    //     之后、链接抓取与媒体下载之前 —— 被拒绝的人不该让这台机器再去请求
-    //     任何外部地址。提示按窗口只发一次，拒绝写审计。
+    // Daily limits are scoped to each account.
     const dailyGate = typeof senderDailyGate === 'function' ? senderDailyGate(message.senderId) : undefined
     if (dailyGate !== undefined && dailyGate.allowed === false) {
-      hooks?.emit(HOOK_POINTS.inboundRefused, {
-        accountId,
-        conversationId: message.conversationId,
-        senderId: message.senderId,
-        reason: 'daily-limit',
-      })
+
       if (dailyGate.shouldWarn === true) {
         await sendChunked(transport, config, {
           conversationId: message.conversationId,
@@ -1739,12 +985,7 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
           }),
           contextToken: message.contextToken,
         }).catch(() => {})
-        appendToolAudit(stateRoot, {
-          at: new Date().toISOString(),
-          tool: 'weixin/daily-limit',
-          ok: false,
-          summary: `sender ${message.senderId} reached the daily reply limit (${dailyGate.used}/${dailyGate.limit} on ${dailyGate.day})`,
-        }, { warn })
+
       }
       return
     }
@@ -1759,12 +1000,8 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
       const { allowedSenders = [], allowedChats = [] } = effectiveConfig.current
       let enrolled = false
       if (accountId && allowedSenders.length === 0 && (allowedChats.length === 0 || allowedChats.includes(message.conversationId))) {
-        const hasOverride = () => {
-          const entry = readRegistry({ failClosed: true, accountId })[accountId]
-          return (Array.isArray(entry?.allowedSenders) && entry.allowedSenders.length > 0) || Boolean(entry?.firstContactEnrolledAt)
-        }
         try {
-          enrolled = enrolFirstContact(accountId, message.senderId, hasOverride, (line) => {
+          enrolled = enrolFirstContact(accountId, message.senderId, (line) => {
             log(`${line}`)
             fileLog.info(`dsh-weixin: ${line} (add more senders on the card or in the registry)`)
           })
@@ -1772,8 +1009,7 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
           if (!(error instanceof RegistryReadError)) throw error
           warn(error.message)
           fileLog.info(error.message)
-          // The handler may already have journaled this message. Preserve it as
-          // uncertain rather than acknowledge it or replay possible side effects.
+          // Preserve the message as uncertain rather than replay possible side effects.
           throw error
         }
         if (enrolled) {
@@ -1802,14 +1038,6 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
             `allowedSenders=${JSON.stringify(effectiveConfig.current.allowedSenders ?? [])}`,
         )
         warn(`refused message from ${message.senderId}: ${denialReason(effectiveConfig.current, message.senderId, message.conversationId)}`)
-        // Persist a bounded stranger audit trail for diagnostics even though
-        // the simplified settings card no longer exposes a one-click allow.
-        recordStranger(stateRoot, accountId, {
-          senderId: message.senderId,
-          conversationId: message.conversationId,
-          text: message.text,
-          warn,
-        })
         return
       }
     }
@@ -1831,7 +1059,7 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
       if (!(error instanceof RegistryReadError)) throw error
       warn(error.message)
       fileLog.info(error.message)
-      // Dedupe and possibly journaling have already run, so this cannot be
+      // Dedupe has already run, so this cannot be
       // safely released for automatic replay.
       throw error
     }
@@ -1845,8 +1073,6 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
     //    `/status` additionally gets account-level facts read fresh here (the
     //    registry entry may have changed since this handler was built).
     const registryEntry = accountId ? readRegistry()[accountId] : undefined
-    // /summary answers asynchronously (a side session); awaiting a plain
-    // string is a no-op, so one call site covers both command shapes.
     const commandReply = await bridge.handleCommand(message.conversationId, message.text, accountId, {
       accountId,
       accountLabel: registryEntry?.label ?? null,
@@ -1856,31 +1082,12 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
         source: Array.isArray(registryEntry?.allowedSenders) && registryEntry.allowedSenders.length > 0 ? 'account' : 'global',
         senders: effectiveConfig.current.allowedSenders ?? [],
       },
-      reminders: reminderScheduler,
-      subscription: subscriptionScheduler,
       // 会话控制命令由 persona bundle 提供（状态目录只有这里知道）。
       persona: personaCommands(message.conversationId),
       t: createTranslator(effectiveConfig.current.locale).t,
     })
     if (commandReply !== undefined) {
-      // ⑨ `/export` 的长记录会写成一个文件；命令回复以前只发正文，文件留在
-      //    磁盘上，用户还得去设置卡里找。让命令回复也走一遍出站附件管线：
-      //    路径必须落在 mediaDirs 内（exports 就在 stateRoot 下），由同一套
-      //    resolveAllowedPath 判定，不是命令自带的特权。
-      let replyText = commandReply
-      if (/^\/export(?:\s|$)/i.test(message.text.trim())) {
-        const withFile = await resolveOutboundReply({
-          config: effectiveConfig.current,
-          transport,
-          mediaDirs,
-          conversationId: message.conversationId,
-          contextToken: message.contextToken,
-          reply: commandReply,
-          warn,
-          fileLog,
-        })
-        replyText = withFile.text
-      }
+      const replyText = commandReply
       await sendChunked(transport, config, {
         conversationId: message.conversationId,
         text: replyText,
@@ -1890,11 +1097,6 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
       return
     }
 
-    // 4.5 Link enrichment: if the message carries URLs, fetch each one and
-    //    fold the readable text into the prompt. A failed link NEVER fails the
-    //    message — the agent gets a one-line reason instead, and the user's
-    //    question still reaches the model. Best-effort by design: a dead host
-    //    costs a bounded fetch, not the turn.
     // Untrusted text first, and only it: any `weixin_` tag a user types is
     // neutralised here, before the plugin starts prepending blocks of its own
     // (src/message/fence.js). Later prepends are trusted and never touched.
@@ -1905,23 +1107,6 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
     const userText = neutralizeTags(message.text)
     const promptParts = () => [quoted, userText].filter((part) => part !== '')
     let prompt = promptParts().join('\n\n')
-    const linkUrls = config.readLinks === true ? extractUrls(message.text) : []
-    if (linkUrls.length > 0) {
-      log(`fetching ${linkUrls.length} link(s) from inbound message ${message.id}`)
-      // Concurrent, not serial: three dead hosts used to cost three deadlines
-      // in a row before the user got an answer. Each fetch has its own 8s
-      // deadline, and the batch has a budget on top so one slow host cannot
-      // hold the turn open past it.
-      const linkResults = await Promise.all(
-        linkUrls.slice(0, 3).map((url) =>
-          fetchLinkText(url).catch((error) => ({ ok: false, url, reason: `抓取失败：${String(error?.message ?? error)}` })),
-        ),
-      )
-      const linkBlock = describeLinkResults(linkResults)
-      // Fetched page text is as untrusted as the message itself: a page can
-      // contain our tag syntax just as easily as a user can.
-      if (linkBlock !== undefined) prompt = [...promptParts(), neutralizeTags(linkBlock)].join('\n\n')
-    }
     if (Array.isArray(message.media) && message.media.length > 0) {
       // `transport.cdnBaseUrl` is already normalized at construction, so only
       // the config value needs trimming here (see the transport options above).
@@ -1933,90 +1118,32 @@ function createInboundHandler({ config, accountId, transport, bridge, asrBridge,
       const failures = []
       // The attachments in one message have nothing to do with each other, so
       // they download at the same time — three photos used to cost three round
-      // trips back to back. Bounded, because each one is a network request and
-      // (for voice) possibly an ASR process.
+      // trips back to back. The concurrency limit bounds network requests.
       const downloads = await mapWithConcurrency(message.media, INBOUND_DOWNLOAD_CONCURRENCY, (media) =>
-        (media.kind === 'voice' ? downloadInboundVoice : downloadInboundMedia)({
+        downloadInboundMedia({
           media,
           cdnBaseUrl,
           maxBytes: maxInboundMediaBytes,
-          bridge: asrBridge,
-          extractFrames: effectiveConfig.current.videoFrames !== false,
           warn,
         }),
       )
       for (const [index, result] of downloads.entries()) {
         const media = message.media[index]
         if (result.ok) {
-          const transcode = result.kind === 'voice'
-            ? ` transcoded=${result.transcoded === true}` +
-              (typeof result.transcodeError === 'string' ? ` transcode-error=${JSON.stringify(result.transcodeError)}` : '')
-            : ''
-          log(
-            `saved inbound ${result.kind} to ${result.path} (${result.bytes} bytes)` +
-              (result.kind === 'voice' ? `${transcode} transcribed=${typeof result.transcript === 'string'}` : ''),
-          )
+          log(`saved inbound ${result.kind} to ${result.path} (${result.bytes} bytes)`)
           saved.push(result)
         } else {
           warn(`inbound ${media.kind} download failed: ${result.reason}`)
           failures.push({ kind: media.kind, reason: result.reason, code: result.code })
         }
       }
-      // `prompt` already contains the neutralized quote, caption and optional
-      // link enrichment. Keep media-derived blocks separate so they are
+      // `prompt` already contains the neutralized quote and caption. Keep
+      // media-derived blocks separate so they are
       // appended to that context instead of replacing it. The caption is not
       // passed to describeInboundMedia: that would add the same user text a
       // second time, after the earlier neutralization step.
       const parts = []
       if (saved.length > 0) parts.push(describeInboundMedia(saved))
-      // ② A document's text, not only its path: the model can answer "这份合同
-      //    第三条写了什么" in the same turn. Anything unrecognised (pdf, images)
-      //    falls back to the path-only description above.
-      if (effectiveConfig.current.documentExtract !== false) {
-        const docFiles = saved.filter((file) => file.kind === 'file' || file.kind === 'voice')
-        const extractedDocs = await mapWithConcurrency(docFiles, INBOUND_EXTRACT_CONCURRENCY, async (file) => ({
-          file,
-          extracted: await extractDocumentTextAsync(file.path, {
-            maxChars: effectiveConfig.current.documentTextChars ?? DEFAULT_DOCUMENT_CHARS,
-          }),
-        }))
-        const docs = []
-        for (const { file, extracted } of extractedDocs) {
-          if (extracted.ok) {
-            docs.push(`<weixin_document path="${file.path}">
-${neutralizeTags(extracted.text)}
-</weixin_document>`)
-            log(`extracted ${extracted.kind} text from ${file.path} (${extracted.text.length} chars, truncated=${extracted.truncated})`)
-          } else if (extracted.reason !== 'unsupported') {
-            warn(`document extraction skipped for ${file.path}: ${extracted.reason}`)
-          }
-        }
-        if (docs.length > 0) parts.push(docs.join('\n\n'))
-      }
-      // ④ 图片里的字：可选的外部 OCR 桥。没配置就完全跳过，图片仍按路径描述；
-      //    识别失败只降级成「没有文字」，不让整个回合失败。
-      if (effectiveConfig.current.ocrEnabled === true) {
-        const ocrSettings = resolveOcrSettings(effectiveConfig.current)
-        if (ocrSettings !== undefined) {
-          // OCR spawns a process per image, so the width here is lower than the
-          // download width on purpose.
-          const images = saved.filter((file) => file.kind === 'image')
-          const ocrResults = await mapWithConcurrency(images, INBOUND_EXTRACT_CONCURRENCY, async (file) => ({
-            file,
-            ocr: await extractImageText(file.path, ocrSettings),
-          }))
-          for (const { file, ocr } of ocrResults) {
-            if (ocr.ok) {
-              parts.push(`<weixin_ocr path="${file.path}">
-${neutralizeTags(ocr.text)}
-</weixin_ocr>`)
-              log(`ocr read ${ocr.text.length} chars from ${file.path} (truncated=${ocr.truncated})`)
-            } else if (ocr.code !== 'empty') {
-              warn(`ocr skipped for ${file.path}: ${ocr.reason}`)
-            }
-          }
-        }
-      }
       // A failure with no caption and nothing saved is answered here rather
       // than by the agent: there is no content to reason about, only an error
       // to relay, and waking a full turn (with its model call) to repeat one
@@ -2048,17 +1175,12 @@ ${neutralizeTags(ocr.text)}
     if (config.typingIndicator) await transport.setTyping(true, message.conversationId)
     try {
       const startedAt = Date.now()
-      hooks?.emit(HOOK_POINTS.inboundAccepted, {
-        accountId,
-        conversationId: message.conversationId,
-        senderId: message.senderId,
-      })
+
       const reply = await bridge.deliver({
         conversationId: message.conversationId,
         accountId,
         text: prompt,
-        // Who caused the turn, for the tool audit: the sender is the only party
-        // an operator can hold responsible for a destructive tool call.
+        // Keep the original sender for authorization of session dispatch.
         senderId: message.senderId,
         busyMessageMode: effectiveConfig.current.busyMessageMode,
         onProgress: async (note) => {
@@ -2108,12 +1230,7 @@ ${neutralizeTags(ocr.text)}
         },
       })
       log(`turn settled in ${Date.now() - startedAt}ms for ${message.conversationId}`)
-      hooks?.emit(HOOK_POINTS.turnSettled, {
-        accountId,
-        conversationId: message.conversationId,
-        senderId: message.senderId,
-        ms: Date.now() - startedAt,
-      })
+
       fileLog.info(`accepted message ${message.id} from ${message.senderId} (conversation ${message.conversationId}); agent turn settled in ${Date.now() - startedAt}ms`)
       // A late reply already went out through onLateReply; sending the empty
       // text here would be a stray message.

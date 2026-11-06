@@ -12,13 +12,12 @@ function step(checklist, id) {
   return checklist.steps.find((entry) => entry.id === id)
 }
 
-test('first-run checklist covers binding, authorization and operational reminders only', () => {
-  assert.deepEqual(ONBOARDING_STEPS, ['account', 'allowlist', 'workspace', 'verify', 'host', 'backup'])
+test('first-run checklist covers binding, authorization, workspace, verification and host', () => {
+  assert.deepEqual(ONBOARDING_STEPS, ['account', 'allowlist', 'workspace', 'verify', 'host'])
 
   const checklist = buildOnboardingChecklist()
   assert.deepEqual(checklist.steps.map((entry) => entry.id), ONBOARDING_STEPS)
   assert.doesNotMatch(JSON.stringify(checklist), /personaDefaultMode|proactiveEnabled|knowledgeEnabled/i)
-  assert.equal(step(checklist, 'backup').id, 'backup')
   assert.equal(step(checklist, 'verify').state, 'note')
 })
 
@@ -105,7 +104,7 @@ test('working-directory reminder only completes when the directory was checked s
 })
 
 test('quickstart installs this checkout without an upstream or published-package step', () => {
-  const lines = quickstartLines({ loginHint: 'node bin/login.js' })
+  const lines = quickstartLines({ loginHint: 'synthetic login panel' })
   assert.match(lines[0].command, /node bin\/install\.mjs/)
   assert.notEqual(lines[0].command, 'npm install dsh-plugin-wechat && node bin/doctor.mjs')
   assert.match(lines[2].note, /实际收发/)
@@ -120,22 +119,21 @@ test('the default login step points to the DSH WeChat panel instead of the CLI',
 test('quickstart prose follows the requested locale', () => {
   const english = quickstartLines({ locale: 'en' })
   assert.match(english[0].note, /Install this checkout/)
-  assert.match(english[1].note, /Whichever contact arrives first is enrolled/)
+  assert.match(english[1].note, /whichever permitted contact arrives first is enrolled/)
   assert.match(english[1].note, /does not prove that sender is the person who scanned the code/)
+  assert.match(english[1].note, /account-specific list/)
+  assert.match(english[1].note, /Pause the account if identity is uncertain/)
   assert.match(english[2].note, /send a real message from your phone/)
   const chinese = quickstartLines()
   assert.match(chinese[1].note, /实际收到的首位联系人/)
   assert.match(chinese[1].note, /不能证明发送者就是扫码人/)
+  assert.match(chinese[1].note, /账号专属名单/)
+  assert.match(chinese[1].note, /身份不明时请先暂停账号/)
 })
 
-test('backup copy states scope and does not claim verification from the enabled switch', () => {
-  const enabled = step(buildOnboardingChecklist({ backupEnabled: true }), 'backup')
-  assert.match(enabled.detail, /只确认开关状态/)
-  assert.match(enabled.detail, /不代表最近一份备份已经验证/)
-  assert.match(enabled.why, /媒体、日志|备份范围和完整性/)
-
-  const unknown = step(buildOnboardingChecklist(), 'backup')
-  assert.match(unknown.detail, /还没有确认自动备份已经开启/)
-  assert.match(unknown.detail, /不包含媒体、日志和下载的语音模型/)
-  assert.match(unknown.whyEn, /coverage and integrity/)
+test('onboarding does not advertise removed backup, speech recognition or scheduler features', () => {
+  const checklist = buildOnboardingChecklist({ backupEnabled: true })
+  const copy = JSON.stringify({ checklist, quickstart: quickstartLines(), english: quickstartLines({ locale: 'en' }) })
+  assert.doesNotMatch(copy, /备份|backup|ASR|语音模型|定时提醒|subscriptions|whisper/i)
+  assert.equal(step(checklist, 'backup'), undefined)
 })

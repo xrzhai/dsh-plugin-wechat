@@ -31,7 +31,6 @@ export class RegistryReadError extends Error {
   constructor(message, options) {
     super(message, options)
     this.name = 'RegistryReadError'
-    this.code = 'ACCOUNT_REGISTRY_UNREADABLE'
   }
 }
 
@@ -297,18 +296,14 @@ export function allowlistForAccount(accountId, config, options = {}) {
  *
  * @param {string} accountId
  * @param {string} senderId the sender to enrol
- * @param {() => boolean} hasOverride whether the account already carries an
- *   account-level allowlist override (checked by the caller against the same
- *   registry snapshot it refused under, so the read and the write agree)
  * @param {(line: string) => void} [note] called with a human-readable line
  *   describing what was enrolled (the caller logs it)
  * @returns {boolean} true when the sender was enrolled and the caller should
  *   let the message through; false when enrolment does not apply
  */
-export function enrolFirstContact(accountId, senderId, hasOverride, note = () => {}) {
+export function enrolFirstContact(accountId, senderId, note = () => {}) {
   if (typeof accountId !== 'string' || accountId === '') return false
   if (typeof senderId !== 'string' || senderId === '') return false
-  if (hasOverride()) return false
   const registry = readRegistry({ failClosed: true, accountId })
   // Re-check against a fresh read: the caller's snapshot may be stale if a
   // concurrent handler for the same account enrolled between the two reads.

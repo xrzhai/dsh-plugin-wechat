@@ -41,12 +41,6 @@ test('catalogue entries have both locales and interpolate newly migrated failure
   assert.equal(translate('error.processing', { reason: 'offline' }, 'en'), '(Processing failed: offline)')
   assert.equal(translate('error.processing', { reason: 'offline' }, 'unknown'), '（处理失败：offline）')
   assert.match(translate('notice.longRunning', {}, 'en'), /result/)
-  const storageZh = translate('error.reminderStorageReadOnly', { reason: 'the corrupt original could not be preserved' }, 'zh')
-  assert.match(storageZh, /日志中搜索“reminders\.json”/)
-  assert.doesNotMatch(storageZh, /the corrupt original could not be preserved/)
-  assert.match(translate('error.reminderStorageReadOnly', {}, 'en'), /logs for “reminders\.json”/)
-  assert.doesNotMatch(translate('error.reminderStorageReadOnly', { reason: 'disk is read-only' }, 'en'), /disk is read-only/)
-  assert.doesNotMatch(translate('error.reminderSequenceExhausted', {}, 'zh'), /清理.*提醒/)
 })
 
 test('live command help includes English /compact and omits retired commands', () => {
@@ -67,12 +61,15 @@ test('live command help includes English /compact and omits retired commands', (
   for (const key of [
     'help.mode', 'help.remember', 'help.forget', 'help.memory', 'help.undo', 'help.import',
     'help.recall', 'help.summary', 'help.bad', 'help.good', 'help.style', 'help.digest',
+    'help.more', 'help.remind', 'help.remindlist', 'help.remindcancel', 'help.subscribe',
+    'help.subscribelist', 'help.subscribecancel', 'help.config', 'help.export', 'help.diag',
+    'help.outbox', 'help.quiet', 'help.snooze', 'help.media', 'help.usage',
+    'error.reminderInvalidTime', 'error.reminderStorageReadOnly', 'error.reminderSequenceExhausted',
+    'error.reminderWriteFailed', 'error.reminderServiceUnavailable', 'error.reminderChangeUnclear',
+    'error.timedMessageServiceUnavailable', 'error.timedMessageWriteFailed', 'error.timedMessageCancelUnclear',
   ]) {
     assert.equal(Object.hasOwn(CATALOG, key), false, `${key} should not remain in the command catalogue`)
   }
-  assert.doesNotMatch(CATALOG['help.diag'].en, /\bproactive\b|conversation mode/i)
-  assert.doesNotMatch(CATALOG['help.quiet'].en, /proactive/i)
-  assert.doesNotMatch(CATALOG['help.usage'].en, /proactive/i)
 })
 
 

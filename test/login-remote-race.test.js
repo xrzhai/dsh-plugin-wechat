@@ -643,13 +643,3 @@ test('cancel during a QR refresh prevents stale QR work from finishing', async t
   assert.deepEqual(await polling, { status: 'cancelled' })
   await assert.rejects(controller.poll(login.sessionKey), error => error?.code === 'no_login')
 })
-
-
-test('stats retains operational health without retired prompt composition', async () => {
-  const result = await WeixinLoginController.prototype.stats.call({
-    status: async () => ({ accounts: [{ accountId: 'synthetic-stats-account' }] }),
-  }, { days: 1, accountId: 'synthetic-stats-account' })
-  assert.equal(result.days, 1)
-  assert.equal(result.health.parts.find(part => part.key === 'connected').score, 25)
-  assert.equal(Object.hasOwn(result, 'composition'), false)
-})

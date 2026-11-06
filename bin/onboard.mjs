@@ -107,7 +107,6 @@ function main() {
     allowedSenders: Array.isArray(config.allowedSenders) ? config.allowedSenders : [],
     workingDirectory,
     workingDirectoryExists: directoryExists(workingDirectory),
-    backupEnabled: config.backupEnabled === true,
   })
 
   // On a machine with no DSH installed at all (a bare CI runner, a fresh Linux
@@ -139,10 +138,6 @@ function main() {
     for (const [index, line] of quickstartLines().entries()) {
       process.stdout.write(`  ${index + 1}. ${line.command}\n     ${line.note}\n`)
     }
-  }
-
-  if (noHostToCheck) {
-    process.stdout.write('\n没有识别到 DSH 版本。建议重启后打开「大肥鱼」，用手机实际收发一次。\n')
   }
 
   // Exit 0 exactly when the required steps are done. The host is a note either

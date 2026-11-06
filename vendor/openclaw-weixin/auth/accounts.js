@@ -4,7 +4,6 @@ import { normalizeAccountId, mutateConfigFile } from "../openclaw-shim.js";
 
 import { resolveStateDir } from "../storage/state-dir.js";
 import { deleteQuoteCacheForAccount } from "../messaging/quote-store.js";
-import { resolveFrameworkAllowFromPath } from "./pairing.js";
 import { logger } from "../util/logger.js";
 export const DEFAULT_BASE_URL = "https://ilinkai.weixin.qq.com";
 export const CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c";
@@ -179,7 +178,6 @@ export function saveWeixinAccount(accountId, update) {
  *   - accounts/{accountId}.json                  (credentials)
  *   - accounts/{accountId}.sync.json             (getUpdates sync buf)
  *   - accounts/{accountId}.context-tokens.json   (context tokens on disk)
- *   - credentials/openclaw-weixin-{accountId}-allowFrom.json (authorized users)
  */
 export function clearWeixinAccount(accountId) {
     deleteQuoteCacheForAccount(accountId);
@@ -196,12 +194,6 @@ export function clearWeixinAccount(accountId) {
         catch {
             // ignore if not found
         }
-    }
-    try {
-        fs.unlinkSync(resolveFrameworkAllowFromPath(accountId));
-    }
-    catch {
-        // ignore if not found
     }
 }
 /**

@@ -20,7 +20,6 @@
  * @module dsh-weixin/media/outbound
  */
 import fs from 'node:fs/promises'
-import crypto from 'node:crypto'
 import os from 'node:os'
 import path from 'node:path'
 
@@ -44,17 +43,11 @@ export class OutboundMediaError extends Error {
   /**
    * @param {string} message  Human-readable reason, safe to send to the user.
    * @param {string} code
-   * @param {{ captionState?: 'not-sent'|'sent'|'unknown', voiceState?: 'not-attempted'|'rejected'|'unknown' }} [delivery]
-   *   What is known about the two protocol sends. `unknown` means a network
-   *   failure made acceptance indeterminate and a retry could duplicate a
-   *   message.
    */
-  constructor(message, code, delivery = {}) {
+  constructor(message, code) {
     super(message)
     this.name = 'OutboundMediaError'
     this.code = code
-    this.captionState = delivery.captionState
-    this.voiceState = delivery.voiceState
   }
 }
 
@@ -406,167 +399,6 @@ export async function sendOutboundMedia(params) {
 }
 
 /**
- * Send an audio file as a Weixin voice message (SILK `voice_item`).
- *
- * The upload half is the same `getuploadurl → AES → CDN` pipeline the vendored
- * layer runs for files, with `media_type` switched to `UploadMediaType.VOICE`
- * (4) — the vendor never exposes that combination (its exported wrappers are
- * image/video/file only), so this module assembles it from the same exported
- * primitives. The envelope mirrors the transport's `#body` invariants (BOT
- * type, FINISH state, one item, echoed context token).
- *
- * The protocol steps are injectable so tests can run this against fakes:
- * `transcode`, `upload` and `send` default to the real implementations.
- *
- * @param {object} params
- * @param {string} params.filePath  Audio file (wav/silk native; others via ffmpeg).
- * @param {string} params.to        Conversation id (`msg.to_user_id`).
- * @param {string} [params.contextToken]  Echoed inbound token.
- * @param {string} [params.cdnBaseUrl]
- * @param {{ baseUrl: string, token: string, accountId?: string, timeoutMs?: number }} params.opts
- * @param {string} [params.text]    Caption, sent as its own text item first.
- * @param {string} [params.ffmpegPath]  ffmpeg binary for non-wav/silk inputs.
- * @param {(filePath: string, options?: { ffmpegPath?: string }) => Promise<{ silk: Uint8Array, durationMs: number, sampleRate: number }>} [params.transcode]
- * @param {(item: { uploaded: object, durationMs: number, sampleRate: number }) => object} [params.buildItem]
- * @param {(params: { silk: Uint8Array, to: string, opts: object, cdnBaseUrl?: string }) => Promise<{ downloadEncryptedQueryParam: string, aeskey: string }>} [params.upload]
- * @param {(params: object) => Promise<object>} [params.send]
- * @returns {Promise<{ kind: 'voice', serverMessageId?: string }>}
- * @throws {OutboundMediaError} on transcode, upload or send failure. The error
- *   records whether a retry as a file is safe; see
- *   {@link mediaFallbackParamsAfterVoiceError}.
- */
-export async function sendOutboundVoice(params) {
-  const { transcodeToSilk, buildVoiceItem } = await import('./voice-encode.js')
-  const transcode = params.transcode ?? transcodeToSilk
-  const buildItem = params.buildItem ?? buildVoiceItem
-  const [{ getUploadUrl, sendMessage, SendMessageRejectedError }, { uploadBufferToCdn }, { aesEcbPaddedSize }, { CDN_BASE_URL }, { UploadMediaType, MessageItemType, MessageType, MessageState }] =
-    await Promise.all([
-      import('../../vendor/openclaw-weixin/api/api.js'),
-      import('../../vendor/openclaw-weixin/cdn/cdn-upload.js'),
-      import('../../vendor/openclaw-weixin/cdn/aes-ecb.js'),
-      import('../../vendor/openclaw-weixin/auth/accounts.js'),
-      import('../../vendor/openclaw-weixin/api/types.js'),
-    ])
-  const upload = params.upload ?? (async ({ silk, to, opts, cdnBaseUrl }) => {
-    const filekey = crypto.randomBytes(16).toString('hex')
-    const aeskey = crypto.randomBytes(16)
-    const uploadUrlResp = await getUploadUrl({
-      ...opts,
-      filekey,
-      media_type: UploadMediaType.VOICE,
-      to_user_id: to,
-      rawsize: silk.length,
-      rawfilemd5: crypto.createHash('md5').update(silk).digest('hex'),
-      filesize: aesEcbPaddedSize(silk.length),
-      no_need_thumb: true,
-      aeskey: aeskey.toString('hex'),
-    })
-    const uploadFullUrl = uploadUrlResp.upload_full_url?.trim()
-    const uploadParam = uploadUrlResp.upload_param
-    if (!uploadFullUrl && !uploadParam) {
-      throw new Error('getUploadUrl returned no upload URL (need upload_full_url or upload_param)')
-    }
-    const { downloadParam } = await uploadBufferToCdn({
-      buf: Buffer.from(silk),
-      ...(uploadFullUrl ? { uploadFullUrl } : {}),
-      ...(uploadParam ? { uploadParam } : {}),
-      filekey,
-      cdnBaseUrl: cdnBaseUrl || CDN_BASE_URL,
-      aeskey,
-      label: 'voice',
-    })
-    return { downloadEncryptedQueryParam: downloadParam, aeskey: aeskey.toString('hex') }
-  })
-  const send = params.send ?? sendMessage
-  let prepared
-  try {
-    const { silk, durationMs, sampleRate } = await transcode(params.filePath, { ...(params.ffmpegPath === undefined ? {} : { ffmpegPath: params.ffmpegPath }) })
-    const uploaded = await upload({ silk, to: params.to, opts: params.opts, cdnBaseUrl: params.cdnBaseUrl })
-    prepared = { uploaded, durationMs, sampleRate }
-  } catch (error) {
-    throw new OutboundMediaError(`voice upload/send failed: ${String(error?.message ?? error)}`, 'send-failed', {
-      captionState: 'not-sent',
-      voiceState: 'not-attempted',
-    })
-  }
-  const token = params.contextToken
-  /** Mirrors ILinkTransport#body; see that method for the invariants. */
-  const envelope = (item) => ({
-    msg: {
-      from_user_id: '',
-      to_user_id: params.to,
-      client_id: `dsh-weixin-voice-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
-      message_type: MessageType.BOT,
-      message_state: MessageState.FINISH,
-      item_list: [item],
-      ...(token ? { context_token: token } : {}),
-    },
-  })
-  try {
-    if (params.text) {
-      // Upstream splits caption and media into separate sends (text first);
-      // voice keeps the same rule instead of inventing a mixed item_list.
-      await send({ baseUrl: params.opts.baseUrl, token: params.opts.token, body: envelope({ type: MessageItemType.TEXT, text_item: { text: params.text } }) })
-    }
-  } catch (error) {
-    // A parsed `ret != 0` reply proves the server refused the caption. A
-    // timeout or transport error does not: the server may have accepted it
-    // before the response was lost.
-    const rejected = error instanceof SendMessageRejectedError
-    throw new OutboundMediaError(`voice upload/send failed: ${String(error?.message ?? error)}`, 'send-failed', {
-      captionState: rejected ? 'not-sent' : 'unknown',
-      voiceState: 'not-attempted',
-    })
-  }
-  let item
-  try {
-    item = envelope(buildItem(prepared))
-  } catch (error) {
-    throw new OutboundMediaError(`voice upload/send failed: ${String(error?.message ?? error)}`, 'send-failed', {
-      captionState: params.text ? 'sent' : 'not-sent',
-      voiceState: 'not-attempted',
-    })
-  }
-  try {
-    const result = await send({
-      baseUrl: params.opts.baseUrl,
-      token: params.opts.token,
-      body: item,
-    })
-    return { kind: 'voice', ...(result && typeof result === 'object' ? result : {}) }
-  } catch (error) {
-    const rejected = error instanceof SendMessageRejectedError
-    throw new OutboundMediaError(`voice upload/send failed: ${String(error?.message ?? error)}`, 'send-failed', {
-      captionState: params.text ? 'sent' : 'not-sent',
-      voiceState: rejected ? 'rejected' : 'unknown',
-    })
-  }
-}
-
-/**
- * Build the file-send parameters after a voice attempt fails.
- *
- * Returning `undefined` is deliberate: when either protocol send has an
- * indeterminate outcome, retrying as a file can duplicate a caption or media
- * item. Only a known caption state plus a voice request that was never sent or
- * was explicitly rejected is safe to retry.
- *
- * @param {object} mediaParams
- * @param {unknown} error
- * @returns {object | undefined}
- */
-export function mediaFallbackParamsAfterVoiceError(mediaParams, error) {
-  const captionState = error?.captionState
-  const voiceState = error?.voiceState
-  if (!(captionState === 'not-sent' || captionState === 'sent')) return undefined
-  if (!(voiceState === 'not-attempted' || voiceState === 'rejected')) return undefined
-  return {
-    ...mediaParams,
-    ...(captionState === 'sent' ? { text: '' } : {}),
-  }
-}
-
-/**
  * The `opts` the vendored send pipeline needs, assembled once.
  *
  * `accountId` is optional upstream (it only keys the quote cache); `baseUrl` and
@@ -896,7 +728,7 @@ function maskCode(text) {
   // would otherwise be filtered out below and never get to open its fence.
   const fenceCandidates = fenceEvents.filter((event) => chars[event.runStart] !== ' ')
   for (const [start, ticks] of rejectedFenceStarts) {
-    const paragraphEnd = blankLineAfter(text, start)
+    const paragraphEnd = blankLineAfter(start)
     const partner = fenceEvents.find(
       (event) => event.start > start && event.start < paragraphEnd && event.marker === '`' && event.ticks === ticks,
     )

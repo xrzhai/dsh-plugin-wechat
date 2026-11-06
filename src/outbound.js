@@ -3,10 +3,9 @@
 //
 // These functions used to sit at the bottom of src/index.js, next to 2000 lines
 // of wiring they have nothing to do with. The dependencies they used to reach
-// for through module-scope `let`s (journal sink, outbox, hook bus, logger) are
+// for through module-scope `let`s (outbox and logger) are
 // injected once at setup through configureOutbound.
 import { channelFor } from './channel.js'
-import { HOOK_POINTS } from './hooks.js'
 import { chunkText } from './message/chunker.js'
 import { markdownToPlainText, resolveMarkdownMode } from './message/markdown.js'
 import { planRichContent, writeSnippets } from './message/rich-content.js'
@@ -14,19 +13,15 @@ import { createTranslator } from './i18n.js'
 
 /** Wired in setup; every field defaults so a test can exercise one sender. */
 const runtime = {
-  journal: null,
   outbox: undefined,
-  hooks: undefined,
   // Where long code blocks are written before they are sent as attachments.
   snippetsDir: '',
   warn: () => {},
 }
 
-/** Hand the send path its collaborators (journal sink, outbox, hook bus, logger). */
+/** Hand the send path its outbox, snippet directory and logger. */
 export function configureOutbound(deps = {}) {
-  if ('journal' in deps) runtime.journal = deps.journal
   if ('outbox' in deps) runtime.outbox = deps.outbox
-  if ('hooks' in deps) runtime.hooks = deps.hooks
   if ('snippetsDir' in deps) runtime.snippetsDir = deps.snippetsDir
   if (typeof deps.warn === 'function') runtime.warn = deps.warn
 }
@@ -48,7 +43,7 @@ export function configureOutbound(deps = {}) {
 export async function sendChunked(transport, config, message) {
   // SILENT is a host control reply, not a user-facing message. Ordinary and
   // late replies share this boundary but bypass the spontaneous-turn filter.
-  // Check the whole raw body before splitting, journaling, or retry enqueue;
+  // Check the whole raw body before splitting or retry enqueue;
   // prose that merely mentions the marker must remain intact.
   if (/^\[SILENT\]$/i.test((message.text ?? '').trim())) return
 
@@ -61,18 +56,12 @@ export async function sendChunked(transport, config, message) {
     ? { text: message.text ?? '', files: [] }
     : planRichContent(message.text ?? '', { codeFileChars: config.codeFileThreshold })
   const text = markdownToPlainText(plan.text, resolveMarkdownMode(config))
-  runtime.journal?.({
-    accountId: transport.accountId,
-    conversationId: message.conversationId,
-    text,
-  })
   const chunks = chunkText(text, config.maxMessageLength)
   const sent = await sendTextChunks(transport, config, message, chunks, plan.files)
   if (sent && plan.files.length > 0) {
     const failed = await sendSnippets(transport, message, plan.files)
     if (failed.length > 0) {
       const fallback = snippetFallback(config, failed)
-      runtime.journal?.({ accountId: transport.accountId, conversationId: message.conversationId, text: fallback })
       await sendTextChunks(transport, config, message, chunkText(fallback, config.maxMessageLength))
     }
   }
@@ -92,10 +81,8 @@ async function sendTextChunks(transport, config, message, chunks, pendingFiles =
     // re-derived by every caller.
     const channel = channelFor(transport)
     const chunk = { conversationId: message.conversationId, text: chunks[index], contextToken: message.contextToken }
-    runtime.hooks?.emit(HOOK_POINTS.outboundReady, { accountId: transport.accountId, conversationId: message.conversationId, text: chunk.text })
     try {
       await channel.sendText(chunk)
-      runtime.hooks?.emit(HOOK_POINTS.outboundSettled, { accountId: transport.accountId, conversationId: message.conversationId, sent: true })
     } catch (error) {
       // A send that fails here used to lose the text forever: the model had
       // already written it and nothing held a copy. Queue the exact unsent
@@ -114,12 +101,6 @@ async function sendTextChunks(transport, config, message, chunks, pendingFiles =
       // turns a failed ephemeral send into one logged drop instead of a row in
       // outbox.json that can never be delivered.
       if (message.durable === false) {
-        runtime.hooks?.emit(HOOK_POINTS.outboundSettled, {
-          accountId: transport.accountId,
-          conversationId: message.conversationId,
-          sent: false,
-          dropped: pending.length,
-        })
         runtime.warn(`ephemeral send failed (${String(error?.message ?? error)}); dropped ${pending.length} chars`)
         return false
       }
@@ -132,7 +113,7 @@ async function sendTextChunks(transport, config, message, chunks, pendingFiles =
           contextToken: message.contextToken,
           maxMessageLength: config.maxMessageLength,
         })
-        runtime.hooks?.emit(HOOK_POINTS.outboundSettled, { accountId: transport.accountId, conversationId: message.conversationId, sent: false, queued: pending.length })
+
         runtime.warn(`send failed (${String(error?.message ?? error)}); queued ${pending.length} chars for retry`)
         return false
       }

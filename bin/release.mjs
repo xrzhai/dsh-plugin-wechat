@@ -3,7 +3,7 @@
  * One-command release for dsh-plugin-weixin.
  *
  *   node bin/release.mjs <version>            # full release: verify, commit, tag, push, publish
- *   node bin/release.mjs <version> --dry-run  # do everything except publishing
+ *   node bin/release.mjs <version> --dry-run  # rehearse tests, version bump and artifact checks; restore files
  *   node bin/release.mjs <version> --yes      # skip the confirmation prompt
  *   node bin/release.mjs <version> --allow-stale-lockfile  # release despite a stale lockfile
  *
@@ -13,9 +13,8 @@
  *                   already published, node/npm/git/gh present, npm auth live.
  *   2. Guard      — the suite must be green and the tarball's contents sane.
  *   3. Version    — `package.json` (and the README release list) bumped.
- *   4. Verify     — `npm pack` the real artifact and RUN the shipped ASR bridge
- *                   against a known-good tone: proves the thing being uploaded
- *                   actually works, not just that tests pass.
+ *   4. Verify     — `npm pack` the artifact and check its required contents,
+ *                   unwanted development files and file permissions.
  *   5. Commit     — one commit, `chore(release): <version>`.
  *   6. Publish    — `npm publish`, then poll the registry until the version is
  *                   actually visible (npm accepts with 202 and *processes* the
@@ -476,42 +475,6 @@ function bumpVersion(previousVersion) {
 	}
 }
 
-/** Confirm the bridge runs from a scratch copy, so the release proves itself. */
-function smokeTestBridge(extractDir) {
-	const bridge = path.join(extractDir, 'package', 'bin', 'asr-bridge.py')
-	if (!fs.existsSync(bridge)) {
-		die('the tarball does not contain bin/asr-bridge.py', 'check the "files" field and bin/ contents')
-	}
-	// Windows does not expose POSIX execute bits. The bridge is always launched
-	// through Python, so the Unix executable-bit assertion is irrelevant there.
-	const mode = fs.statSync(bridge).mode
-	if (process.platform !== 'win32' && (mode & 0o111) === 0) die('bin/asr-bridge.py lost its executable bit in the tarball')
-
-	// Python with a whisper engine is what a user needs; without one the bridge
-	// still must answer the protocol, which is all this asserts.
-	const python = ['python3', 'python'].find((p) => has(p))
-	if (python === undefined) {
-		warn('no python3 on PATH — skipping the bridge smoke test')
-		return
-	}
-	const result = spawnSync(python, [bridge], {
-		input: '{"wav": ""}\n',
-		encoding: 'utf8',
-		env: { ...process.env, DSH_WEIXIN_ASR_MODEL_DIR: path.join(os.tmpdir(), 'dsh-weixin-release-smoke') },
-	})
-	const line = String(result.stdout ?? '').trim().split('\n').pop() ?? ''
-	let reply
-	try {
-		reply = JSON.parse(line)
-	} catch {
-		die('the shipped bridge did not answer with JSON', `got: ${line.slice(0, 200)}`)
-	}
-	if (reply.ok !== false) {
-		die('the shipped bridge should reject an empty wav path', `got: ${line.slice(0, 200)}`)
-	}
-	ok('the shipped bridge runs and speaks the protocol')
-}
-
 function buildAndVerify() {
 	step('Build and verify the artifact')
 
@@ -525,7 +488,7 @@ function buildAndVerify() {
 
 	const listing = capture('tar', ['-tzf', tarball])
 	const files = listing.split('\n').filter((f) => f.trim() !== '')
-	for (const required of ['package/package.json', 'package/cordis.patch.yml', 'package/bin/asr-bridge.py', 'package/src/index.js']) {
+	for (const required of ['package/package.json', 'package/cordis.patch.yml', 'package/bin/install.mjs', 'package/src/index.js']) {
 		if (!files.includes(required)) die(`the tarball is missing ${required}`)
 	}
 	for (const forbidden of [/__pycache__/, /\.pyc$/, /\/test\//, /\.DS_Store$/, /node_modules/]) {
@@ -560,14 +523,6 @@ function buildAndVerify() {
 	}
 	ok('every packaged file is world-readable')
 
-	const extractDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-weixin-release-'))
-	try {
-		run('tar', ['-xzf', tarball, '-C', extractDir], { stdio: 'ignore' })
-		smokeTestBridge(extractDir)
-	} finally {
-		fs.rmSync(extractDir, { recursive: true, force: true })
-	}
-
 	ok(`tarball ready: ${path.basename(tarball)} (${(fs.statSync(tarball).size / 1024).toFixed(0)} kB)`)
 	return tarball
 }
@@ -584,7 +539,7 @@ function commitRelease(previousVersion) {
 		'commit',
 		'-q',
 		'-m',
-		`chore(release): ${version}\n\nVersion ${previousVersion} -> ${version}.\n\nBuilt and verified by bin/release.mjs: full suite green, tarball inspected,\nand the shipped bin/asr-bridge.py executed from a scratch extraction.`,
+		`chore(release): ${version}\n\nVersion ${previousVersion} -> ${version}.\n\nBuilt and verified by bin/release.mjs: full suite green and tarball contents inspected.`,
 	])
 	ok(`committed ${git(['rev-parse', '--short', 'HEAD'])}`)
 }

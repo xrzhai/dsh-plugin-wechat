@@ -4,8 +4,7 @@
  * Today a send is fire-and-forget. If the socket is down at that moment — the
  * laptop slept, the phone is on a train, the server hiccups — the reply the
  * model already produced is simply gone, and the user is left talking to a bot
- * that "ignored" them. Reminders and /subscribe messages are worse: they are
- * the whole point of the feature and nobody will ever retype them.
+ * that "ignored" them.
  *
  * So a failed text send is persisted here and retried with backoff. This is not
  * a general queue: it holds outbound text per conversation, in order, and tries
@@ -15,7 +14,7 @@
  *
  * Delivery is at-least-once. WeChat's API has no idempotency key we can rely on,
  * so a send that succeeded but whose response was lost can be delivered twice;
- * the alternative (dropping it) is worse for a reminder.
+ * the alternative is dropping the response.
  *
  * @module dsh-weixin/message/outbox
  */
@@ -23,7 +22,6 @@
 import { statePath } from '../state-layout.js'
 import path from 'node:path'
 import { atomicWriteJson, readJsonFile } from '../atomic.js'
-import fs from 'node:fs'
 import { chunkText } from './chunker.js'
 
 /**
@@ -225,8 +223,7 @@ export function createOutbox({ stateRoot, transportFor, warn = () => {}, log = (
    * Drop dead letters that can never be delivered: an item whose context token
    * expired *after* it had already burned its retry budget. A still-retryable
    * item whose token expired is NOT dropped — `flush` retries it tokenless — but
-   * a parked one has nothing left to try, so it only fills `/outbox` and the
-   * pending gauge until it ages out. This is the cleanup that keeps the durable
+   * a parked one has nothing left to try until it ages out. This cleanup keeps the durable
    * outbox from slowly becoming a graveyard (issue #21).
    *
    * @returns {number} how many items were dropped
@@ -420,38 +417,5 @@ export function createOutbox({ stateRoot, transportFor, warn = () => {}, log = (
   }
 
   return { enqueue, flush, pending, drop, prune, start, stop }
-}
-
-/**
- * Whether a file the outbox points at still exists (used by media suggestions
- * in the card; text items do not need it).
- *
- * @param {string} file
- */
-/**
- * 待重发队列的人话版（`/outbox`）。只读，不触发发送。
- *
- * @param {Array<{id:string,createdAt:number,attempts?:number,lastError?:string,text?:string}>} items
- * @param {{ now?: number, limit?: number }} [options]
- */
-export function formatOutbox(items, { now = Date.now(), limit = 5 } = {}) {
-  if (!Array.isArray(items) || items.length === 0) return '重发队列是空的。'
-  const shown = items.slice(0, limit)
-  const lines = shown.map((item, index) => {
-    const minutes = Math.max(0, Math.round((now - Number(item.createdAt ?? now)) / 60_000))
-    const preview = String(item.text ?? '').replace(/\s+/g, ' ').slice(0, 40)
-    const failure = item.lastError ? ` · 上次失败：${String(item.lastError).slice(0, 60)}` : ''
-    return `${index + 1}. ${item.id} · ${minutes} 分钟前 · 尝试 ${item.attempts ?? 0} 次${failure}\n   ${preview}${String(item.text ?? '').length > 40 ? '…' : ''}`
-  })
-  const more = items.length > limit ? `\n…还有 ${items.length - limit} 条。` : ''
-  return `待重发 ${items.length} 条：\n${lines.join('\n')}${more}\n\n/outbox retry 立即重试；/outbox drop <id> 丢弃一条。`
-}
-
-export function stillOnDisk(file) {
-  try {
-    return fs.statSync(file).isFile()
-  } catch {
-    return false
-  }
 }
 
