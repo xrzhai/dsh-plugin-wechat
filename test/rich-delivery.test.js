@@ -32,7 +32,8 @@ for (const failAt of [1, 2]) {
   test(`failed text bubble ${failAt} retains all code in the durable retry without replaying the confirmed prefix`, async (t) => {
     const { root } = setup(t)
     const attempts = [], delivered = [], retried = [], media = []
-    const outbox = createOutbox({ stateRoot: root, transportFor: () => ({ send: async (m) => retried.push(m.text) }) })
+    const retryTransport = { send: async (m) => retried.push(m.text) }
+    const outbox = createOutbox({ stateRoot: root, transportFor: () => retryTransport })
     configureOutbound({ outbox })
     const transport = {
       accountId: 'synthetic-account',
@@ -47,7 +48,7 @@ for (const failAt of [1, 2]) {
     await sendChunked(transport, config, { conversationId: 'synthetic-chat', text: reply })
     assert.equal(media.length, 0)
     assert.equal(outbox.pending().length, 1)
-    const restarted = createOutbox({ stateRoot: root, transportFor: () => ({ send: async (m) => retried.push(m.text) }) })
+    const restarted = createOutbox({ stateRoot: root, transportFor: () => retryTransport })
     await restarted.flush({ force: true })
     const received = [...delivered, ...retried].join('')
     assert.ok(received.includes(code), 'first code body survives exactly')
@@ -68,7 +69,8 @@ for (const failure of ['write', 'media']) {
     }
     const delivered = [], retried = [], media = []
     let failingFallback = true
-    const outbox = createOutbox({ stateRoot: root, transportFor: () => ({ send: async (m) => retried.push(m.text) }) })
+    const retryTransport = { send: async (m) => retried.push(m.text) }
+    const outbox = createOutbox({ stateRoot: root, transportFor: () => retryTransport })
     configureOutbound({ outbox })
     const transport = {
       accountId: 'synthetic-account',

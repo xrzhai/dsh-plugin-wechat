@@ -233,7 +233,8 @@ test('segmented send persists progress across a failed bubble and a restart', as
   assert.deepEqual(f.outbox.pending()[0].segments, ['first', 'middle', 'tail'])
   assert.equal(f.outbox.pending()[0].nextSegment, 1)
 
-  const afterRestart = createOutbox({ stateRoot: f.stateRoot, transportFor: () => ({ send: async (message) => { calls.push(message.text) } }) })
+  const transport = { send: async (message) => { calls.push(message.text) } }
+  const afterRestart = createOutbox({ stateRoot: f.stateRoot, transportFor: () => transport })
   assert.deepEqual(await afterRestart.flush({ force: true }), { sent: 1, failed: 0, remaining: 0 })
   assert.deepEqual(calls, ['first', 'middle', 'middle', 'tail'])
 })
@@ -257,6 +258,52 @@ test('drop and enqueue during a segmented send keep the new row without releasin
   await f.outbox.flush()
   assert.deepEqual(calls, ['one', 'new'])
   assert.deepEqual(f.outbox.pending(), [])
+})
+
+for (const change of ['pause', 'replace', 'stop']) {
+  test(`segmented delivery preserves its unsent suffix after ${change}`, async (t) => {
+    const gate = deferred(), started = deferred(), calls = []
+    const f = fixture(t, async (message) => {
+      calls.push(`old:${message.text}`)
+      started.resolve()
+      await gate.promise
+    })
+    const replacement = { send: async (message) => calls.push(`new:${message.text}`) }
+    f.outbox.enqueue({ accountId: 'a', conversationId: 'c', segments: ['first', 'second'] })
+    const flush = f.outbox.flush()
+    await started.promise
+    if (change === 'stop') f.outbox.stop()
+    else f.setTransport(change === 'pause' ? undefined : replacement)
+    gate.resolve()
+    assert.deepEqual(await flush, { sent: 0, failed: 0, remaining: 1 })
+    assert.deepEqual(calls, ['old:first'])
+    assert.equal(f.outbox.pending()[0].nextSegment, 1)
+    f.setTransport(replacement)
+    if (change === 'stop') f.outbox.start()
+    assert.deepEqual(await f.outbox.flush(), { sent: 1, failed: 0, remaining: 0 })
+    f.outbox.stop()
+    assert.deepEqual(calls, ['old:first', 'new:second'])
+  })
+}
+
+test('pausing one account does not block another account in the same flush', async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'weixin-outbox-accounts-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const gate = deferred(), started = deferred(), calls = []
+  const transports = new Map([
+    ['a', { send: async (message) => { calls.push(`a:${message.text}`); started.resolve(); await gate.promise } }],
+    ['b', { send: async (message) => { calls.push(`b:${message.text}`) } }],
+  ])
+  const outbox = createOutbox({ stateRoot: root, transportFor: (account) => transports.get(account) })
+  outbox.enqueue({ accountId: 'a', conversationId: 'chat-a', segments: ['first', 'second'] })
+  outbox.enqueue({ accountId: 'b', conversationId: 'chat-b', text: 'independent' })
+  const flush = outbox.flush()
+  await started.promise
+  transports.delete('a')
+  gate.resolve()
+  assert.deepEqual(await flush, { sent: 1, failed: 0, remaining: 1 })
+  assert.deepEqual(calls, ['a:first', 'b:independent'])
+  assert.equal(outbox.pending()[0].nextSegment, 1)
 })
 
 test('token expiry during a segmented retry strips the token without replaying the prefix', async (t) => {

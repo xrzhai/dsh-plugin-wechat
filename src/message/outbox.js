@@ -269,6 +269,7 @@ export function createOutbox({ stateRoot, transportFor, warn = () => {}, log = (
    * @param {{ force?: boolean }} [options] force ignores notBefore (manual retry)
    * @returns {Promise<{ sent: number, failed: number, remaining: number }>}
    */
+  let stopped = false
   const runFlush = async (options = {}) => {
     // Clear the parked dead letters first: they are the residue of the old
     // "retry an expired token until it parks" behaviour, and nothing below can
@@ -331,7 +332,7 @@ export function createOutbox({ stateRoot, transportFor, warn = () => {}, log = (
           }
           // Authorization or transport availability may change while a prior
           // segment is in flight. Leave the remaining segments queued.
-          if (transportFor(item.accountId) === undefined) {
+          if (stopped || transportFor(item.accountId) !== transport) {
             blocked = true
             break
           }
@@ -406,12 +407,14 @@ export function createOutbox({ stateRoot, transportFor, warn = () => {}, log = (
 
   let timer
   const start = () => {
+    stopped = false
     timer = setInterval(() => {
       void flush().catch((error) => warn(`outbox flush failed: ${String(error?.message ?? error)}`))
     }, FLUSH_INTERVAL_MS)
     timer.unref?.()
   }
   const stop = () => {
+    stopped = true
     if (timer !== undefined) clearInterval(timer)
     timer = undefined
   }
