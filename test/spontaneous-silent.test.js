@@ -5,7 +5,6 @@ import { readAssistantReply } from '../src/session-reader.js'
 import { CATALOG } from '../src/i18n.js'
 
 // Durable event shapes from DSH agent-loop 0.2.2-rc.1, not a live model or network.
-// Pinned upstream sources and limits: ../docs/silent-reply-recovery.md.
 function step(number, text, options = {}) {
   const content = options.content ?? [{ type: 'text', text }]
   return [

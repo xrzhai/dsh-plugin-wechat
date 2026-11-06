@@ -2,7 +2,7 @@
   "name": "dsh-plugin-wechat",
   "version": "1.6.2",
   "icon": "./assets/icon-128.png",
-  "description": "WeChat (iLink Bot API) remote engineering control surface for DeepSeek Harness — command local DSH agents, receive ordered subagent replies, and dispatch parallel project sessions from WeChat.",
+  "description": "Control your DeepSeek Harness anytime from WeChat — chat with your assistant, exchange local files, follow background tasks, and manage desktop DSH sessions.",
   "type": "module",
   "license": "MIT",
   "keywords": [
