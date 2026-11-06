@@ -1,9 +1,15 @@
 import assert from 'node:assert/strict'
+import { register } from 'node:module'
 import { test } from 'node:test'
 import { readSettledTurns, readAssistantReply } from '../src/session-reader.js'
 import { AgentBridge } from '../src/agent-bridge.js'
 import { CATALOG } from '../src/i18n.js'
-import { createToolResultMessage } from '@deepseek-ai/dsh-llm'
+
+// These tests exercise synthetic turns without requiring the optional DSH peer.
+register(`data:text/javascript,${encodeURIComponent(`export async function resolve(specifier, context, nextResolve) {
+  if (specifier === '@deepseek-ai/dsh-llm') return { url: 'data:text/javascript,export const createUserMessage = (value) => value', shortCircuit: true }
+  return nextResolve(specifier, context)
+}`)}`, import.meta.url)
 
 test('readSettledTurns correctly splits multiple turns in a single event stream', () => {
   const events = [
@@ -114,8 +120,8 @@ test('a message without a terminal event is not assumed complete', () => {
   assert.deepEqual(readSettledTurns({ events }), [])
 })
 
-test('host tool result source.callId clears pending progress for old and current message shapes', () => {
-  const oldResult = createToolResultMessage({ callId: 'call-1', content: [{ type: 'text', text: 'done' }], isError: false })
+test('tool result source.callId clears pending progress for old and current message shapes', () => {
+  const oldResult = { role: 'user', source: { kind: 'tool', callId: 'call-1' }, content: [{ type: 'tool-result', toolCallId: 'call-1', content: [{ type: 'text', text: 'done' }], isError: false }] }
   const currentResult = { role: 'tool', source: { kind: 'tool', callId: 'call-1' }, toolCallId: 'call-1', content: [{ type: 'text', text: 'done' }], isError: false }
   for (const message of [oldResult, currentResult]) {
     const events = [
