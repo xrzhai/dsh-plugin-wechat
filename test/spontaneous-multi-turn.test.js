@@ -1,15 +1,14 @@
 import assert from 'node:assert/strict'
-import { register } from 'node:module'
+import './synthetic-user-message.mjs'
 import { test } from 'node:test'
 import { readSettledTurns, readAssistantReply } from '../src/session-reader.js'
 import { AgentBridge } from '../src/agent-bridge.js'
 import { CATALOG } from '../src/i18n.js'
 
-// These tests exercise synthetic turns without requiring the optional DSH peer.
-register(`data:text/javascript,${encodeURIComponent(`export async function resolve(specifier, context, nextResolve) {
-  if (specifier === '@deepseek-ai/dsh-llm') return { url: 'data:text/javascript,export const createUserMessage = (value) => value', shortCircuit: true }
-  return nextResolve(specifier, context)
-}`)}`, import.meta.url)
+function withInput(events, message) {
+  return [events[0], { seq: 2, type: 'user/message', data: message },
+    ...events.slice(1).map(event => ({ ...event, seq: event.seq + 1 }))]
+}
 
 test('readSettledTurns correctly splits multiple turns in a single event stream', () => {
   const events = [
@@ -149,11 +148,11 @@ for (const reason of ['completed', 'aborted', 'blocked', 'error', 'max-tokens', 
       t.after(() => bridge.dispose())
       const agent = {
         session: { id: 'session-1', snapshotEvents: () => events },
-        followup: () => events.push(
+        followup: message => events.push(...withInput([
           { seq: 1, type: 'turn/start' },
           { seq: 2, type: 'assistant/message', data: { interrupted: reason === 'aborted', message: { content: [{ type: 'text', text: 'partial or final' }] } } },
           { seq: 3, type: 'turn/end', data: { reason: reason === undefined ? undefined : { kind: reason, ...(reason === 'error' ? { error: { code: 'RATE_LIMIT', message: 'provider failed: Bearer synthetic-secret-token-123' } } : {}) } } },
-        ),
+        ], message)),
       }
       bridge.sessions.set('session-1', { agent, busy: false, queue: [], cancelled: false, auditSeq: -1, auditCalls: new Map(), lastDeliveredSeq: -1, dispose: async () => {} })
       const callbacks = []
@@ -164,11 +163,11 @@ for (const reason of ['completed', 'aborted', 'blocked', 'error', 'max-tokens', 
       assert.equal(readSettledTurns({ events })[0].turnSettled, reason === 'completed')
       const expectedStatus = ['aborted', 'blocked', 'error'].includes(reason) ? reason : 'unknown'
       const expected = reason === 'completed' ? 'partial or final' : CATALOG[`turn.${expectedStatus}`].zh
-      assert.equal(late ? callbacks.at(-1).text : result.text, expected)
-      if (reason !== 'completed') assert.equal(late ? callbacks.at(-1).status : result.status, reason ?? 'unknown')
+      assert.equal(reason === 'completed' && late ? callbacks.at(-1).text : result.text, expected)
+      if (reason !== 'completed') assert.equal(result.status, reason ?? 'unknown')
       if (reason === 'error') {
         assert.equal(logs.length, 1)
-        assert.match(logs[0], /turn\/end error session=session-1 seq=3 code="RATE_LIMIT"/)
+        assert.match(logs[0], /turn\/end error session=session-1 seq=4 code="RATE_LIMIT"/)
         assert.match(logs[0], /provider failed: Bearer \*\*\*/)
         assert.doesNotMatch(logs[0], /synthetic-secret-token-123/)
       }
@@ -177,7 +176,7 @@ for (const reason of ['completed', 'aborted', 'blocked', 'error', 'max-tokens', 
 }
 
 for (const late of [false, true]) {
-  test(`unobserved terminal event reports unknown after ${late ? 'late' : 'normal'} wait`, async t => {
+  test(`unobserved terminal event remains uncertain after ${late ? 'late' : 'normal'} wait`, async t => {
     const events = []
     const bridge = new AgentBridge({
       ctx: { get: () => undefined }, lines: { active: () => 'session-1', title: () => undefined },
@@ -186,35 +185,38 @@ for (const late of [false, true]) {
     t.after(() => bridge.dispose())
     const agent = {
       session: { id: 'session-1', snapshotEvents: () => events },
-      followup: () => events.push({ seq: 1, type: 'turn/start' }, { seq: 2, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'partial' }] } } }),
+      followup: message => events.push(...withInput([{ seq: 1, type: 'turn/start' }, { seq: 2, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'partial' }] } } }], message)),
     }
     bridge.sessions.set('session-1', { agent, busy: false, queue: [], cancelled: false, auditSeq: -1, auditCalls: new Map(), lastDeliveredSeq: -1, dispose: async () => {} })
     const callbacks = []
     const result = await bridge.deliver({ conversationId: 'chat', text: 'task', ...(late ? { onLateReply: async value => callbacks.push(value) } : {}) })
-    const notice = late ? callbacks.at(-1) : result
-    assert.equal(notice.text, CATALOG['turn.unobserved'].zh)
-    assert.equal(notice.status, 'unknown')
+    assert.equal(result.text, '')
+    assert.equal(result.uncertain, true)
+    assert.equal(result.status, undefined)
+    assert.deepEqual(callbacks, late ? [{ kind: 'timeout-notice' }] : [])
   })
 }
 
-for (const late of [false, true]) test(`completed remains authoritative with incomplete tool tracking during ${late ? 'late' : 'normal'} delivery`, async t => {
+for (const late of [false, true]) for (const hasFinal of [false, true]) test(`completed turn ${hasFinal ? 'delivers post-tool final' : 'does not deliver pre-tool text'} during ${late ? 'late' : 'normal'} delivery`, async t => {
   const events = []
   const bridge = new AgentBridge({ ctx: { get: () => undefined }, lines: { active: () => 'session-1', title: () => undefined }, eventPollMs: 1, maxWaitMs: late ? 0 : 500, lateReplyMaxWaitMs: 500 })
   t.after(() => bridge.dispose())
   const agent = {
     session: { id: 'session-1', snapshotEvents: () => events },
-    followup: () => events.push(
+    followup: message => events.push(...withInput([
       { seq: 1, type: 'turn/start' },
-      { seq: 2, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'final answer' }] } } },
+      { seq: 2, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'checking' }] } } },
       { seq: 3, type: 'tool/call', data: { callId: 'tool', name: 'read' } },
-      { seq: 4, type: 'turn/end', data: { reason: { kind: 'completed' } } },
-    ),
+      ...(hasFinal ? [{ seq: 4, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'final answer' }] } } }] : []),
+      { seq: hasFinal ? 5 : 4, type: 'turn/end', data: { reason: { kind: 'completed' } } },
+    ], message)),
   }
   bridge.sessions.set('session-1', { agent, busy: false, queue: [], cancelled: false, auditSeq: -1, auditCalls: new Map(), lastDeliveredSeq: -1, dispose: async () => {} })
   const callbacks = []
   const result = await bridge.deliver({ conversationId: 'chat', text: 'task', ...(late ? { onLateReply: async value => callbacks.push(value) } : {}) })
   const delivered = late ? callbacks.at(-1) : result
-  assert.equal(delivered.text, 'final answer')
+  assert.equal(readAssistantReply({ events }).turnSettled, true)
+  assert.equal(delivered.text, hasFinal ? 'final answer' : '')
   assert.equal(delivered.status, undefined)
 })
 
@@ -231,6 +233,7 @@ test('AgentBridge deliver waits for turn/end after a tool-call transition step',
     { seq: 6, type: 'turn/end', data: { reason: { kind: 'completed' } } },
   ]
   let phase = 0
+  let input
   const agent = {
     session: {
       id: 'session-1',
@@ -238,12 +241,12 @@ test('AgentBridge deliver waits for turn/end after a tool-call transition step',
         if (phase === 0) return []
         if (phase === 1) {
           phase = 2
-          return transition
+          return withInput(transition, input)
         }
-        return complete
+        return withInput(complete, input)
       },
     },
-    followup: () => { phase = 1 },
+    followup: message => { input = message; phase = 1 },
   }
   const bridge = new AgentBridge({
     ctx: { get: () => undefined },
@@ -283,6 +286,7 @@ test('AgentBridge late-reply wait still ignores a transition before turn/end', a
     { seq: 6, type: 'turn/end', data: { reason: { kind: 'completed' } } },
   ]
   let phase = 0
+  let input
   const agent = {
     session: {
       id: 'session-1',
@@ -290,12 +294,12 @@ test('AgentBridge late-reply wait still ignores a transition before turn/end', a
         if (phase === 0) return []
         if (phase === 1) {
           phase = 2
-          return transition
+          return withInput(transition, input)
         }
-        return complete
+        return withInput(complete, input)
       },
     },
-    followup: () => { phase = 1 },
+    followup: message => { input = message; phase = 1 },
   }
   const late = []
   const bridge = new AgentBridge({

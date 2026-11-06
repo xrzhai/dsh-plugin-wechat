@@ -21,7 +21,7 @@ DSH 的 turn 不等于一次模型调用。一个 step 已生成完整答复后�
 - 具有匹配的 turn/step、完整 step/start 和 step/end；该 step 仅有一个 assistant/message，且为 append、model 来源。
 - 无 interrupted 标记，stream 明确以 finish(stop) 结束；内容及 stream 不携带工具调用，step 内没有工具事件或 assistant/attempt。
 - 使用正式 message.content 的文本；若 stream 同时带文本，两者必须一致。reasoning、工具参数和工具结果不会进入恢复文本。
-- 不越过后续真人新指令、工具执行、失败尝试或 surface 替换。
+- 不越过后续真人新指令、工具执行、失败尝试或非 system/message 事件上的 surface 替换。system/message 替换的是系统消息，不会撤销已完成的模型答复。
 
 混合正文与标记、其他静默标记、原有发送/游标/outbox 路径不变。`readAssistantReply` 现在对直接回复等待路径复用同一套保守恢复规则：只在匹配的 completed `turn/end` 后选择有完整 step 证据的正文，并忽略 `assistant/attempt`。尤其是原有“以 `[SILENT]` 开头的混合正文会被抑制”不在本次最小修复范围内；本 PR 不宣称解决 issue 中所有描述。
 
@@ -36,6 +36,8 @@ DSH 的 turn 不等于一次模型调用。一个 step 已生成完整答复后�
 宿主 [工具批次](https://github.com/deepseek-ai/deepseek-harness/blob/fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159/packages/core/tools/src/batch.ts)以 `tool/call.data.callId` 和 `tool/result.data.message.source.callId` 配对；[当前结果消息](https://github.com/deepseek-ai/deepseek-harness/blob/fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159/packages/llm/llm/src/message.ts)还包含 `message.toolCallId`。本地 pendingTools 只用于执行中进度，不能覆盖宿主明确的 `completed` 终态。错误回合的用户提示不包含底层详情；主回复、超时补发和主动回报会通过宿主日志和插件文件日志写入可搜索的 `turn/end error`、session、seq、错误码及经凭据脱敏的原因。文件日志沿用现有尽力写入语义，无法保证磁盘故障时落盘。
 
 项目派发保留原有目标授权、来源和 turn 匹配。仅在匹配回合 `completed` 且最后为纯 `[SILENT]` 时，尝试同一保守恢复；候选正文的 seq 必须晚于派发及领取游标。跨回合、领取前、工具说明、失败尝试或被后续人工/relay 指令改变的内容不恢复。事件不完整时继续保留静默标记，不猜测正文；非成功回合返回状态而不是部分正文。
+
+直接回复使用提交的消息 ID 识别所属回合。取消或等待中断只是请求，不代表宿主已停止：未确认前不向该会话提交下一条排队消息。迟到答复发送失败时保留本进程内的重试机会；插件重启后不保证补发，需在 DSH 会话查看。
 
 ## 验证和限制
 

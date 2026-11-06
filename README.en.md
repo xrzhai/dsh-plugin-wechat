@@ -71,7 +71,7 @@ These shortcuts are handled locally by the plugin without spending model tokens:
 
 To deliver a file, ask the assistant to include its path in the reply, or use `/send <file-path>`. Only files inside allowed directories can be sent; the plugin does not scan the workspace and guess which files to deliver.
 
-Topics are separated by WeChat account and chat. After upgrading to source-isolated topics, old topic links are not migrated automatically; the original DSH session history remains in DSH.
+Topics are separated by WeChat account and chat. On upgrade, topics with an unambiguous account and chat are migrated in their original order, keeping the selected DSH session. Topics created since the upgrade are merged into the list. Ambiguous records stay untouched. On startup the channel resumes each chat’s active topic from its saved delivery position; older topics without a cursor start at the latest event on first attachment.
 
 ---
 

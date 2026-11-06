@@ -18,7 +18,7 @@
 
 /** Durable event types that carry settled assistant output. */
 const SETTLED_TYPES = new Set(['assistant/message'])
-const TURN_EVENT_TYPES = new Set(['tool/call', 'tool/result', 'turn/end', ...SETTLED_TYPES])
+const TURN_EVENT_TYPES = new Set(['tool/call', 'tool/result', 'turn/end', 'assistant/attempt', ...SETTLED_TYPES])
 
 const isPureSilent = text => /^\[SILENT\]$/i.test(text.trim())
 
@@ -59,6 +59,14 @@ export function streamText(stream) {
   return out
 }
 
+export function isIndependentInstruction(source) {
+  return ['user', 'weixin-dispatch'].includes(source?.kind)
+}
+
+export function isReplyBoundary(source) {
+  return isIndependentInstruction(source) || source?.kind === 'relay' || source?.form === 'relay'
+}
+
 /**
  * Read the latest settled assistant reply plus in-flight tool activity.
  *
@@ -72,7 +80,35 @@ export function streamText(stream) {
  * reason on that event becomes `unknown`. Text from a non-completed turn may
  * be a partial assistant message and must not be presented as a final answer.
  */
-export function readAssistantReply({ events, afterSeq = -1 }) {
+export function readAssistantReply({ events, afterSeq = -1, messageId, claimedTurn }) {
+  if (messageId !== undefined) {
+    const all = events ?? []
+    const input = all.findIndex(event => event?.seq > afterSeq && event.type === 'user/message' && event.data?.id === messageId)
+    if (input >= 0) {
+      const start = all.findLastIndex((event, index) => index < input && event.type === 'turn/start')
+      if (start < 0) return readAssistantReply({ events: [] })
+      const boundary = all.findLastIndex((event, index) => index < input && index > start && (event.type === 'step/start' || event.type === 'step/end'))
+      const stepStart = boundary > start && all[boundary].type === 'step/start' ? [all[boundary]] : []
+      const remaining = all.slice(input)
+      const end = remaining.findIndex((event, index) => index > 0 && (event.type === 'turn/end' || event.type === 'turn/start'))
+      const turnEvents = end < 0 ? remaining : remaining.slice(0, end + (remaining[end].type === 'turn/end' ? 1 : 0))
+      const superseded = turnEvents.slice(1).some(event => event.type === 'user/message'
+        && isIndependentInstruction(event.data?.source) && event.data?.id !== messageId)
+      const result = readAssistantReply({ events: [all[start], ...stepStart, ...turnEvents] })
+      return superseded ? { ...result, text: '', superseded: true } : result
+    }
+    // A claimed turn may fail before its input reaches the message surface.
+    // Only its terminal failure is safe to report without that input event.
+    const start = all.findLastIndex(event => event.type === 'turn/start' && event.data?.turn === claimedTurn)
+    const following = start < 0 ? [] : all.slice(start + 1)
+    const boundary = following.findIndex(event => event.type === 'turn/end' || event.type === 'turn/start')
+    const end = boundary < 0 ? undefined : following[boundary]
+    if (claimedTurn !== undefined && end?.type === 'turn/end' && end.seq > afterSeq && end.data?.turn === claimedTurn && end.data?.reason?.kind !== 'completed') {
+      return readAssistantReply({ events: [all[start], end] })
+    }
+    return readAssistantReply({ events: [] })
+  }
+
   let text = ''
   let settledSeq = -1
   let sawTurnBoundary = false
@@ -119,7 +155,14 @@ export function readAssistantReply({ events, afterSeq = -1 }) {
         }
         break
       }
+      case 'user/message':
+        if (isReplyBoundary(event.data?.source)) text = ''
+        break
+      case 'assistant/attempt':
+        text = ''
+        break
       case 'tool/call': {
+        text = ''
         const callId = event.data?.callId
         if (typeof callId === 'string') {
           pending.set(callId, typeof event.data.name === 'string' ? event.data.name : 'tool')
@@ -133,6 +176,7 @@ export function readAssistantReply({ events, afterSeq = -1 }) {
       }
       default:
         if (!SETTLED_TYPES.has(event.type)) break
+        if (event.data?.interrupted === true || event.data?.message?.content?.some?.(block => block?.type === 'tool-call')) { text = ''; break }
         // Prefer the embedded stream when present; fall back to the message body.
         const fromStream = streamText(event.data?.stream)
         const fromMessage = messageText(event.data?.message)
@@ -202,8 +246,8 @@ export function replyBeforeSilent(events, afterSeq = -1) {
   for (let i = candidate + 1; i < events.length; i++) {
     const event = events[i]
     if (event.type === 'assistant/attempt' || event.type === 'tool/call' || event.type === 'tool/result'
-      || (event.type === 'user/message' && ['user', 'relay'].includes(event.data?.source?.kind))
-      || typeof event.surfaceOp === 'object') return undefined
+      || (event.type === 'user/message' && isReplyBoundary(event.data?.source))
+      || (event.type !== 'system/message' && event.surfaceOp !== null && typeof event.surfaceOp === 'object')) return undefined
     if (event.type === 'assistant/message' && (!isPureSilent(body(event)) || !completeMessage(i))) return undefined
   }
   return { text: messageText(events[candidate].data.message), seq: events[candidate].seq }
@@ -226,6 +270,8 @@ export function readSettledTurns({ events, afterSeq = -1 }) {
   /** @type {Array<{ text: string, settledSeq: number, pendingTools: string[], turnError: (string | undefined), turnErrorCode: (string | undefined), turnReason: string, turnSettled: boolean, silentRecoveredFromSeq?: number }>} */
   const turns = []
   let current = null
+  let inputs = []
+  let latestInstructionSeq = -1
   function initTurn(seq) {
     return {
       text: '',
@@ -241,6 +287,11 @@ export function readSettledTurns({ events, afterSeq = -1 }) {
   }
 
   for (const event of events ?? []) {
+    if (event?.type === 'turn/start') { inputs = []; latestInstructionSeq = -1 }
+    if (event?.type === 'user/message') {
+      if (typeof event.data?.id === 'string') inputs.push({ id: event.data.id, seq: event.seq })
+      if (isIndependentInstruction(event.data?.source) && Number.isFinite(event.seq)) latestInstructionSeq = event.seq
+    }
     if (typeof event?.seq === 'number' && event.seq <= afterSeq) continue
 
     if (event?.type === 'turn/start') {
@@ -278,6 +329,10 @@ export function readSettledTurns({ events, afterSeq = -1 }) {
           text: recovered?.text ?? current.text,
           ...(recovered ? { silentRecoveredFromSeq: recovered.seq } : {}),
           settledSeq: current.settledSeq,
+          turn: event.data?.turn,
+          inputIds: inputs.map(input => input.id),
+          inputs: [...inputs],
+          latestInstructionSeq,
           pendingTools: [...current.pending.values()],
           turnError: current.turnError,
           turnErrorCode: current.turnErrorCode,
@@ -287,7 +342,14 @@ export function readSettledTurns({ events, afterSeq = -1 }) {
         current = null
         break
       }
+      case 'user/message':
+        if (isReplyBoundary(event.data?.source)) current.text = ''
+        break
+      case 'assistant/attempt':
+        current.text = ''
+        break
       case 'tool/call': {
+        current.text = ''
         const callId = event.data?.callId
         if (typeof callId === 'string') {
           current.pending.set(callId, typeof event.data.name === 'string' ? event.data.name : 'tool')
@@ -301,6 +363,7 @@ export function readSettledTurns({ events, afterSeq = -1 }) {
       }
       default:
         if (!SETTLED_TYPES.has(event.type)) break
+        if (event.data?.interrupted === true || event.data?.message?.content?.some?.(block => block?.type === 'tool-call')) { current.text = ''; break }
         const fromStream = streamText(event.data?.stream)
         const fromMessage = messageText(event.data?.message)
         const body = fromStream !== '' ? fromStream : fromMessage
