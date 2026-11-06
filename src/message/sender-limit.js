@@ -15,8 +15,8 @@
  * @module dsh-weixin/message/sender-limit
  */
 
-/** Defaults: 20 messages per minute per sender, 6 turns ahead at most. */
-export const DEFAULT_PER_MINUTE = 20
+/** No per-minute cap by default; queue up to six turns. */
+export const DEFAULT_PER_MINUTE = 0
 export const DEFAULT_MAX_QUEUE = 6
 /** How long a "too fast" notice stays quiet for that sender. */
 export const WARN_COOLDOWN_MS = 60_000
@@ -27,7 +27,7 @@ const WINDOW_MS = 60_000
  * @param {{ perMinute?: number, warnCooldownMs?: number, now?: () => number }} [options]
  */
 export function createSenderLimiter(options = {}) {
-  const perMinute = Math.max(1, Number(options.perMinute ?? DEFAULT_PER_MINUTE))
+  const perMinute = Number(options.perMinute ?? DEFAULT_PER_MINUTE)
   const warnCooldownMs = Number(options.warnCooldownMs ?? WARN_COOLDOWN_MS)
   const now = options.now ?? (() => Date.now())
   /** @type {Map<string, number[]>} sender → timestamps inside the window */
@@ -42,6 +42,7 @@ export function createSenderLimiter(options = {}) {
    * @returns {{ allowed: boolean, shouldWarn: boolean, retryAfterMs: number, recent: number }}
    */
   const check = (key) => {
+    if (!(perMinute > 0)) return { allowed: true, shouldWarn: false, retryAfterMs: 0, recent: 0 }
     const at = now()
     const cutoff = at - WINDOW_MS
     const list = (hits.get(key) ?? []).filter((stamp) => stamp > cutoff)

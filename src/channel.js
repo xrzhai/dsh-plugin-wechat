@@ -45,9 +45,10 @@ export function createChannel(transport) {
     transport,
     sendText: ({ conversationId, text, contextToken }) =>
       transport.send({ conversationId, type: 'text', text, contextToken }),
-    sendMedia: ({ conversationId, filePath, text = '', contextToken, cdnBaseUrl, maxBytes }) =>
+    sendMedia: ({ conversationId, filePath, text = '', contextToken, cdnBaseUrl, maxBytes, allowedDirs }) =>
       transport.sendMedia({ conversationId, filePath, text, contextToken, cdnBaseUrl,
-        ...(maxBytes === undefined ? {} : { maxBytes }) }),
+        ...(maxBytes === undefined ? {} : { maxBytes }),
+        ...(allowedDirs === undefined ? {} : { allowedDirs }) }),
     setTyping: (active, conversationId) => transport.setTyping(active, conversationId),
   };
 }

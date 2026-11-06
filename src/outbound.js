@@ -59,7 +59,7 @@ export async function sendChunked(transport, config, message) {
   const chunks = chunkText(text, config.maxMessageLength)
   const sent = await sendTextChunks(transport, config, message, chunks, plan.files)
   if (sent && plan.files.length > 0) {
-    const failed = await sendSnippets(transport, message, plan.files)
+    const failed = await sendSnippets(transport, message, plan.files, config)
     if (failed.length > 0) {
       const fallback = snippetFallback(config, failed)
       await sendTextChunks(transport, config, message, chunkText(fallback, config.maxMessageLength))
@@ -130,7 +130,7 @@ async function sendTextChunks(transport, config, message, chunks, pendingFiles =
  *
  * Return failed files so their unmodified bodies can be sent as text instead.
  */
-async function sendSnippets(transport, message, files) {
+async function sendSnippets(transport, message, files, config) {
   const channel = channelFor(transport)
   if (channel === undefined || channel.capabilities?.media !== true) return files
   const dir = runtime.snippetsDir
@@ -151,6 +151,8 @@ async function sendSnippets(transport, message, files) {
       await channel.sendMedia({
         conversationId: message.conversationId,
         filePath: output.path,
+        maxBytes: config.maxMediaBytes,
+        allowedDirs: config.allowedMediaDirs,
         text: '',
         contextToken: message.contextToken,
       })

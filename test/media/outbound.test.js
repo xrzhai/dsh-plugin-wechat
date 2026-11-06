@@ -1,3 +1,5 @@
+import { createSendCommands } from '../../src/message/send-file.js'
+import { ILinkTransport } from '../../src/transport/ilink.js'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import os from 'node:os'
@@ -110,4 +112,68 @@ test('a lone tilde expands to home and still needs an allowing root', async () =
     path: home,
     existed: true,
   })
+})
+
+test('unrestricted attachments use cwd then state for relative paths and accept other absolute paths', async (t) => {
+  const root = await homeFixture(t)
+  const cwd = path.join(root, 'work')
+  const stateDir = path.join(root, 'state')
+  await Promise.all([fs.mkdir(cwd), fs.mkdir(stateDir)])
+  const files = [path.join(cwd, 'script.js'), path.join(stateDir, 'image.png'), path.join(root, 'report (final).custom')]
+  await Promise.all(files.map((file) => fs.writeFile(file, 'data')))
+  const sent = []
+  const text = ['[code](script.js)', '![photo](image.png)', files[2], '[web](https://example.org/other.js)', '`secret.txt`'].join('\n')
+  const result = await deliverOutboundMedia({ text, cwd, stateDir, send: async ({ filePath }) => sent.push(filePath) })
+  assert.deepEqual(sent, await Promise.all(files.map(f => fs.realpath(f))))
+  assert.deepEqual(result.failed, [])
+  assert.ok(result.text.includes('[web]'))
+  assert.ok(result.text.includes('secret.txt'))
+  assert.ok(!result.text.includes(files[2]))
+  const homePath = '~/' + path.relative(os.homedir(), files[2]).split(path.sep).join('/')
+  assert.equal((await resolveAllowedPath(homePath, [], { cwd, stateDir })).path, sent[2])
+})
+
+test('an explicit directory list applies to /send and rejects symlink escapes', async (t) => {
+  const root = await homeFixture(t)
+  const allowed = path.join(root, 'allowed')
+  await fs.mkdir(allowed)
+  await fs.writeFile(path.join(root, 'secret.js'), 'secret')
+  await fs.symlink(root, path.join(allowed, 'link'), process.platform === 'win32' ? 'junction' : 'dir')
+  const send = createSendCommands({ cwd: root, stateDir: root, allowedDirs: [allowed], sendMedia: () => assert.fail('sent outside root') }).send
+  assert.match(await send('secret.js'), /outside|does not exist/)
+  assert.match(await send(path.join(allowed, 'link', 'secret.js')), /outside/)
+})
+
+test('/send waits for a growing file and applies size, existence and regular-file checks', async (t) => {
+  const cwd = await homeFixture(t)
+  const file = path.join(cwd, 'capture.bin')
+  await fs.writeFile(file, '')
+  const sent = []
+  const { send } = createSendCommands({ cwd, maxBytes: 4, sendMedia: async ({ filePath }) => sent.push(await fs.readFile(filePath, 'utf8')) })
+  const pending = send('capture.bin')
+  const timer = setTimeout(() => fs.writeFile(file, 'done'), 60)
+  t.after(() => clearTimeout(timer))
+  assert.match(await pending, /capture.bin/)
+  assert.deepEqual(sent, ['done'])
+  await fs.appendFile(file, '!')
+  assert.match(await send(file), /larger/)
+  await fs.truncate(file)
+  assert.match(await send(file), /empty/)
+  assert.match(await send(cwd), /regular/)
+  assert.match(await send('missing'), /does not exist/)
+  assert.equal(sent.length, 1)
+})
+
+test('actual uploader checks size after pacing, before contacting the CDN', async (t) => {
+  const dir = await homeFixture(t)
+  const file = path.join(dir, 'growing.txt')
+  await fs.writeFile(file, 'a')
+  const transport = new ILinkTransport({
+    accountId: 'test', baseUrl: 'https://example.invalid', token: 'test',
+    pacer: { acquire: async () => { await fs.appendFile(file, 'bc') }, noteFailure() {}, noteSuccess() {} },
+  })
+  await assert.rejects(transport.sendMedia({ filePath: file, conversationId: 'test', maxBytes: 2 }), /larger/)
+  const handle = await fs.open(file, 'r+')
+  try { await handle.truncate(100 * 1024 * 1024 + 1) } finally { await handle.close() }
+  await assert.rejects(transport.sendMedia({ filePath: file, conversationId: 'test' }), /100MB/)
 })

@@ -1,31 +1,32 @@
-# 平行会话调度 / Parallel Session Dispatcher
+# 在微信里查看和管理其他 DSH 会话
 
-Related #27. This implementation is intentionally opt-in and keeps issue #27 open for host/device validation.
+在微信里说“帮我找一下写周报的会话，看看进行到哪了”，助理可以先列出本机的普通 DSH 会话，再查询匹配项。要改任务，直接说明是给运行中的任务补充要求、请求停止，还是让空闲会话接着做。无需自己查会话 ID。
 
-## 配置与使用
+## 默认权限与配置
 
-设置卡「平行会话调度」或现有插件配置：
+跨会话调度默认开启。「高级」里，前三组常用设置之后的「远程查看与管理 DSH 会话」只提供总开关。需要更细的限制时，编辑插件配置：
 
 ```json
 {
   "sessionDispatcherEnabled": true,
-  "sessionDispatcherSenders": ["your-allowed-weixin-sender-id"],
-  "sessionDispatcherTargets": ["existing-project-session-id"],
+  "sessionDispatcherSenders": [],
+  "sessionDispatcherTargets": [],
   "protectedSessions": [],
   "readOnlyPaths": []
 }
 ```
 
-- `sessionDispatcherEnabled` 默认 `false`。两个授权列表默认均为 `[]`，拒绝访问；本 PR 不修改任何部署配置。
-- `sessionDispatcherSenders` 必须同时满足普通网关 `allowedSenders` / `allowedChats`。这里的发送者共享同一份目标名单，只适合相同信任范围的人。不要把陌生人和所有者混在一个调度者名单里。
-- `sessionDispatcherTargets` 是精确会话 ID，无通配符。先由宿主操作者确认要开放的现有项目会话 ID，再填入配置。未授权的会话不会出现在列表、不能查询或控制。
-- `protectedSessions` 中的 ID 仍可被授权读取，拒绝 followup / steer / cancel。
-- `readOnlyPaths` 必须是绝对工作区根路径。保护子目录、路径边界和真实路径/符号链接别名；无法安全解析目标目录时拒绝写入。
-- 授权保存即生效；开启后在下一条微信消息的会话 attach 时挂载工具。运行中撤销发送者、目标或开关会阻止后续工具调用及结果回推。
+- 先检查当前微信账号的有效允许名单（账号自己的名单，或它继承的全局名单）。自动认主登记的联系人也可使用，不需要再填全局名单。
+- `sessionDispatcherSenders` 留空表示该账号所有已获准对话的联系人都可以使用；填入微信用户 ID 后，仅其中已获准的联系人可以使用。此配置不能给原本未获准的人授权。
+- `sessionDispatcherTargets` 留空表示所有本机普通 DSH 会话；非空时按完整会话 ID 限制列出、查询和调度的范围，不支持通配符。各调度者共用这份目标名单。
+- 当前来源会话、其他微信控制会话及内部子会话都不是访问目标。归档会话、`protectedSessions` 列出的会话及 `readOnlyPaths` 下的会话可查看，不能通过调度工具接收新任务、补充指令或停止请求。只读路径填绝对路径，包括子目录和链接别名。
+- 关闭开关或撤销联系人、目标的权限，会阻止后续调用和结果回推。
+
+## 工具和宿主限制
 
 `session_list` 支持状态、标题/ID、工作目录关键词、1–50 条限制。输出有整体字符预算。冷会话若宿主不能低成本提供事件数量，`totalEvents` 为 `null` 而不是假报 0；其 `lastUpdatedMs` 可能仅为创建/标题更新时间，结果会说明。`session_query` 才读取完整快照得到精确事件数，返回最近 1–20 轮内的有界文本和工具状态，不返回推理内容。
 
-`session_dispatch` 参数与 issue 相同：目标 ID、`followup|steer|cancel`、非空指令，以及可选 `sync|async` / `timeout_ms`（默认 60 秒，最大 300 秒）。所有控制行为均要求目标写权限。
+`session_dispatch` 需要：目标 ID、`followup|steer|cancel`、非空指令，以及可选 `sync|async` / `timeout_ms`（默认 60 秒，最大 300 秒）。所有控制行为均要求目标写权限。
 
 - 空闲且没有待处理 inbox 的项目可 `followup`。忙碌或遗留待处理输入时拒绝，不暗中排队、清空旧消息、顺带执行旧任务或抢占桌面工作。
 - 运行中项目可 `steer` 或 `cancel`。cancel 保留尚未执行的 inbox，且必须观察对应回合以用户原因 aborted 才报告取消成功。
@@ -59,7 +60,6 @@ Related #27. This implementation is intentionally opt-in and keeps issue #27 ope
 - 异步追踪仅存在内存，最长观察一小时。达到观察窗口、事件读取失败或插件退出不代表目标执行失败；回执会明确结果不确定。**没有持久派发账本、重启重放/恢复或端到端 exactly-once 交付承诺。** 不应在不确定时自动重投。
 - 微信发送使用现有 `sendChunked` / durable outbox。接受发送或入队不证明用户手机已收到；网络重试沿用现有至少一次语义。没有可用原账号时不会跨账号发送。
 - 插件关闭会移除工具并停止观察。借用的桌面 live agent 不由本模块 dispose；由本模块冷恢复并持有的会话遵循宿主 ownership，插件卸载时可能被停止。它的持久历史仍留在宿主中。
-- 已同步 main 中 PR #28 的按回合自发回复修复。调度结果仍使用独立的派发 ID / 目标 turn 关联，不交给主会话自发回复轮询处理。
 
 ## 验证与本机交接
 
@@ -71,13 +71,11 @@ Related #27. This implementation is intentionally opt-in and keeps issue #27 ope
 
 本机操作者在独立测试 profile 中验证，勿直接对生产项目试 cancel：
 
-1. 记录 DSH / Node 版本和 PR 最终 SHA；运行 `npm test`、`npm run check`、`npm run test:host-contract`，保留各项结果。若最后一项显示 legacy refusal，应更新到受支持的现代宿主，或仅验收已有 live 会话；不要将拒绝测试视为冷恢复成功。
-2. 使用两个合成项目会话、一个微信测试主会话；默认关闭和空名单都不可访问。仅授权一个目标，确认另一个不会出现在列表且直接 query/dispatch 拒绝。
+1. 记录 DSH / Node 版本和 插件提交号；运行 `npm test`、`npm run check`、`npm run test:host-contract`，保留各项结果。若最后一项显示 legacy refusal，应更新到受支持的现代宿主，或仅验收已有 live 会话；不要将拒绝测试视为冷恢复成功。
+2. 使用两个合成项目会话、一个微信测试主会话；用自动认主的联系人验证默认可列出、查询和调度两个项目，未获准的联系人不能访问。再分别收窄发送者和目标名单，确认不在范围内的联系人或目标无法访问；关闭总开关后两者均不可访问。
 3. 验证活跃/冷会话列表与标题，冷 query 不唤醒，冷 resume 保持项目 cwd / 最新 preset / 模型设置；归档会话只读。
 4. 空闲 followup 返回其自身结果；忙碌 followup 拒绝；steer 纠偏；cancel 仅操作合成任务并保留待处理 inbox。
 5. 让两个完成回合在同一轮询间隔内发生，其中第二个 `[SILENT]`；派发结果应仍为对应回合，而不是最后一个回合。
 6. 超短同步窗口返回追踪凭证，完成后仅原账号收到文本结果，无自动附件上传；切换账号、暂停账号、撤销发送者/目标时不发到别处。
 7. 自调用、继承工具的子代理、其他微信控制会话、只读路径的符号链接均被拒绝；配置无关目录/兄弟前缀不应误判为子目录。
 8. 主动卸载测试插件，记录冷恢复任务的宿主清理行为与未发送通知；重启后先 query，不盲目重投。
-
-真机验收后再考虑将草稿设为 ready；本 PR 不合并、不关闭 issue。

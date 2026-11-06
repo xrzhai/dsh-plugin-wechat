@@ -465,17 +465,16 @@ test('the settings page exposes and saves dispatcher permissions on a fresh prof
   assert.ok(dispatcher, 'core dispatcher settings must not be filtered out')
   dispatcher.props.onClick()
   const open = f.render()
-  for (const label of ['允许通过微信管理其他会话', '可以管理其他会话的人', '可被操作的 DSH 会话', '跨会话管理中只能查看的 DSH 会话', '不要通过跨会话管理操作的工作区']) {
-    assert.ok(text(open).includes(label), label)
+  for (const label of ['可以管理其他会话的人', '可被操作的 DSH 会话', '跨会话管理中只能查看的 DSH 会话', '不要通过跨会话管理操作的工作区']) {
+    assert.ok(!text(open).includes(label), label)
   }
-  const checkbox = nodes(open).find(node => node.type === 'input' && node.props.type === 'checkbox' && node.props.checked === false && node.props.onChange)
   // Pick the field control by its surrounding label, rather than the toolbar filter.
   const field = nodes(open).find(node => node.type === 'div' && text(node).includes('允许通过微信管理其他会话') && nodes(node).filter(n => n.type === 'input' && n.props.type === 'checkbox').length === 1)
   const toggle = nodes(field).find(node => node.type === 'input' && node.props.type === 'checkbox')
-  assert.ok(checkbox && toggle)
-  toggle.props.onChange({ target: { checked: true } })
+  assert.equal(toggle.props.checked, true)
+  toggle.props.onChange({ target: { checked: false } })
   await button(f.render(), '保存').props.onClick()
-  assert.ok(saved.some(entry => entry.path === 'sessionDispatcherEnabled' && entry.value === true))
+  assert.ok(saved.some(entry => entry.path === 'sessionDispatcherEnabled' && entry.value === false))
 })
 
 test('a settings RPC failure is visible instead of rendering an empty settings page', async () => {

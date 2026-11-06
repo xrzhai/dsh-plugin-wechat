@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { SessionDispatcher, SESSION_TOOL_SCHEMAS, assertWritable } from '../src/session-dispatcher.js'
+import { enrolFirstContact, registryFile } from '../src/account-registry.js'
 import { dispatchedTurn, recentSessionTurns } from '../src/session-dispatch-reader.js'
 
 const text = value => ({ content: [{ type: 'text', text: value }] })
@@ -55,10 +56,10 @@ function completedSilentTurn(dispatchId, answer = 'actual result') {
   ].map((event, index) => ({ ...event, seq: index + 1 }))
 }
 
-test('disabled by default, mounts opt-in tools once, visibility and execution require exact live controller', async t => {
-  const f = fixture(t, { sessionDispatcherEnabled: undefined }); f.dispatcher.mount(f.controller); assert.equal(f.registered.size, 0)
+test('enabled by default, mounts tools once, visibility and execution require exact live controller', async t => {
+  const f = fixture(t, { sessionDispatcherEnabled: false }); f.dispatcher.mount(f.controller); assert.equal(f.registered.size, 0)
   await assert.rejects(f.invoke('session_list', {}), /disabled/)
-  f.options.sessionDispatcherEnabled = true; f.dispatcher.mount(f.controller); f.dispatcher.mount(f.controller); assert.equal(f.registered.size, 3)
+  delete f.options.sessionDispatcherEnabled; f.dispatcher.mount(f.controller); f.dispatcher.mount(f.controller); assert.equal(f.registered.size, 3)
   const { tool, options } = f.registered.get('session_list'); const child = { ...f.controller }
   assert.equal(options.when({ agent: child }), false); assert.equal(options.when({ agent: f.controller }), true)
   await assert.rejects(tool.execute({}, { agent: child }), /original live/)
@@ -215,9 +216,9 @@ for (const mode of ['sync', 'async']) {
   })
 }
 
-test('sender must be both allowed for Weixin and explicitly allowed for dispatch; side/cycle callers denied', async t => {
+test('sender must be allowed for Weixin and meet any narrower dispatch policy; side/cycle callers denied', async t => {
   const f = fixture(t)
-  f.options.sessionDispatcherSenders = []; await assert.rejects(f.invoke('session_list', {}), /not authorized/)
+  f.options.sessionDispatcherSenders = ['other']; await assert.rejects(f.invoke('session_list', {}), /not authorized/)
   f.options.sessionDispatcherSenders = ['user-A']; f.options.allowedSenders = ['different']; await assert.rejects(f.invoke('session_list', {}), /not authorized/)
   f.options.allowedSenders = ['user-A']; f.source.isSideSession = true; await assert.rejects(f.invoke('session_list', {}), /Recursive/)
   f.source.isSideSession = false; f.dispatcher.locks.set('controller', 1); await assert.rejects(f.invoke('session_list', {}), /Recursive/)
@@ -275,8 +276,46 @@ test('monitor deadline reports uncertainty without cancelling or resubmitting ta
   assert.equal(result.ok, false); assert.match(result.notice, /may still run/); assert.equal(f.calls.length, 1); assert.equal(f.dispatcher.jobs.size, 0)
 })
 
-test('target grant defaults deny, hides ungranted metadata and refuses reads/writes before host access', async t => {
-  const f = fixture(t, { sessionDispatcherTargets: undefined }); f.add(); f.add('a')
+test('an enrolled account owner can discover, read, dispatch and receive results with empty narrow lists', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dispatch-owner-'))
+  const previous = process.env.DSH_WEIXIN_STATE_DIR
+  process.env.DSH_WEIXIN_STATE_DIR = root
+  t.after(() => {
+    if (previous === undefined) delete process.env.DSH_WEIXIN_STATE_DIR
+    else process.env.DSH_WEIXIN_STATE_DIR = previous
+    fs.rmSync(root, { recursive: true, force: true })
+  })
+  const f = fixture(t, { sessionDispatcherEnabled: undefined, sessionDispatcherTargets: [], sessionDispatcherSenders: [], allowedSenders: [] })
+  f.add(); f.add('weixin-cold-topic', { agent: undefined }); f.add('wx-mem-old', { agent: undefined }); f.add('child', { header: { origin: 'subagent' } })
+  assert.equal(enrolFirstContact('bot-A', 'user-A'), true)
+  assert.deepEqual((await f.invoke('session_list', {})).sessions.map(row => row.sessionId), ['project'])
+  assert.equal((await f.invoke('session_query', { session_id: 'project' })).sessionId, 'project')
+  for (const id of ['weixin-cold-topic', 'wx-mem-old', 'child', 'controller']) {
+    await assert.rejects(f.invoke('session_query', { session_id: id }), /not authorized|subagent|Self/i)
+    await assert.rejects(f.invoke('session_dispatch', args({ session_id: id })), /not authorized|subagent|Self/i)
+  }
+  const dispatch = () => f.invoke('session_dispatch', args())
+  const finish = async (receipt) => {
+    const job = f.dispatcher.jobs.get(receipt.dispatchId)
+    f.complete('project', receipt.dispatchId)
+    await job.promise
+  }
+  await finish(await dispatch())
+  assert.equal(f.notifications.length, 1)
+  f.source.accountId = 'bot-B'
+  await assert.rejects(dispatch(), /not authorized/)
+  f.source.accountId = 'bot-A'
+  const receipt = await dispatch()
+  // Corruption must not fall back to a permissive global allowlist.
+  f.options.allowedSenders = ['user-A']
+  fs.writeFileSync(registryFile(), '{broken')
+  await finish(receipt)
+  assert.equal(f.notifications.length, 1)
+  await assert.rejects(f.invoke('session_list', {}), /not authorized/)
+})
+
+test('a nonempty target grant hides ungranted metadata and refuses reads/writes before host access', async t => {
+  const f = fixture(t, { sessionDispatcherTargets: ['other'] }); f.add(); f.add('a')
   assert.deepEqual((await f.invoke('session_list', { status: 'all' })).sessions, [])
   let reads = 0; const original = f.host.read; f.host.read = async id => { reads++; return original(id) }
   await assert.rejects(f.invoke('session_query', { session_id: 'project' }), /not authorized/)
@@ -293,17 +332,17 @@ test('target grant defaults deny, hides ungranted metadata and refuses reads/wri
 test('revoking target grant during cold restore or final read prevents instruction admission', async t => {
   const f = fixture(t); f.add(); delete f.rows.get('project').agent
   const resume = f.host.resume
-  f.host.resume = async id => { const agent = await resume(id); f.options.sessionDispatcherTargets = []; return agent }
+  f.host.resume = async id => { const agent = await resume(id); f.options.sessionDispatcherTargets = ['other']; return agent }
   await assert.rejects(f.invoke('session_dispatch', args()), /revoked/)
   assert.deepEqual(f.calls.map(c => c.action), ['resume']); assert.equal(f.dispatcher.locks.has('project'), false)
   f.options.sessionDispatcherTargets = ['project']; const read = f.host.read; let reads = 0
-  f.host.read = async id => { const row = await read(id); if (++reads === 2) f.options.sessionDispatcherTargets = []; return row }
+  f.host.read = async id => { const row = await read(id); if (++reads === 2) f.options.sessionDispatcherTargets = ['other']; return row }
   await assert.rejects(f.invoke('session_dispatch', args()), /revoked/); assert.deepEqual(f.calls.map(c => c.action), ['resume'])
 })
 
 test('revoked target grant suppresses asynchronous completion notification', async t => {
   const f = fixture(t); f.add(); const receipt = await f.invoke('session_dispatch', args())
-  f.options.sessionDispatcherTargets = []; f.complete('project', receipt.dispatchId, 'private target result')
+  f.options.sessionDispatcherTargets = ['other']; f.complete('project', receipt.dispatchId, 'private target result')
   await new Promise(resolve => setTimeout(resolve, 10)); assert.equal(f.notifications.length, 0); assert.equal(f.dispatcher.jobs.size, 0)
 })
 

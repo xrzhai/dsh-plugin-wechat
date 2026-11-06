@@ -885,7 +885,7 @@ export class ILinkTransport {
    * @returns {Promise<{ kind: string, filekey?: string, serverMessageId?: string }>}
    * @throws when the upload or the send fails; the caller degrades to text.
    */
-  async sendMedia({ filePath, conversationId, contextToken, cdnBaseUrl, text, caption }) {
+  async sendMedia({ filePath, conversationId, contextToken, cdnBaseUrl, text, caption, maxBytes, allowedDirs }) {
     const mediaCaption = caption ?? text
     const outbound = this.outbound ?? await import('../media/outbound.js')
     const { sendOutboundMedia, mediaSendOptions } = outbound
@@ -903,7 +903,7 @@ export class ILinkTransport {
     let result
     try {
       const mediaParams = {
-        filePath,
+        filePath, maxBytes, allowedDirs,
         to: conversationId,
         contextToken: contextToken ?? this.#fallbackContextToken(),
         cdnBaseUrl: cdnBaseUrl ?? this.cdnBaseUrl,

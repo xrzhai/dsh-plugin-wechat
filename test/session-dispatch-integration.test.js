@@ -8,6 +8,8 @@ import { Context } from '@deepseek-ai/cordis'
 import { AgentBridge } from '../src/agent-bridge.js'
 import { SessionDispatcher } from '../src/session-dispatcher.js'
 import { apply } from '../src/index.js'
+import { atomicWriteJson } from '../src/atomic.js'
+import { enrolFirstContact } from '../src/account-registry.js'
 import { ILinkTransport } from '../src/transport/ilink.js'
 import { configureWeixinStateDir, configFile, stateDir } from '../src/state.js'
 import { saveWeixinAccount, registerWeixinAccountId } from '../vendor/openclaw-weixin/auth/accounts.js'
@@ -58,6 +60,8 @@ test('attach mounts only main controllers, deduplicates tools and fences other a
   await assert.rejects(tool.definition.execute({}, { agent: main.agent }), /disabled/)
   f.policy.sessionDispatcherEnabled = true
   f.policy.sessionDispatcherSenders = []
+  await assert.doesNotReject(tool.definition.execute({}, { agent: main.agent }))
+  f.policy.sessionDispatcherSenders = ['another-owner']
   await assert.rejects(tool.definition.execute({}, { agent: main.agent }), /not authorized/)
   await f.bridge.dispose()
   assert.equal(tools.size, 0)
@@ -272,19 +276,23 @@ test('apply wires saved policy and exact account/chat dispatch notification rout
   await notify({ conversationId: 'unapproved-chat' })
   assert.equal(sent.length, 1)
   const controller = ctx.get('configController')
-  const save = (path, value) => controller.save(JSON.stringify([{ path, value }]))
+  // The optional narrowing lists live in the saved config file.
+  const save = (key, value) => {
+    const config = JSON.parse(fs.readFileSync(configFile(), 'utf8'))
+    assert.equal(atomicWriteJson(configFile(), { ...config, [key]: value }), true)
+  }
   for (const [field, restored] of [['sessionDispatcherTargets', ['project-fixture']], ['sessionDispatcherSenders', ['owner']]]) {
     let release, entered = false
     const pending = new Promise((resolve) => { release = resolve })
     const refresh = t.mock.method(origin, 'refreshConfig', async () => { entered = true; await pending })
     const sending = notify()
     await until(() => entered)
-    await save(field, [])
+    save(field, ['other'])
     release()
     await sending
     refresh.mock.restore()
     assert.equal(sent.length, 1, `${field} revocation during refresh must prevent delivery`)
-    await save(field, restored)
+    save(field, restored)
   }
   {
     let release, entered = false
@@ -333,13 +341,13 @@ test('dispatch notifications keep long code inline as text, never as a lossy att
   configureWeixinStateDir()
   fs.writeFileSync(configFile(), JSON.stringify({
     enabled: true,
-    sessionDispatcherEnabled: true,
-    sessionDispatcherSenders: ['owner'],
-    sessionDispatcherTargets: ['project-fixture'],
-    allowedSenders: ['owner'],
+    sessionDispatcherSenders: [],
+    sessionDispatcherTargets: [],
+    allowedSenders: [],
     allowedChats: ['owner'],
   }))
   const account = 'dispatch-rich-account'
+  assert.equal(enrolFirstContact(account, 'owner'), true)
   saveWeixinAccount(account, { token: 'synthetic-test-token', userId: 'owner', baseUrl: 'https://example.invalid' })
   registerWeixinAccountId(account)
   const started = [], sent = [], mediaCalls = []
@@ -356,7 +364,7 @@ test('dispatch notifications keep long code inline as text, never as a lossy att
   let disposed = false
   const dispose = async () => { if (!disposed) { disposed = true; await ctx.fiber.dispose() } }
   t.after(async () => { await dispose(); if (env === undefined) delete process.env.DSH_WEIXIN_STATE_DIR; else process.env.DSH_WEIXIN_STATE_DIR = env; fs.rmSync(root, { recursive: true, force: true }) })
-  apply(ctx, { enabled: true, allowedSenders: ['owner'], notifyEnabled: false, mediaEnabled: false, typingIndicator: false })
+  apply(ctx, { enabled: true, allowedSenders: [], notifyEnabled: false, mediaEnabled: false, typingIndicator: false })
   await until(() => started.length === 1)
   await tick()
   // Attaching a live controller is what creates the SessionDispatcher; drive one

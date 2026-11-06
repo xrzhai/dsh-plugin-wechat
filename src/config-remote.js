@@ -35,31 +35,6 @@ const T = {
  */
 export const FIELDS = [
   {
-    group: "远程查看与管理 DSH 会话", groupEn: "View and manage DSH sessions",
-    fields: [
-      { path: "sessionDispatcherEnabled", type: T.boolean, default: false,
-        label: CATALOG['config.sessionDispatcherEnabled.label'].zh, labelEn: CATALOG['config.sessionDispatcherEnabled.label'].en,
-        hint: CATALOG['config.sessionDispatcherEnabled.hint'].zh,
-        hintEn: CATALOG['config.sessionDispatcherEnabled.hint'].en },
-      { path: "sessionDispatcherSenders", type: T.stringList, default: [], emptyMeansAll: false,
-        label: "可以管理其他会话的人", labelEn: "People who may manage other sessions",
-        hint: "每行一个微信用户 ID。此人还必须能通过微信正常和助理对话（账号可能沿用全局名单，也可能使用自己的名单）；同时，跨会话管理仍要求此人出现在下面「允许与助手对话的人」全局名单中。这里留空时，任何人都不能查看或操作其他会话。",
-        hintEn: "One WeChat user ID per line. The person must also be allowed to chat with the assistant through WeChat, using either the account's own list or the global list it inherits. Cross-session management additionally requires the person to be in the global “People who may chat with the assistant” list below. If this list is empty, nobody can view or manage other sessions." },
-      { path: "sessionDispatcherTargets", type: T.stringList, default: [], emptyMeansAll: false,
-        label: "可被操作的 DSH 会话", labelEn: "DSH sessions that may be managed",
-        hint: "每行填写一个完整的会话 ID，不支持通配符。这里留空时不能操作任何会话；上面列出的所有人共用这份名单，请只加入信任同一批人的会话。",
-        hintEn: "One exact session ID per line; wildcards are not supported. An empty list allows no sessions. Everyone listed above shares this list, so include only sessions you trust those people to access." },
-      { path: "protectedSessions", type: T.stringList, default: [],
-        label: "跨会话管理中只能查看的 DSH 会话", labelEn: "View-only sessions in cross-session management",
-        hint: "每行一个会话 ID。它只限制跨会话管理工具：允许查看，但不能借这项功能发送新任务、补充指令或请求停止。普通微信对话不会因为这里而变成只读。",
-        hintEn: "One session ID per line. This only limits the cross-session management tools: the session can be viewed, but those tools cannot add tasks, inject instructions or request cancellation. Ordinary WeChat chat does not become read-only because of this setting." },
-      { path: "readOnlyPaths", type: T.stringList, default: [],
-        label: "不要通过跨会话管理操作的工作区", labelEn: "Workspaces excluded from cross-session management",
-        hint: "每行一个绝对路径，子目录和链接到它的路径也一并排除。它只限制“跨会话管理”功能向这些目录中的会话安排或控制任务，不影响普通微信对话，也不是文件权限或系统沙箱。",
-        hintEn: "One absolute path per line; descendants and linked paths are excluded too. This only prevents the cross-session management feature from scheduling or controlling tasks in sessions under these folders. It does not affect ordinary WeChat chat and is not a filesystem sandbox." },
-    ],
-  },
-  {
     group: "基本设置",
     groupEn: "Basics",
     fields: [
@@ -162,6 +137,12 @@ export const FIELDS = [
         emptyMeansAll: false,
       },
       {
+        path: "senderRatePerMinute",
+        type: T.number, default: 0, min: 0, step: 1,
+        label: "每人每分钟消息上限", labelEn: "Messages per person per minute",
+        hint: "默认 0，表示不限。", hintEn: "Use 0 for no limit (the default).",
+      },
+      {
         path: "allowedChats",
         type: T.stringList,
         default: [],
@@ -171,6 +152,15 @@ export const FIELDS = [
         hintEn: "Optional. Empty allows approved people in any private chat; group chats are not enabled by this setting alone. Otherwise, list the allowed conversation IDs, one per line.",
         emptyMeansAll: true,
       },
+    ],
+  },
+  {
+    group: "远程查看与管理 DSH 会话", groupEn: "View and manage DSH sessions",
+    fields: [
+      { path: "sessionDispatcherEnabled", type: T.boolean, default: true,
+        label: CATALOG['config.sessionDispatcherEnabled.label'].zh, labelEn: CATALOG['config.sessionDispatcherEnabled.label'].en,
+        hint: CATALOG['config.sessionDispatcherEnabled.hint'].zh,
+        hintEn: CATALOG['config.sessionDispatcherEnabled.hint'].en },
     ],
   },
 ];
