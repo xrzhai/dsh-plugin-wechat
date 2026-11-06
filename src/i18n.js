@@ -57,6 +57,7 @@ export const CATALOG = Object.freeze({
         en: 'Could not {actionEn}: the reminder may no longer exist, or the change may not have been saved. Check /remindlist; if the reminder is still there, restart DSH and try again.',
     },
     'notice.longRunning': { zh: '（这条消息处理时间较长，先回复别的消息不影响它；结果出来后会直接发到这里）', en: '(This task is taking longer. You can send other messages; its result will arrive here when ready.)' },
+    'notice.snippetFallback': { zh: '（附件 {name} 的发送未确认，代码如下）', en: '(Sending attachment {name} could not be confirmed; code follows)' },
     'onboarding.loginPanel': { zh: '打开 DSH → 左侧边栏「大肥鱼」→「微信账号」→「扫码登录微信」', en: 'Open DSH → WeChat in the sidebar → WeChat Account → Scan QR code to log in' },
     // --- command help -------------------------------------------------------
     'help.more': { zh: '/help all 查看提醒、订阅和维护指令', en: '/help all shows reminders, subscriptions and maintenance commands' },

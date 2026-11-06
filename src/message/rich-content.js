@@ -230,7 +230,7 @@ export function planRichContent(markdown, options = {}) {
     const name = `snippet-${files.length + 1}.${extensionFor(part.lang)}`
     files.push({ name, body: part.body })
     const lines = part.body.split('\n').length
-    const note = `（代码 ${lines} 行、${part.body.length} 字，已作为文件 ${name} 发出）`
+    const note = `（代码 ${lines} 行、${part.body.length} 字：${name}）`
     notes.push(note)
     return note
   })
@@ -241,31 +241,32 @@ export function planRichContent(markdown, options = {}) {
 /**
  * Write planned snippet files into the state directory and return their paths.
  *
- * Names carry a timestamp so two replies never overwrite each other; a write
- * failure drops that file (the inline note then says "file" for something that
- * is not there, so the caller gets `written` back and can correct the text).
+ * Each reply gets its own directory and each file is created exclusively, so
+ * overlapping uploads cannot read content written by another reply. Callers
+ * can use `written` to fall back to the body of any file that failed to write.
  *
  * @param {{ name: string, body: string }[]} files
  * @param {string} dir  Directory to write into (created if missing).
- * @param {{ now?: number, warn?: (line: string) => void }} [options]
+ * @param {{ warn?: (line: string) => void }} [options]
  * @returns {{ written: { name: string, path: string }[], failed: number }}
  */
 export function writeSnippets(files, dir, options = {}) {
   const warn = options.warn ?? (() => {})
-  const stamp = new Date(Number(options.now ?? Date.now())).toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)
   const written = []
   let failed = 0
   if (files.length === 0) return { written, failed }
+  let replyDir
   try {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
+    replyDir = fs.mkdtempSync(path.join(dir, 'reply-'))
   } catch (error) {
     warn(`could not create the snippet directory: ${String(error?.message ?? error)}`)
     return { written, failed: files.length }
   }
   for (const file of files) {
-    const target = path.join(dir, `${stamp}-${file.name}`)
+    const target = path.join(replyDir, file.name)
     try {
-      fs.writeFileSync(target, file.body.endsWith('\n') ? file.body : `${file.body}\n`, { mode: 0o600 })
+      fs.writeFileSync(target, file.body.endsWith('\n') ? file.body : `${file.body}\n`, { mode: 0o600, flag: 'wx' })
       written.push({ name: file.name, path: target })
     } catch (error) {
       failed += 1
