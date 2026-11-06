@@ -63,6 +63,13 @@ function desktop() {
   return {render,click,labels,buttons,entries,statuses,saved,nav,summaries,loads,seats};
 }
 
+test("header action shadows the native catalog entry instead of adding a second trigger",()=>{
+  const {actions,lineage}=desktop().seats;
+  assert.equal(actions.o.id,"subagent-catalog");
+  assert.ok(actions.o.priority<0);
+  assert.ok(lineage.o.priority<0);
+});
+
 test("running first then newest at each tree level; root and sidebar use direct-parent addresses",()=>{
   const d=desktop();
   d.entries("p",[["old",1],["busy",0],["new",2]]);

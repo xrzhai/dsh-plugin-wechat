@@ -10,7 +10,6 @@ window.__ModuleLoader__.load({
       en: {one: "{n} subagent", count: "{n} subagents", bulk: "Archive finished", archived: "Archived ({n})", archive: "Archive", restore: "Unarchive", aside: "Open in sidebar", running: "Running", idle: "Idle", done: "Completed", retry: "Retry", loading: "Loading…", sync: "Archives not synced to this computer", expand: "Expand children", collapse: "Collapse children", menu: "Switch subagent", error: "Could not load sessions", migration: "Open session to migrate", external: "External subagent"}
     };
     const css = `
-[class$="_headerActions"]:has(.wx-sa-action) .rezYhW_root { display:none }
 .wx-sa-trigger,.wx-sa-menu button { font:inherit; color:inherit; background:none; border:0; border-radius:5px; cursor:pointer; padding:3px 5px }
 .wx-sa-trigger:hover,.wx-sa-menu button:not(:disabled):hover {background:var(--dsw-alias-interactive-bg-hover)}
 .wx-sa-action,.wx-sa-lineage { display:inline-flex; align-items:center; min-width:0; font-size:12px }
@@ -142,9 +141,10 @@ window.__ModuleLoader__.load({
       const inject=()=>({cache,openChild:a=>ctx.uiWorkspace.openSession(a),
         openAside:a=>ctx.sidebarRight.openResource("dsh-resource://subagentchat/session/"+encodeURIComponent(a.childSessionId)+"?"+new URLSearchParams({parent:a.parentSessionId,mode:a.mode}),{kind:"subagentchat",preferNewPane:true}),
         refresh:id=>ctx.sessions.refreshProjections(id)});
-      for(const [seat,component,options] of [["actions",Action,{order:10}],["lineage",Lineage,{priority:-10}]]){
+      // DSH renders the lowest priority for each list entry ID (and for single slots).
+      for(const [seat,component,options] of [["actions",Action,{id:"subagent-catalog",order:10}],["lineage",Lineage,{}]]){
         const name="conversation.session.header."+seat;
-        ctx.slots.inject(name,()=>ctx.slots.register({name,id:"weixin-subagent-"+seat,locale:ns,inject,...options},component));
+        ctx.slots.inject(name,()=>ctx.slots.register({name,priority:-10,locale:ns,inject,...options},component));
       }
     }
     return {registerSubagentMenu};
