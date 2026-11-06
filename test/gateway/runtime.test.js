@@ -435,6 +435,25 @@ test('an unreadable registry at startup does not start an account transport', as
   assert.equal(fs.readFileSync(path.join(f.root, 'accounts-registry.json'), 'utf8'), corrupt)
 })
 
+test('manual outbox recovery is authorized and limited to the originating chat', async t => {
+  const f = fixture(t, { enabled: true })
+  await until(() => f.started.length === 1, 'runtime starts')
+  const queue = createOutbox({ stateRoot: f.root, transportFor: () => undefined })
+  for (const conversationId of ['test-user', 'another']) {
+    queue.enqueue({ accountId: ACCOUNT, conversationId, text: 'kept for ' + conversationId, deliveryUncertain: true })
+  }
+  const inbound = f.started[0].testInbound
+  await inbound({ ...f.message('denied'), senderId: 'stranger', text: '/outbox retry' })
+  assert.deepEqual(f.sent, [])
+  await inbound({ ...f.message('inspect'), text: '/outbox' })
+  assert.match(f.sent[0].text, /1/)
+  await inbound({ ...f.message('recover'), text: '/outbox retry' })
+  assert.equal(f.sent[1].text, 'kept for test-user')
+  assert.equal(f.sent.length, 3)
+  assert.deepEqual(queue.pending().map(item => item.conversationId), ['another'])
+  assert.equal(f.sessions.length, 0)
+})
+
 test('outbox retry waits while the authorization registry is corrupt', async (t) => {
   const f = fixture(t, { enabled: true, captureOutboxTick: true })
   await until(() => f.started.length === 1, 'runtime starts')
