@@ -21,10 +21,25 @@
  */
 import { createHash } from 'node:crypto'
 import { readAssistantReply, readSettledTurns, describePending } from './session-reader.js'
+import { CATALOG } from './i18n.js'
+import { redactSecrets } from './credentials.js'
 import { SessionDispatcher } from './session-dispatcher.js'
 import { baseSessionIdFor, scopedLineKey, SessionLines, runSessionCommand } from './sessions.js'
 
 const NO_RUNNING_REPLY = '现在没有正在处理的回复，不需要停止。'
+
+function terminalNotice(reason) {
+  if (reason === 'aborted') return CATALOG['turn.aborted'].zh
+  if (reason === 'blocked') return CATALOG['turn.blocked'].zh
+  if (reason === 'error') return CATALOG['turn.error'].zh
+  return CATALOG['turn.unknown'].zh
+}
+
+function logTurnError(errLog, sessionId, reply) {
+  const code = redactSecrets(reply.turnErrorCode ?? 'unknown')
+  const reason = redactSecrets(reply.turnError ?? 'unknown error')
+  errLog(`turn/end error session=${sessionId} seq=${reply.settledSeq} code=${JSON.stringify(code)} reason=${JSON.stringify(reason)}`)
+}
 
 /**
  * `@deepseek-ai/dsh-llm` resolves only from inside a DSH profile, so it is
@@ -1146,15 +1161,13 @@ export class AgentBridge {
       const events = record.agent.session?.snapshotEvents?.() ?? []
       this.#auditEvents(record, events, before)
       const reply = readAssistantReply({ events, afterSeq: before })
-      if (reply.text !== '') return { text: reply.text, sessionId }
-      // A failed turn is OVER: no assistant message will ever arrive, and the
-      // turn/end(error) event is already durable. Waiting out the deadline
-      // here holds record.busy for the whole budget, so the user's NEXT
-      // message queues behind a turn that can never answer — the "one model
-      // failure and everything after is stuck" report. Answer immediately.
-      if (reply.turnError !== undefined) {
-        return { text: `（模型调用失败：${reply.turnError}）`, sessionId }
+      if (reply.turnReason !== undefined && reply.turnReason !== 'completed') {
+        if (reply.turnReason === 'error') logTurnError(this.errLog, sessionId, reply)
+        return { text: terminalNotice(reply.turnReason), sessionId, status: reply.turnReason }
       }
+      // Intermediate assistant messages can precede tool calls in the same
+      // turn. They are progress, not the final delivery contract.
+      if (reply.turnSettled) return { text: reply.text, sessionId }
 
       // A long tool run is invisible in WeChat. The first note goes out after
       // progressAfterMs; after that a CHANGED tool set is re-announced at most
@@ -1190,7 +1203,7 @@ export class AgentBridge {
     // its answer would be lost if we simply returned. Keep listening at a
     // slow cadence until the turn settles, then hand the final text to the
     // late-reply callback so the caller can deliver it out of band.
-    if (onLateReply === undefined) return { text: '（处理超时，请稍后查看会话）', sessionId }
+    if (onLateReply === undefined) return { text: CATALOG['turn.unobserved'].zh, sessionId, status: 'unknown' }
     if (!lateAnnounced) {
       lateAnnounced = true
       try {
@@ -1215,26 +1228,40 @@ export class AgentBridge {
       const events = record.agent.session?.snapshotEvents?.() ?? []
       this.#auditEvents(record, events, before)
       const reply = readAssistantReply({ events, afterSeq: before })
-      if (reply.text !== '') {
-        record.lastDeliveredSeq = Math.max(record.lastDeliveredSeq ?? -1, this.#lastSeq(record.agent))
+      if (reply.turnReason !== undefined && reply.turnReason !== 'completed') {
+        const status = reply.turnReason
+        if (status === 'error') logTurnError(this.errLog, sessionId, reply)
+        record.lastDeliveredSeq = Math.max(record.lastDeliveredSeq ?? -1, reply.settledSeq)
         try {
-          await onLateReply({ kind: 'reply', text: reply.text })
+          await onLateReply({ kind: 'reply', text: terminalNotice(status), status })
         } catch (error) {
           this.errLog(`late reply delivery failed: ${String(error)}`)
         }
-        // The answer went out through the late-reply channel; the caller must
-        // not send the normal reply path again.
         return { text: '', sessionId, late: true }
       }
-      // Same failure rule as the primary loop: an errored turn is over, and
-      // the late wait must not spin for its full hour either.
-      if (reply.turnError !== undefined) {
+      // The same settlement rule applies after the normal wait expires: a
+      // transition step must not be mistaken for the eventual final answer.
+      if (reply.turnSettled) {
         record.lastDeliveredSeq = Math.max(record.lastDeliveredSeq ?? -1, this.#lastSeq(record.agent))
+        if (reply.text !== '') {
+          try {
+            await onLateReply({ kind: 'reply', text: reply.text })
+          } catch (error) {
+            this.errLog(`late reply delivery failed: ${String(error)}`)
+          }
+        }
+        // This turn was consumed through the late-reply channel; if it had a
+        // non-empty answer, that callback already delivered it.
         return { text: '', sessionId, late: true }
       }
       await new Promise((resolve) => setTimeout(resolve, latePollMs))
     }
     this.errLog(`late reply wait gave up for ${sessionId}`)
+    try {
+      await onLateReply({ kind: 'reply', text: CATALOG['turn.unobserved'].zh, status: 'unknown' })
+    } catch (error) {
+      this.errLog(`late reply delivery failed: ${String(error)}`)
+    }
     return { text: '', sessionId, late: true }
   }
 
@@ -1255,14 +1282,9 @@ export class AgentBridge {
       this.#auditEvents(record, events, afterSeq)
       const turns = readSettledTurns({ events, afterSeq })
       for (const turn of turns) {
-        if (turn.turnError !== undefined) {
-          record.lastDeliveredSeq = Math.max(record.lastDeliveredSeq ?? -1, turn.settledSeq)
-          continue
-        }
-        if (!turn.turnSettled || turn.pendingTools?.length > 0) {
-          continue
-        }
-        const trimmedReply = turn.text.trim()
+        if (turn.turnReason === 'error') logTurnError(this.errLog, sessionId, turn)
+        const replyText = turn.turnReason === 'completed' ? turn.text : terminalNotice(turn.turnReason)
+        const trimmedReply = replyText.trim()
         if (trimmedReply === '') {
           record.lastDeliveredSeq = Math.max(record.lastDeliveredSeq ?? -1, turn.settledSeq)
           continue
@@ -1283,7 +1305,7 @@ export class AgentBridge {
               accountId: record.accountId,
               conversationId: record.conversationId,
               sessionId,
-              text: turn.text,
+              text: replyText,
             })
             record.lastDeliveredSeq = Math.max(record.lastDeliveredSeq ?? -1, turn.settledSeq)
           } catch (error) {

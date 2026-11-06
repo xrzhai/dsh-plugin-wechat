@@ -1,6 +1,6 @@
 // Dispatch readers deliberately do not use the gateway's latest-reply reader:
 // several turns can settle between polls, and only the marked turn belongs to us.
-import { streamText } from './session-reader.js'
+import { replyBeforeSilent, streamText } from './session-reader.js'
 
 export const clip = (value, max = 2000) => {
   const text = typeof value === 'string' ? value : ''
@@ -27,15 +27,18 @@ export function dispatchedTurn(events, job) {
   let turn
   let matched = false
   let text = ''
+  let turnEvents = []
   const tools = new Set()
   for (const event of events ?? []) {
     if (event.type === 'turn/start') {
+      turnEvents = []
       turn = event.data?.turn
       matched = (claimedTurn !== undefined && turn === claimedTurn)
         || (action === 'cancel' && cancelTurn !== undefined && turn === cancelTurn)
       text = ''
       tools.clear()
     }
+    turnEvents.push(event)
     // Enqueue/splice is NOT ownership: a queued followup can be inserted while
     // a completely different turn is still running. Only claimed input counts.
     if (event.seq > afterSeq && event.type === 'user/message'
@@ -46,7 +49,10 @@ export function dispatchedTurn(events, job) {
       && (turn === undefined || event.data?.turn === undefined || event.data.turn === turn)) {
       const reason = event.data?.reason
       const ok = action === 'cancel' ? reason?.kind === 'aborted' && reason.reason?.kind === 'user' : reason?.kind === 'completed'
-      return { done: true, ok, replyText: clip(text, 8000), toolsExecuted: [...tools].filter(Boolean).slice(0, 50),
+      if (ok && action !== 'cancel' && /^\[SILENT\]$/i.test(text.trim())) {
+        text = replyBeforeSilent(turnEvents, Math.max(afterSeq, job.claimedAfterSeq ?? afterSeq))?.text ?? text
+      }
+      return { done: true, ok, replyText: clip(ok ? text : '', 8000), toolsExecuted: [...tools].filter(Boolean).slice(0, 50),
         ...(ok ? (action === 'cancel' ? { notice: 'Target turn cancelled; queued inbox was preserved.' } : {}) : { notice: `Target turn ended: ${reason?.kind ?? 'unknown'}.` }) }
     }
     if (event.type === 'turn/end') matched = false

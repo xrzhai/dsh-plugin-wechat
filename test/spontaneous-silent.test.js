@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { AgentBridge } from '../src/agent-bridge.js'
+import { readAssistantReply } from '../src/session-reader.js'
+import { CATALOG } from '../src/i18n.js'
 
 // Durable event shapes from DSH agent-loop 0.2.2-rc.1, not a live model or network.
 // Pinned upstream sources and limits: ../docs/silent-reply-recovery.md.
@@ -61,6 +63,14 @@ test('a completed reply survives a later silent step of the same turn once', asy
   assert.ok(f.logs.every(line => !line.includes('Important reminder') && !line.includes('PRIVATE')))
 })
 
+test('readAssistantReply recovers a completed reply before a same-turn silent step', () => {
+  const events = turn([step(1, 'Important reminder'), step(2, '[SILENT]')])
+  const reply = readAssistantReply({ events, afterSeq: 0 })
+  assert.equal(reply.text, 'Important reminder')
+  assert.equal(reply.turnSettled, true)
+  assert.equal(reply.settledSeq, events.at(-1).seq)
+})
+
 test('only the latest completed reply is retained, never concatenating drafts', async t => {
   const f = await fixture(t, turn([step(1, 'Old answer'), step(2, 'Revised answer'), step(3, '[SILENT]')]))
   assert.deepEqual(f.delivered, ['Revised answer'])
@@ -101,11 +111,32 @@ test('cancellation marker never resurrects a previous reply', async t => {
 })
 
 for (const reason of ['aborted', 'blocked', 'interrupted', 'forked', 'max-tokens', 'error']) {
-  test(`non-completed turn never publishes a partial reply: ${reason}`, async t => {
-    const f = await fixture(t, turn([step(1, 'Partial reply'), step(2, '[SILENT]')], reason))
-    assert.deepEqual(f.delivered, [])
+  test(`non-completed turn reports its status instead of publishing a partial reply: ${reason}`, async t => {
+    const f = await fixture(t, turn([step(1, 'Partial reply')], reason))
+    const expected = ['aborted', 'blocked', 'error'].includes(reason) ? reason : 'unknown'
+    assert.deepEqual(f.delivered, [CATALOG[`turn.${expected}`].zh])
+    await f.bridge.testPollSpontaneous()
+    assert.equal(f.delivered.length, 1)
   })
 }
+
+test('unknown terminal reason reports uncertainty but completed remains authoritative', async t => {
+  const missingReason = turn([step(1, 'Partial')])
+  missingReason.at(-1).data.reason = undefined
+  const first = await fixture(t, missingReason)
+  assert.deepEqual(first.delivered, [CATALOG['turn.unknown'].zh])
+  const unresolved = turn([step(1, 'Partial', { tools: true })]).filter(event => event.type !== 'tool/result')
+  const second = await fixture(t, unresolved)
+  assert.deepEqual(second.delivered, ['Partial'])
+})
+
+test('spontaneous failure logs the reason and code without sending partial text', async t => {
+  const events = turn([step(1, 'Partial')], 'error')
+  events.at(-1).data.reason.error = { code: 'RATE_LIMIT', message: 'provider unavailable' }
+  const f = await fixture(t, events)
+  assert.deepEqual(f.delivered, [CATALOG['turn.error'].zh])
+  assert.ok(f.logs.some(line => line.includes('turn/end error session=synthetic') && line.includes('RATE_LIMIT') && line.includes('provider unavailable')))
+})
 
 test('a delivery error retains the cursor and retries the recovered reply', async t => {
   let calls = 0

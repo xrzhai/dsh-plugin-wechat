@@ -37,6 +37,24 @@ function fixture(t, config = {}) {
 }
 const args = (more = {}) => ({ session_id: 'project', action: 'followup', instruction: 'Do this task', mode: 'async', ...more })
 
+function completedSilentTurn(dispatchId, answer = 'actual result') {
+  const step = (number, value) => [
+    { type: 'step/start', data: { turn: 1, step: number } },
+    { type: 'assistant/message', surfaceOp: 'append', data: {
+      turn: 1, step: number,
+      message: { role: 'assistant', source: { kind: 'model' }, content: [{ type: 'text', text: value }] },
+      stream: [{ type: 'text-chunks', texts: [value] }, { type: 'chunk', chunk: { type: 'finish', reason: { kind: 'stop' } } }],
+    } },
+    { type: 'step/end', data: { turn: 1, step: number } },
+  ]
+  return [
+    { type: 'turn/start', data: { turn: 1 } },
+    { type: 'user/message', data: { source: { dispatchId } } },
+    ...step(1, answer), ...step(2, '[SILENT]'),
+    { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } },
+  ].map((event, index) => ({ ...event, seq: index + 1 }))
+}
+
 test('disabled by default, mounts opt-in tools once, visibility and execution require exact live controller', async t => {
   const f = fixture(t, { sessionDispatcherEnabled: undefined }); f.dispatcher.mount(f.controller); assert.equal(f.registered.size, 0)
   await assert.rejects(f.invoke('session_list', {}), /disabled/)
@@ -155,6 +173,48 @@ test('reader recognizes claimed dispatch source and ignores old markers', () => 
   assert.deepEqual(recentSessionTurns([], 1), { lastReply: '', recentTurns: [], activeTools: [] })
 })
 
+test('dispatch silent recovery stays within the matching turn and claimed cursor', () => {
+  const events = completedSilentTurn('id')
+  const job = { dispatchId: 'id', afterSeq: 0, action: 'followup' }
+  assert.deepEqual(dispatchedTurn(events.slice(0, -1), job), { done: false })
+  assert.equal(dispatchedTurn(events, job).replyText, 'actual result')
+  assert.equal(dispatchedTurn(events, { ...job, claimedTurn: 1, claimedAfterSeq: 4 }).replyText, '[SILENT]')
+  assert.deepEqual(dispatchedTurn(events, { ...job, dispatchId: 'other' }), { done: false })
+  const unsafe = structuredClone(events)
+  unsafe.find(e => e.type === 'assistant/message').data.message.content.push({ type: 'tool-call', name: 'read' })
+  assert.equal(dispatchedTurn(unsafe, job).replyText, '[SILENT]')
+  const correction = structuredClone(events)
+  correction.splice(5, 0, { seq: 5.5, type: 'user/message', data: { source: { kind: 'relay' } } })
+  assert.equal(dispatchedTurn(correction, job).replyText, '[SILENT]')
+  const failure = structuredClone(events)
+  failure.at(-1).data.reason.kind = 'blocked'
+  assert.equal(dispatchedTurn(failure, job).replyText, '')
+})
+
+for (const mode of ['sync', 'async']) {
+  test(`dispatch ${mode} returns recovered same-turn result to the originating source`, async t => {
+    const f = fixture(t); f.add()
+    const pending = f.invoke('session_dispatch', args({ mode, timeout_ms: 500 }))
+    while (f.calls.length === 0) await new Promise(resolve => setTimeout(resolve, 1))
+    const id = f.calls[0].message.source.dispatchId
+    f.rows.get('project').events.push(...completedSilentTurn(id))
+    const result = await pending
+    if (mode === 'sync') {
+      assert.equal(result.replyText, 'actual result')
+      assert.equal(result.dispatchId, id)
+      assert.equal(f.notifications.length, 0)
+    } else {
+      assert.equal(result.dispatchId, id)
+      for (let i = 0; i < 100 && f.notifications.length === 0; i++) await new Promise(resolve => setTimeout(resolve, 2))
+      assert.equal(f.notifications.length, 1)
+      assert.equal(f.notifications[0].accountId, 'bot-A')
+      assert.equal(f.notifications[0].conversationId, 'chat-A')
+      assert.equal(f.notifications[0].dispatchId, id)
+      assert.match(f.notifications[0].text, /actual result/)
+    }
+  })
+}
+
 test('sender must be both allowed for Weixin and explicitly allowed for dispatch; side/cycle callers denied', async t => {
   const f = fixture(t)
   f.options.sessionDispatcherSenders = []; await assert.rejects(f.invoke('session_list', {}), /not authorized/)
@@ -263,7 +323,7 @@ test('live idle followup refuses pending durable or live inbox work without clea
 test('steer/cancel never return pre-dispatch or pre-claim assistant text and preserve failure notice', () => {
   const events = [{ seq: 1, type: 'turn/start', data: { turn: 8 } }, { seq: 2, type: 'assistant/message', data: text('old private response') }, { seq: 4, type: 'assistant/message', data: text('before claim') }, { seq: 6, type: 'assistant/message', data: text('partial new response') }, { seq: 7, type: 'turn/end', data: { turn: 8, reason: { kind: 'error' } } }]
   const result = dispatchedTurn(events, { action: 'steer', dispatchId: 'id', afterSeq: 3, claimedTurn: 8, claimedAfterSeq: 5 })
-  assert.equal(result.replyText, 'partial new response'); assert.equal(result.ok, false); assert.match(result.notice, /error/)
+  assert.equal(result.replyText, ''); assert.equal(result.ok, false); assert.match(result.notice, /error/)
   const beforeOnly = events.filter(e => e.seq !== 6)
   assert.equal(dispatchedTurn(beforeOnly, { action: 'steer', afterSeq: 3, claimedTurn: 8, claimedAfterSeq: 5 }).replyText, '')
   assert.equal(dispatchedTurn(events, { action: 'cancel', afterSeq: 3, cancelTurn: 8 }).replyText, '')

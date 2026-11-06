@@ -3,9 +3,9 @@
  *
  * Why this exists: DSH 0.1.5 removed the durable `assistant/chunk` event, so a
  * plugin cannot read a reply by watching chunk events. Text settles in
- * `assistant/message` (or `assistant/attempt` for a failed attempt), each with
- * an embedded `stream`; live deltas arrive only as process-local
- * `agent/assistant-stream` frames and are never durable.
+ * `assistant/message`, with an embedded `stream`; live deltas arrive only as
+ * process-local `agent/assistant-stream` frames and are never durable.
+ * `assistant/attempt` records a failed or retried attempt and is never final.
  *
  * This reader therefore: (1) waits for the settled event, (2) reassembles text
  * from the embedded stream, and (3) optionally reports still-pending tool calls
@@ -17,8 +17,10 @@
  */
 
 /** Durable event types that carry settled assistant output. */
-const SETTLED_TYPES = new Set(['assistant/message', 'assistant/attempt'])
+const SETTLED_TYPES = new Set(['assistant/message'])
 const TURN_EVENT_TYPES = new Set(['tool/call', 'tool/result', 'turn/end', ...SETTLED_TYPES])
+
+const isPureSilent = text => /^\[SILENT\]$/i.test(text.trim())
 
 /**
  * Sum the text of every text content block in a settled assistant message.
@@ -65,25 +67,27 @@ export function streamText(stream) {
  * @param {number} [params.afterSeq]      Ignore events at or below this seq, so a
  *   reply is never re-sent when the same conversation continues.
  * @returns {{ text: string, settledSeq: number, pendingTools: string[], sawTurnBoundary: boolean,
- *   turnError: (string | undefined), turnSettled: boolean }} `turnError` is set when the turn ended
- *   in an error (`turn/end` with `reason.kind === 'error'`, e.g. a model
- *   provider failure). A failed turn carries NO assistant text — the attempts
- *   hold only usage/finish chunks — so without surfacing this the caller spins
- *   for the whole wait budget while holding the conversation's busy lock, and
- *   the user's next message queues behind a turn that can never answer.
+ *   turnError: (string | undefined), turnErrorCode: (string | undefined), turnReason: (string | undefined), turnSettled: boolean }}
+ * `turnReason` is undefined until a terminal event is observed; a missing
+ * reason on that event becomes `unknown`. Text from a non-completed turn may
+ * be a partial assistant message and must not be presented as a final answer.
  */
 export function readAssistantReply({ events, afterSeq = -1 }) {
   let text = ''
   let settledSeq = -1
   let sawTurnBoundary = false
   let turnError
-  let inTurn = false
+  let turnErrorCode
+  let turnReason
   let turnSettled = false
+  let turnEvents = []
   /** @type {Map<string, string>} */
   const pending = new Map()
 
   for (const event of events ?? []) {
     if (typeof event?.seq === 'number' && event.seq <= afterSeq) continue
+    if (event?.type === 'turn/start') turnEvents = [event]
+    else turnEvents.push(event)
     switch (event?.type) {
       case 'turn/start':
         // A new turn invalidates anything collected from the previous one.
@@ -92,25 +96,26 @@ export function readAssistantReply({ events, afterSeq = -1 }) {
         settledSeq = typeof event.seq === 'number' ? event.seq : -1
         pending.clear()
         turnError = undefined
-        inTurn = true
+        turnErrorCode = undefined
+        turnReason = undefined
         turnSettled = false
         break
       case 'turn/end': {
-        // The terminal event of every turn. `reason.kind === 'completed'`
-        // means the answer arrived as assistant/message; `error` means the
-        // turn is over and NO reply is coming — surface it so the caller can
-        // answer the user immediately instead of waiting out the deadline.
-        inTurn = false
+        // Preserve the reason: an ended turn is not necessarily successful.
         const reason = event.data?.reason
+        turnReason = typeof reason?.kind === 'string' ? reason.kind : 'unknown'
         if (typeof event.seq === 'number' && event.seq > settledSeq) {
           settledSeq = event.seq
         }
         if (reason?.kind === 'error') {
           const message = reason.error?.message
           turnError = typeof message === 'string' && message !== '' ? message : 'unknown error'
-          turnSettled = false
-        } else {
-          turnSettled = true
+          turnErrorCode = typeof reason.error?.code === 'string' ? reason.error.code : undefined
+        }
+        turnSettled = reason?.kind === 'completed'
+        if (turnSettled && isPureSilent(text)) {
+          const recovered = replyBeforeSilent(turnEvents)
+          if (recovered !== undefined) text = recovered.text
         }
         break
       }
@@ -140,11 +145,7 @@ export function readAssistantReply({ events, afterSeq = -1 }) {
     }
   }
 
-  if (!sawTurnBoundary && text !== '' && pending.size === 0 && turnError === undefined && !inTurn) {
-    turnSettled = true
-  }
-
-  return { text, settledSeq, pendingTools: [...pending.values()], sawTurnBoundary, turnError, turnSettled }
+  return { text, settledSeq, pendingTools: [...pending.values()], sawTurnBoundary, turnError, turnErrorCode, turnSettled, turnReason }
 }
 
 /**
@@ -157,13 +158,12 @@ export function readAssistantReply({ events, afterSeq = -1 }) {
  * messages, log-only attempts and interruption prefixes are not final replies.
  * Older/unknown event shapes keep the existing behavior rather than guessing.
  */
-function replyBeforeSilent(events) {
-  const pureSilent = text => /^\[SILENT\]$/i.test(text.trim())
+export function replyBeforeSilent(events, afterSeq = -1) {
   const body = event => streamText(event.data?.stream) || messageText(event.data?.message)
   const outputIndexes = events.flatMap((event, index) =>
     SETTLED_TYPES.has(event.type) && body(event) !== '' ? [index] : [])
   const last = outputIndexes.at(-1)
-  if (last === undefined || !pureSilent(body(events[last]))) return undefined
+  if (last === undefined || !isPureSilent(body(events[last]))) return undefined
 
   function completeMessage(index) {
     const event = events[index], data = event.data, message = data?.message
@@ -195,16 +195,16 @@ function replyBeforeSilent(events) {
   }
 
   if (!completeMessage(last)) return undefined
-  const candidate = outputIndexes.findLast(index => index < last && !pureSilent(body(events[index])))
-  if (candidate === undefined || !completeMessage(candidate)) return undefined
+  const candidate = outputIndexes.findLast(index => index < last && !isPureSilent(body(events[index])))
+  if (candidate === undefined || events[candidate].seq <= afterSeq || !completeMessage(candidate)) return undefined
   // A later human instruction may retract the earlier answer. Do not walk past
   // tool work, failed attempts, or an unverified silent step to resurrect it.
   for (let i = candidate + 1; i < events.length; i++) {
     const event = events[i]
     if (event.type === 'assistant/attempt' || event.type === 'tool/call' || event.type === 'tool/result'
-      || (event.type === 'user/message' && event.data?.source?.kind === 'user')
+      || (event.type === 'user/message' && ['user', 'relay'].includes(event.data?.source?.kind))
       || typeof event.surfaceOp === 'object') return undefined
-    if (event.type === 'assistant/message' && (!pureSilent(body(event)) || !completeMessage(i))) return undefined
+    if (event.type === 'assistant/message' && (!isPureSilent(body(event)) || !completeMessage(i))) return undefined
   }
   return { text: messageText(events[candidate].data.message), seq: events[candidate].seq }
 }
@@ -220,22 +220,21 @@ function replyBeforeSilent(events) {
  * @param {readonly any[]} params.events  `agent.session.snapshotEvents()`.
  * @param {number} [params.afterSeq]      Ignore events at or below this seq.
  * @returns {Array<{ text: string, settledSeq: number, pendingTools: string[],
- *   turnError: (string | undefined), turnSettled: boolean, silentRecoveredFromSeq?: number }>}
+ *   turnError: (string | undefined), turnErrorCode: (string | undefined), turnReason: string, turnSettled: boolean, silentRecoveredFromSeq?: number }>}
  */
 export function readSettledTurns({ events, afterSeq = -1 }) {
-  /** @type {Array<{ text: string, settledSeq: number, pendingTools: string[], turnError: (string | undefined), turnSettled: boolean }>} */
+  /** @type {Array<{ text: string, settledSeq: number, pendingTools: string[], turnError: (string | undefined), turnErrorCode: (string | undefined), turnReason: string, turnSettled: boolean, silentRecoveredFromSeq?: number }>} */
   const turns = []
   let current = null
-  let sawTurnBoundary = false
-
-  function initTurn(seq, inTurn = false) {
+  function initTurn(seq) {
     return {
       text: '',
       settledSeq: typeof seq === 'number' ? seq : -1,
       /** @type {Map<string, string>} */
       pending: new Map(),
       turnError: undefined,
-      inTurn,
+      turnErrorCode: undefined,
+      turnReason: undefined,
       turnSettled: false,
       events: [],
     }
@@ -245,15 +244,14 @@ export function readSettledTurns({ events, afterSeq = -1 }) {
     if (typeof event?.seq === 'number' && event.seq <= afterSeq) continue
 
     if (event?.type === 'turn/start') {
-      sawTurnBoundary = true
-      current = initTurn(event.seq, true)
+      current = initTurn(event.seq)
       current.events.push(event)
       continue
     }
 
     if (current === null) {
       if (!TURN_EVENT_TYPES.has(event?.type)) continue
-      current = initTurn(event?.seq, false)
+      current = initTurn(event?.seq)
     }
     current.events.push(event)
 
@@ -263,19 +261,18 @@ export function readSettledTurns({ events, afterSeq = -1 }) {
 
     switch (event?.type) {
       case 'turn/end': {
-        current.inTurn = false
         const reason = event.data?.reason
+        current.turnReason = typeof reason?.kind === 'string' ? reason.kind : 'unknown'
         if (reason?.kind === 'error') {
           const message = reason.error?.message
           current.turnError = typeof message === 'string' && message !== '' ? message : 'unknown error'
-          current.turnSettled = false
-        } else {
-          current.turnSettled = true
+          current.turnErrorCode = typeof reason.error?.code === 'string' ? reason.error.code : undefined
         }
+        current.turnSettled = reason?.kind === 'completed'
         if (typeof event.seq === 'number' && event.seq > current.settledSeq) {
           current.settledSeq = event.seq
         }
-        const recovered = reason?.kind === 'completed' && /^\[SILENT\]$/i.test(current.text.trim())
+        const recovered = reason?.kind === 'completed' && isPureSilent(current.text)
           ? replyBeforeSilent(current.events) : undefined
         turns.push({
           text: recovered?.text ?? current.text,
@@ -283,6 +280,8 @@ export function readSettledTurns({ events, afterSeq = -1 }) {
           settledSeq: current.settledSeq,
           pendingTools: [...current.pending.values()],
           turnError: current.turnError,
+          turnErrorCode: current.turnErrorCode,
+          turnReason: current.turnReason,
           turnSettled: current.turnSettled,
         })
         current = null
@@ -313,23 +312,6 @@ export function readSettledTurns({ events, afterSeq = -1 }) {
         }
         break
     }
-  }
-
-  if (
-    !sawTurnBoundary &&
-    current !== null &&
-    current.text !== '' &&
-    current.pending.size === 0 &&
-    current.turnError === undefined &&
-    !current.inTurn
-  ) {
-    turns.push({
-      text: current.text,
-      settledSeq: current.settledSeq,
-      pendingTools: [],
-      turnError: undefined,
-      turnSettled: true,
-    })
   }
 
   return turns
