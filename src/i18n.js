@@ -47,6 +47,11 @@ export const CATALOG = Object.freeze({
         zh: '定时消息服务现在没有准备好，暂时没法{action}。可以重启 DSH 后再试；如果仍不行，请检查插件是否完整加载。',
         en: 'The scheduled-message service is not ready, so I cannot {actionEn}. Try restarting DSH; if it still fails, check that the plugin loaded completely.',
     },
+    'error.timedMessageWriteFailed': { zh: '定时消息没能保存，请查看日志后再试。', en: 'The scheduled message could not be saved. Check the logs and try again.' },
+    'error.timedMessageCancelUnclear': {
+        zh: '没能取消定时消息 {id}：可能没有找到，也可能改动没能保存。请用 /subscribelist 核对。',
+        en: 'Could not cancel scheduled message {id}: it may not exist, or the change could not be saved. Check /subscribelist.',
+    },
     'error.reminderChangeUnclear': {
         zh: '这次没能{action}：可能没有找到合适的提醒，也可能刚才的改动没能保存。请用 /remindlist 核对；如果提醒还在，请重启 DSH 后再试。',
         en: 'Could not {actionEn}: the reminder may no longer exist, or the change may not have been saved. Check /remindlist; if the reminder is still there, restart DSH and try again.',

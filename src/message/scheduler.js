@@ -601,10 +601,11 @@ export class ReminderScheduler {
 
   /**
    * Remove one pending reminder by id (as shown by /remindlist).
+   * Pass accountId for WeChat commands; omit it for desktop management.
    * @returns {boolean} whether an item was actually removed
    */
-  cancel(id) {
-    const index = this.store.items.findIndex((item) => item.id === id)
+  cancel(id, accountId) {
+    const index = this.store.items.findIndex((item) => item.id === id && (accountId === undefined || item.accountId === accountId))
     if (index === -1) return false
     const [item] = this.store.items.splice(index, 1)
     if (!this.#persist()) {

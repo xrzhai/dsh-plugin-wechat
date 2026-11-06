@@ -970,7 +970,7 @@ export function runSessionCommand(lines, conversationId, text, accountId, contex
     if (scheduler === undefined) {
       return t('error.reminderServiceUnavailable', { action: '取消提醒', actionEn: 'cancel a reminder' })
     }
-    const removed = scheduler.cancel(command.id)
+    const removed = scheduler.cancel(command.id, context?.accountId ?? accountId ?? '')
     if (removed === true) return `已取消提醒 ${command.id}。`
     return t('error.reminderChangeUnclear', { action: `取消提醒 ${command.id}`, actionEn: `cancel reminder ${command.id}` })
   }
@@ -1027,8 +1027,8 @@ export function runSessionCommand(lines, conversationId, text, accountId, contex
     if (scheduler === undefined) {
       return t('error.timedMessageServiceUnavailable', { action: '取消定时消息', actionEn: 'cancel a timed message' })
     }
-    const removed = scheduler.cancel(command.id)
-    return removed === true ? `已取消定时消息 ${command.id}。` : `没有找到编号 ${command.id} 的定时消息（/subscribelist 可以看现有的）。`
+    const removed = scheduler.cancel(command.id, context?.accountId ?? accountId ?? '')
+    return removed === true ? `已取消定时消息 ${command.id}。` : t('error.timedMessageCancelUnclear', { id: command.id })
   }
   if (command.index === undefined) {
     return `${USE_USAGE}\n\n${lines.render(conversationId, accountId)}`
