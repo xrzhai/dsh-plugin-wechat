@@ -1190,7 +1190,8 @@ function createInboundHandler({ config, accountId, transport, bridge, seen, log,
     if (config.typingIndicator) await transport.setTyping(true, message.conversationId)
     try {
       const startedAt = Date.now()
-
+      let lateOutbound
+      let lateTextDelivered = false
       const reply = await bridge.deliver({
         conversationId: message.conversationId,
         accountId,
@@ -1214,17 +1215,25 @@ function createInboundHandler({ config, accountId, transport, bridge, seen, log,
         // reply is delivered later with a freshly fetched typing ticket (the
         // original one is one-shot and long expired by then).
         onLateReply: async (late) => {
-          if (late.kind === 'timeout-notice') {
+          if (late.kind === 'discarded') {
+            await sendChunked(transport, effectiveConfig.current, {
+              conversationId: message.conversationId,
+              text: createTranslator(effectiveConfig.current.locale).t('notice.inputDiscarded'),
+              contextToken: '',
+            })
+            return
+          }
+          if (late.kind === 'timeout-notice' || late.kind === 'cancel-pending') {
             await sendChunked(transport, config, {
               conversationId: message.conversationId,
-              text: createTranslator(effectiveConfig.current.locale).t('notice.longRunning'),
+              text: createTranslator(effectiveConfig.current.locale).t(late.kind === 'cancel-pending' ? 'notice.cancelPending' : 'notice.longRunning'),
               contextToken: await sendToken(),
               durable: false,
             })
             return
           }
           await transport.refreshConfig()
-          const outbound = await resolveOutboundReply({
+          lateOutbound ??= await resolveOutboundReply({
             config,
             transport,
             mediaDirs,
@@ -1235,15 +1244,26 @@ function createInboundHandler({ config, accountId, transport, bridge, seen, log,
             warn,
             fileLog,
           })
-          await sendChunked(transport, config, {
-            conversationId: message.conversationId,
-            text: outbound.text,
-            contextToken: '',
-          })
+          if (!lateTextDelivered) {
+            await sendChunked(transport, config, {
+              conversationId: message.conversationId,
+              text: lateOutbound.text,
+              contextToken: '',
+            })
+            lateTextDelivered = true
+          }
           log(`late reply delivered for ${message.conversationId}`)
           fileLog.info(`late reply delivered to ${message.conversationId} after the wait gave up`)
         },
       })
+      if (reply.uncertain === true) {
+        await sendChunked(transport, effectiveConfig.current, {
+          conversationId: message.conversationId,
+          text: createTranslator(effectiveConfig.current.locale).t(reply.notSubmitted ? 'notice.turnNotSubmitted' : 'notice.turnUncertain'),
+          contextToken: await sendToken(),
+        })
+        return
+      }
       log(`turn settled in ${Date.now() - startedAt}ms for ${message.conversationId}`)
 
       fileLog.info(`accepted message ${message.id} from ${message.senderId} (conversation ${message.conversationId}); agent turn settled in ${Date.now() - startedAt}ms`)

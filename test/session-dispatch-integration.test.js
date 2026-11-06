@@ -204,18 +204,19 @@ test('mixed-sender steering fences controller tools for the entire running turn'
 test('new delivery cannot lend newer sender authority to an already-running or unattributed turn', async (t) => {
   // Synthetic user-message constructor only; no DSH driver, model or network.
   const loader = `export async function resolve(specifier, context, nextResolve) {
-    if (specifier === '@deepseek-ai/dsh-llm') return { url: 'data:text/javascript,export const createUserMessage = (value) => value', shortCircuit: true }
+    if (specifier === '@deepseek-ai/dsh-llm') return { url: 'data:text/javascript,export const createUserMessage = (value) => ({ ...value, id: "synthetic-input" })', shortCircuit: true }
     return nextResolve(specifier, context)
   }`
   register(`data:text/javascript,${encodeURIComponent(loader)}`, import.meta.url)
-  const f = fixture(t)
-  const main = await f.bridge.attach('chat', 'account')
-  main.agent.followup = () => { throw new Error('synthetic stop before model') }
-  const tool = f.registrations.get(main.agent.session.id).get('session_list').definition
-  f.bridge.sessionDispatcher.host.list = async () => []
   for (const [status, senderId, mixed] of [['running', 'owner', true], ['idle', undefined, true], ['idle', 'owner', false]]) {
+    const f = fixture(t)
+    const main = await f.bridge.attach('chat', 'account')
+    main.agent.followup = () => { throw new Error('synthetic stop before model') }
+    const tool = f.registrations.get(main.agent.session.id).get('session_list').definition
+    f.bridge.sessionDispatcher.host.list = async () => []
     main.agent.status = status
-    await assert.rejects(f.bridge.deliver({ conversationId: 'chat', accountId: 'account', text: 'synthetic message', senderId }), /synthetic stop before model/)
+    const outcome = await f.bridge.deliver({ conversationId: 'chat', accountId: 'account', text: 'synthetic message', senderId })
+    assert.equal(outcome.uncertain, true)
     assert.equal(main.dispatchSenderMixed, mixed)
     if (mixed) await assert.rejects(tool.execute({}, { agent: main.agent }), /non-controller/)
     else await assert.doesNotReject(tool.execute({}, { agent: main.agent }))

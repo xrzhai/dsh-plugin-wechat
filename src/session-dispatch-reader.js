@@ -1,6 +1,6 @@
 // Dispatch readers deliberately do not use the gateway's latest-reply reader:
 // several turns can settle between polls, and only the marked turn belongs to us.
-import { replyBeforeSilent, streamText } from './session-reader.js'
+import { isIndependentInstruction, isReplyBoundary, replyBeforeSilent, streamText } from './session-reader.js'
 
 export const clip = (value, max = 2000) => {
   const text = typeof value === 'string' ? value : ''
@@ -27,6 +27,7 @@ export function dispatchedTurn(events, job) {
   let turn
   let matched = false
   let text = ''
+  let superseded = false
   let turnEvents = []
   const tools = new Set()
   for (const event of events ?? []) {
@@ -36,18 +37,30 @@ export function dispatchedTurn(events, job) {
       matched = (claimedTurn !== undefined && turn === claimedTurn)
         || (action === 'cancel' && cancelTurn !== undefined && turn === cancelTurn)
       text = ''
+      superseded = false
       tools.clear()
     }
     turnEvents.push(event)
     // Enqueue/splice is NOT ownership: a queued followup can be inserted while
     // a completely different turn is still running. Only claimed input counts.
-    if (event.seq > afterSeq && event.type === 'user/message'
-      && (event.data?.source?.dispatchId === dispatchId || (job.messageId !== undefined && event.data?.id === job.messageId))) matched = true
+    const ownInput = event.type === 'user/message'
+      && ((dispatchId !== undefined && event.data?.source?.dispatchId === dispatchId) || (job.messageId !== undefined && event.data?.id === job.messageId))
+    if (event.seq > afterSeq && ownInput) matched = true
+    if (matched && action !== 'cancel' && event.seq > Math.max(afterSeq, job.claimedAfterSeq ?? afterSeq)
+      && event.type === 'user/message' && !ownInput && isIndependentInstruction(event.data?.source)) superseded = true
     if (matched && event.seq > afterSeq && event.type === 'tool/call') tools.add(clip(event.data?.name, 120))
-    if (matched && action !== 'cancel' && event.seq > Math.max(afterSeq, job.claimedAfterSeq ?? afterSeq) && event.type === 'assistant/message') text = streamText(event.data?.stream) || messageText(event.data?.message ?? event.data)
+    if (matched && action !== 'cancel' && event.seq > Math.max(afterSeq, job.claimedAfterSeq ?? afterSeq)) {
+      if (event.type === 'tool/call' || event.type === 'assistant/attempt'
+        || (event.type === 'user/message' && isReplyBoundary(event.data?.source))) text = ''
+      if (event.type === 'assistant/message') {
+        const interrupted = event.data?.interrupted === true || event.data?.message?.content?.some?.(block => block?.type === 'tool-call')
+        text = interrupted ? '' : streamText(event.data?.stream) || messageText(event.data?.message ?? event.data)
+      }
+    }
     if (event.type === 'turn/end' && event.seq > afterSeq && matched
       && (turn === undefined || event.data?.turn === undefined || event.data.turn === turn)) {
       const reason = event.data?.reason
+      if (superseded) return { done: true, ok: false, replyText: '', toolsExecuted: [...tools].filter(Boolean).slice(0, 50), notice: 'A later instruction superseded this dispatch before its result settled.' }
       const ok = action === 'cancel' ? reason?.kind === 'aborted' && reason.reason?.kind === 'user' : reason?.kind === 'completed'
       if (ok && action !== 'cancel' && /^\[SILENT\]$/i.test(text.trim())) {
         text = replyBeforeSilent(turnEvents, Math.max(afterSeq, job.claimedAfterSeq ?? afterSeq))?.text ?? text

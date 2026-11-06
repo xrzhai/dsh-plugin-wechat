@@ -127,6 +127,23 @@ test('a recent unrelated file is not sent, while a referenced result still is', 
   assert.equal(f.media[0].filePath, fs.realpathSync(path.join(f.root, 'unrelated.pdf')))
 })
 
+test('unconfirmed and discarded turns report whether an input was executed', async (t) => {
+  const f = fixture(t, {
+    enabled: true,
+    async deliver({ text, onLateReply }) {
+      if (text === 'not-submitted') return { uncertain: true, notSubmitted: true }
+      await onLateReply({ kind: 'discarded' })
+      return { late: true }
+    },
+  })
+  await until(() => f.started.length === 1, 'transport starts')
+  await f.started[0].testInbound({ ...f.message('uncertain'), text: 'not-submitted' })
+  await f.started[0].testInbound({ ...f.message('discarded'), text: 'discarded' })
+  assert.equal(f.sent.length, 2)
+  assert.match(f.sent[0].text, /没有执行/)
+  assert.match(f.sent[1].text, /处理前丢弃/)
+})
+
 test('later results use the originating account and stop if it is paused during refresh', async (t) => {
   const refreshing = deferred()
   const continueRefresh = deferred()

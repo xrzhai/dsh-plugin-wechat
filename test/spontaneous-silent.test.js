@@ -100,8 +100,8 @@ for (const [label, options] of [
   })
 }
 
-test('a newer human instruction invalidates the earlier answer', async t => {
-  const f = await fixture(t, turn([step(1, 'Old answer'), step(2, '[SILENT]', { input: { kind: 'user' } })]))
+for (const input of [{ kind: 'user' }, { kind: 'weixin-dispatch' }, { kind: 'plugin', plugin: 'other', form: 'relay' }]) test(`a newer ${input.form ?? input.kind} instruction invalidates the earlier answer`, async t => {
+  const f = await fixture(t, turn([step(1, 'Old answer'), step(2, '[SILENT]', { input })]))
   assert.deepEqual(f.delivered, [])
 })
 
@@ -120,14 +120,18 @@ for (const reason of ['aborted', 'blocked', 'interrupted', 'forked', 'max-tokens
   })
 }
 
-test('unknown terminal reason reports uncertainty but completed remains authoritative', async t => {
+test('unknown terminal reason reports uncertainty and completed does not publish pre-tool text', async t => {
   const missingReason = turn([step(1, 'Partial')])
   missingReason.at(-1).data.reason = undefined
   const first = await fixture(t, missingReason)
   assert.deepEqual(first.delivered, [CATALOG['turn.unknown'].zh])
   const unresolved = turn([step(1, 'Partial', { tools: true })]).filter(event => event.type !== 'tool/result')
   const second = await fixture(t, unresolved)
-  assert.deepEqual(second.delivered, ['Partial'])
+  assert.deepEqual(second.delivered, [])
+  assert.equal(second.record.lastDeliveredSeq, unresolved.at(-1).seq)
+  const final = turn([step(1, 'Checking', { tools: true }), step(2, 'Final answer')]).filter(event => event.type !== 'tool/result')
+  const third = await fixture(t, final)
+  assert.deepEqual(third.delivered, ['Final answer'])
 })
 
 test('spontaneous failure logs the reason and code without sending partial text', async t => {

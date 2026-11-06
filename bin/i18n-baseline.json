@@ -5,7 +5,7 @@
     "src/config-remote.js": 46,
     "src/onboarding.js": 38,
     "src/sessions.js": 35,
-    "src/agent-bridge.js": 16,
+    "src/agent-bridge.js": 14,
     "src/login-remote.js": 15,
     "src/index.js": 10,
     "src/media/inbound.js": 8,
