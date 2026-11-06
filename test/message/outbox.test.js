@@ -69,17 +69,17 @@ for (const succeeds of [true, false]) {
   })
 }
 
-test('overlapping manual and timer-style flushes share a pass; a later flush sends new items', async (t) => {
+test('overlapping manual and timer requests count their shared send once and leave new items for later', async (t) => {
   const gate = deferred(), started = deferred(), calls = []
   const f = fixture(t, (message) => { calls.push(message.text); started.resolve(); return gate.promise })
   f.enqueue('first')
   const first = f.outbox.flush()
   const immediate = f.outbox.flush({ force: true })
-  assert.equal(first, immediate)
+  assert.notEqual(first, immediate)
   await started.promise
   f.enqueue('new')
   const overlapping = f.outbox.flush({ force: true })
-  assert.equal(first, overlapping)
+  assert.equal(immediate, overlapping)
   assert.deepEqual(calls, ['first'])
   gate.resolve()
   const results = await Promise.all([first, immediate, overlapping])
@@ -96,6 +96,48 @@ test('synchronous send re-entry sees the in-flight guard', async (t) => {
   await first
   assert.equal(reentrant, first)
   assert.equal(calls, 1)
+})
+
+test('scoped manual retry touches and counts only the requested account and conversation', async (t) => {
+  const calls = []
+  const f = fixture(t, async (message) => { calls.push(message.text) })
+  for (const [accountId, conversationId, text] of [['a', 'c', 'mine'], ['b', 'c', 'other account'], ['a', 'd', 'other chat']]) {
+    f.enqueue(text, { accountId, conversationId, deliveryUncertain: true })
+  }
+  for (const scope of [{ accountId: 'a' }, { conversationId: 'c' }, { accountId: undefined, conversationId: undefined }]) {
+    await assert.rejects(f.outbox.flush({ force: true, ...scope }), /requires both/)
+  }
+  const scope = { force: true, accountId: 'a', conversationId: 'c' }
+  f.setTransport(undefined)
+  assert.deepEqual(await f.outbox.flush(scope), { sent: 0, failed: 0, remaining: 1, unavailable: 1 })
+  f.setTransport({ send: async (message) => { calls.push(message.text) } })
+  assert.deepEqual(await f.outbox.flush(scope), { sent: 1, failed: 0, remaining: 0 })
+  assert.deepEqual(calls, ['mine'])
+  assert.deepEqual(f.outbox.pending().map((item) => item.text), ['other account', 'other chat'])
+})
+
+test('scoped retries queued behind a timer recover skipped rows without replaying its uncertain send', async (t) => {
+  const gate = deferred(), started = deferred(), calls = []
+  const f = fixture(t, async ({ text }) => {
+    calls.push(text)
+    if (text === 'in flight') {
+      started.resolve()
+      await gate.promise
+      throw Object.assign(new Error('response lost'), { deliveryUncertain: true })
+    }
+  })
+  f.enqueue('parked', { conversationId: 'd', deliveryUncertain: true })
+  f.enqueue('in flight')
+  const timer = f.outbox.flush()
+  await started.promise
+  const retry = (conversationId) => f.outbox.flush({ force: true, accountId: 'a', conversationId })
+  const sameChat = retry('c'), otherChat = retry('d')
+  assert.equal(otherChat, retry('d'))
+  gate.resolve()
+  assert.deepEqual(await timer, { sent: 0, failed: 1, remaining: 2 })
+  assert.deepEqual(await sameChat, { sent: 0, failed: 1, remaining: 1 })
+  assert.deepEqual(await otherChat, { sent: 1, failed: 0, remaining: 0 })
+  assert.deepEqual(calls, ['in flight', 'parked'])
 })
 
 test('missing transport does not spend retry budget, blocks its conversation, and recovers', async (t) => {
@@ -124,21 +166,75 @@ test('a failed conversation stays ordered without blocking other conversations',
   assert.deepEqual(f.outbox.pending().map((item) => item.text), ['first', 'second'])
 })
 
-test('expired tokens retry tokenless; live tokens and parked-item cleanup retain their behavior', async (t) => {
+test('expired tokens retry tokenless and live tokens are preserved', async (t) => {
   const calls = []
   const f = fixture(t, async (message) => { calls.push(message) })
   f.enqueue('expired', { contextToken: 'expired-token' })
   f.advance(CONTEXT_TOKEN_TTL_MS)
   f.enqueue('live', { contextToken: 'live-token' })
-  const items = f.outbox.pending()
-  atomicWriteJson(outboxFile(f.stateRoot), { schemaVersion: 1, items: [
-    { ...items[0], id: 'dead', text: 'dead', attempts: MAX_ATTEMPTS },
-    { ...items[1], id: 'parked', text: 'parked', contextToken: undefined, attempts: MAX_ATTEMPTS },
-    ...items,
-  ] })
-  assert.deepEqual(await f.outbox.flush({ force: true }), { sent: 2, failed: 0, remaining: 1 })
+  assert.deepEqual(await f.outbox.flush(), { sent: 2, failed: 0, remaining: 0 })
   assert.deepEqual(calls.map((message) => message.contextToken), [undefined, 'live-token'])
-  assert.deepEqual(f.outbox.pending().map((item) => item.text), ['parked'])
+})
+
+test('manual retry recovers an exhausted item after token expiry without reopening its timer budget', async (t) => {
+  const calls = []
+  const f = fixture(t, async (message) => { calls.push(message); throw new Error('offline') })
+  f.enqueue('only copy', { contextToken: 'live' })
+  for (let i = 0; i < MAX_ATTEMPTS; i++) {
+    assert.deepEqual(await f.outbox.flush({ force: true }), { sent: 0, failed: 1, remaining: 1 })
+  }
+  f.advance(24 * 60 * 60_000)
+  assert.deepEqual(await f.outbox.flush(), { sent: 0, failed: 0, remaining: 1 })
+  assert.equal(calls.length, MAX_ATTEMPTS)
+  assert.equal(f.outbox.pending()[0].text, 'only copy')
+
+  f.setTransport(undefined)
+  const offline = await f.outbox.flush({ force: true })
+  assert.deepEqual(offline, { sent: 0, failed: 0, remaining: 1, unavailable: 1 })
+  assert.equal(f.outbox.pending()[0].lastError, 'no live transport')
+  assert.equal(f.outbox.pending()[0].attempts, MAX_ATTEMPTS)
+
+  f.setTransport({ send: async () => { throw new Error('still offline') } })
+  assert.deepEqual(await f.outbox.flush({ force: true }), { sent: 0, failed: 1, remaining: 1 })
+  f.advance(24 * 60 * 60_000)
+  f.setTransport({ send: async (message) => { calls.push(message) } })
+  assert.deepEqual(await f.outbox.flush(), { sent: 0, failed: 0, remaining: 1 })
+  assert.deepEqual(await f.outbox.flush({ force: true }), { sent: 1, failed: 0, remaining: 0 })
+  assert.equal(calls.length, MAX_ATTEMPTS + 1)
+  assert.equal(calls.at(-1).text, 'only copy')
+  assert.equal(calls.at(-1).contextToken, undefined)
+})
+
+test('uncertain direct sends enter the durable queue for manual retry only', async (t) => {
+  const calls = []
+  const f = fixture(t)
+  f.enqueue('unknown', { deliveryUncertain: true, contextToken: 'live' })
+  const transport = { send: async (message) => { calls.push(message.contextToken) } }
+  const restarted = createOutbox({ stateRoot: f.stateRoot, transportFor: () => transport, now: () => 1_000_001 })
+  assert.deepEqual(await restarted.flush(), { sent: 0, failed: 0, remaining: 1 })
+  assert.deepEqual(calls, [])
+  assert.deepEqual(await restarted.flush({ force: true }), { sent: 1, failed: 0, remaining: 0 })
+  assert.deepEqual(calls, ['live'])
+})
+
+test('uncertain segment stays parked across expiry and failed manual retry; confirmed prefix is never replayed', async (t) => {
+  const calls = []
+  const f = fixture(t, async ({ text }) => {
+    calls.push(text)
+    if (text === 'middle') throw Object.assign(new Error('response lost'), { deliveryUncertain: true })
+  })
+  f.enqueue('firstmiddletail', { segments: ['first', 'middle', 'tail'], contextToken: 'token' })
+  assert.deepEqual(await f.outbox.flush(), { sent: 0, failed: 1, remaining: 1 })
+  assert.equal(f.outbox.pending()[0].nextSegment, 1)
+  f.advance(CONTEXT_TOKEN_TTL_MS)
+  assert.deepEqual(await f.outbox.flush(), { sent: 0, failed: 0, remaining: 1 })
+  f.setTransport({ send: async ({ text }) => { calls.push(text); throw new Error('offline') } })
+  assert.deepEqual(await f.outbox.flush({ force: true }), { sent: 0, failed: 1, remaining: 1 })
+  f.advance(CONTEXT_TOKEN_TTL_MS)
+  f.setTransport({ send: async ({ text, contextToken }) => { assert.equal(contextToken, undefined); calls.push(text) } })
+  assert.deepEqual(await f.outbox.flush(), { sent: 0, failed: 0, remaining: 1 })
+  assert.deepEqual(await f.outbox.flush({ force: true }), { sent: 1, failed: 0, remaining: 0 })
+  assert.deepEqual(calls, ['first', 'middle', 'middle', 'middle', 'tail'])
 })
 
 test('queue-cap eviction during a failed send is not undone', async (t) => {
