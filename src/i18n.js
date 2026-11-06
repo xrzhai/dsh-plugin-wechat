@@ -58,7 +58,7 @@ export const CATALOG = Object.freeze({
     'help.cancel': { zh: '/cancel 停止当前正在生成的回复；已经执行的操作不会撤回，排队中的消息仍会继续处理', en: '/cancel stop the reply currently being generated; actions already run are not undone, and queued messages will still be processed' },
     'help.compact': { zh: '/compact 立即压缩当前话题在 DSH 中的历史上下文', en: '/compact compact the current topic’s history in DSH immediately' },
     'help.status': { zh: '/status 查看当前账号和话题的状态（允许名单等）', en: '/status show the current account and topic status (allowlist and more)' },
-    'help.send': { zh: '/send 路径 把本机文件发到当前会话（只允许工作目录、状态目录与 mediaDirs 里的文件）', en: '/send path send a local file here (only files under the workspace, state dir or mediaDirs)' },
+    'help.send': { zh: '/send 文件路径：把电脑上助理能读取的普通文件发到当前聊天。也可以直接请助理发图或文件。', en: '/send path: send a regular file the assistant can read on this computer to this chat. You can also ask the assistant to send a picture or file.' },
 
     // --- notices the bot sends on its own -----------------------------------
     'notice.unsupported': { zh: '（暂不支持这条消息：{kind}）', en: '(this kind of message is not supported yet: {kind})' },
@@ -75,8 +75,8 @@ export const CATALOG = Object.freeze({
     // --- settings card labels -----------------------------------------------
     'config.sessionDispatcherEnabled.label': { zh: '允许通过微信管理其他会话', en: 'Allow WeChat to manage other sessions' },
     'config.sessionDispatcherEnabled.hint': {
-        zh: '默认关闭。开启后，下面列出的联系人可以通过微信查看并操作指定的 DSH 会话，保存后从下一条消息起生效。这个功能用于方便操作自己的会话，不是隔离不可信用户的系统沙箱。',
-        en: 'Off by default. Listed contacts can view and manage the selected DSH sessions from WeChat. Changes apply from the next message. This is a convenience control, not a system sandbox for untrusted users.',
+        zh: '默认开启。当前微信账号里获准对话的联系人可以查看本机其他普通 DSH 会话，查进度、补充指令或请求停止。配置文件中的联系人和会话名单留空时不再额外限制；归档和受保护的会话仍然只读。',
+        en: 'On by default. People allowed to chat on this WeChat account can check progress, add instructions or request a stop in other ordinary DSH sessions on this computer. Empty sender and session lists in the configuration add no further restrictions. Archived and protected sessions remain read-only.',
     },
     'config.workspaceTitle.label': { zh: '微信工作区显示名', en: 'Workspace title' },
     'config.workspaceTitle.hint': {

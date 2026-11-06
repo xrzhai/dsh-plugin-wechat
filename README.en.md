@@ -10,51 +10,35 @@
 
 </div>
 
-Chat with the **DeepSeek Harness (DSH)** running on your computer directly from WeChat on your phone when you are away from your desk:
+Use **DeepSeek Harness (DSH)** on your computer from WeChat on your phone:
 
-- **Command from anywhere**: Send a message in WeChat to have your local Agent research, write code, edit docs, or run tasks, and receive results or files back in WeChat;
-- **Follow delegated work**: While the plugin is running, follow-up replies received by the main session can be sent to the originating WeChat chat;
-- **Local credentials**: The plugin stores account credentials on your machine (`~/.dsh/weixin/`); messages are processed by the DSH model and tool services you use.
+- **Assign work and exchange files**: Send DSH a document from WeChat and ask it to research, edit code or write a report. Ask “Send me the report on my desktop” to get a regular file your computer can read.
+- **Follow background tasks**: While the plugin is running, it can forward updates that delegated tasks send to the main session.
+- **Check and direct other DSH sessions on your desktop**: Ask “How far did the report session get?” or “Stop that task for now.” This works by default. Describe the project or task; there’s no need to copy a session ID.
 
----
+## 1. Install
 
-## 1. How to Install (Easiest Way: Let Your DSH Install It)
-
-You don't need to run terminal commands yourself. Just open DeepSeek Harness and send it this line:
+Send this to DSH on your computer:
 
 ```text
-Please install this WeChat plugin for me by reading its README and following the Agent installation steps: https://github.com/xrzhai/dsh-plugin-wechat
+Please install this WeChat plugin by following the Agent installation guide in its README: https://github.com/xrzhai/dsh-plugin-wechat
 ```
 
-Once your Agent finishes installing, **fully quit and reopen DSH**.
+After installation, **fully quit and reopen DSH**.
 
-### Platform notes (macOS)
+## 2. Connect WeChat
 
-- **`node` / `pnpm` are often not on your terminal PATH.** DSH ships its own runtime but does not export it, so `node bin/install.mjs` and `pnpm install` fail with "command not found". Wire the bundled runtime in (you can put this in `~/.zshrc`):
-  ```sh
-  export PATH="$HOME/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin:$PATH"
-  pnpm() { node "$HOME/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/pnpm/bin/pnpm.cjs" "$@"; }
-  ```
-  You do not need a command to log in: use **WeChat → WeChat Account → Scan QR to Log In**.
-- **A laptop sleeps when the lid closes.** The WeChat connection pauses while asleep and needs time to reconnect after waking.
+1. In the DSH sidebar, open **WeChat → WeChat Account → Scan QR code to log in** and scan the code with your phone.
+2. If no sender list is configured, send “hello” or `/status` from your own WeChat first. The first contact to send a message becomes the owner. Check that contact under **WeChat Account**.
+3. Edit **Persona** to change how the assistant works. To choose a project folder, set **Working directory** under **Advanced → Basics**. Leave it blank to use the plugin’s own workspace.
 
----
+## 3. Use it from WeChat
 
-## 2. Bind Your WeChat (Takes 1 Minute)
+Try “List recent DSH sessions and find the one writing the weekly report.” Once you’ve identified it, ask for progress, add instructions to a running task, request a stop, or give an idle session more work. Archived sessions are read-only. If your host can’t resume a historical session, open it on the desktop first.
 
-1. **Scan QR Code**: Open DSH, click **WeChat** in the left sidebar (or go to `Settings → Plugins → WeChat`), and click **Scan QR to Log In**.
-2. **Set Default Working Directory (Optional)**: Open the **Gateway Options** tab and set `Working directory (cwd)` to your daily project or notes folder.
-3. **Send Your First Message (Auto Owner Enrolment)**: If no sender list is configured, the plugin registers the first contact it actually receives. Send a message from your own WeChat (e.g. `hello` or `/status`) and check the allowed list: the first contact is not necessarily the person who scanned the code.
+By default, contacts allowed to chat through the current account can manage ordinary local DSH sessions. To turn that off, open **Advanced → View and manage DSH sessions**. To restrict access by contact, session or workspace, see the [dispatcher configuration](docs/session-dispatcher.md).
 
-Incoming images, voice, video and files are saved locally and their paths are passed to the DSH Agent. Whether it can read or understand them depends on the available tools and model.
-
-The plugin no longer runs built-in reminders or scheduled messages. Existing schedule data remains on disk but will not trigger.
-
----
-
-## 3. Handy WeChat Slash Commands
-
-These shortcuts are handled locally by the plugin without spending model tokens:
+The plugin handles these shortcuts without using model tokens. `/list` shows topics in this WeChat chat; ask in plain language to find other desktop sessions.
 
 | Send in WeChat | What It Does |
 | :--- | :--- |
@@ -69,43 +53,28 @@ These shortcuts are handled locally by the plugin without spending model tokens:
 | `/send <file-path>` | Have the Agent send a local file to your WeChat |
 | `/help` | Show the command cheat sheet |
 
-To deliver a file, ask the assistant to include its path in the reply, or use `/send <file-path>`. Only files inside allowed directories can be sent; the plugin does not scan the workspace and guess which files to deliver.
+To receive a file, ask the assistant to include its path in the reply, or send `/send <file-path>`. By default, regular files the assistant can read may be sent from any folder. The owner has no message rate limit by default. See [security boundaries](docs/security.md) for file size, credentials and access details.
 
-Topics are separated by WeChat account and chat. On upgrade, topics with an unambiguous account and chat are migrated in their original order, keeping the selected DSH session. Topics created since the upgrade are merged into the list. Ambiguous records stay untouched. On startup the channel resumes each chat’s active topic from its saved delivery position; older topics without a cursor start at the latest event on first attachment.
+## 4. Troubleshooting
 
----
+- **Connection failed or login expired?** Fully restart DSH after installing or updating. If login expired, scan a new code under **WeChat Account**.
+- **No replies with the laptop lid closed?** The connection pauses while the computer sleeps. Allow time to reconnect after waking.
+- **Need an update?** Ask DSH to update the WeChat plugin, then restart DSH.
 
-## 4. Instructions for AI Agents (Automated Install / Upgrade / Uninstall)
+## 5. Agent installation guide
 
-> **For AI Agents**: When the user asks you to install, update, or uninstall this plugin, run these steps directly.
+Use a permanent directory: DSH links to this checkout. You need Git, Node ≥ 22.13.0 and pnpm. On macOS, use DSH’s bundled runtime if Node or pnpm is missing from your terminal. Replace `desktop` with the user's profile name if needed.
 
-### Install from Scratch
-You need `git`, `node` (>= 22.13.0) and `pnpm`. **On macOS these are often not on PATH**: prefer the runtime bundled with DSH (`~/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/node` and the sibling `pnpm/bin/pnpm.cjs`) instead of asking the user to install another Node.
-
-Clone into a permanent directory (do **not** use `/tmp`, as `install.mjs` creates a persistent `link:` to this checkout):
-
-```bash
+```sh
 git clone https://github.com/xrzhai/dsh-plugin-wechat.git
 cd dsh-plugin-wechat
 pnpm install
 node bin/install.mjs --profile desktop
 npm run doctor -- --offline
 ```
-After running the installer, tell the user to **fully quit and restart DSH**, then open **WeChat** in the left sidebar to scan the QR code.
 
-### Upgrade & Uninstall
-```bash
-# Upgrade
-git pull && pnpm install && node bin/install.mjs --profile desktop
+To update, run `git pull` in the checkout and repeat the install and offline check. Fully restart DSH afterward. To uninstall, run `node bin/install.mjs --profile desktop --uninstall`; credentials and chat history stay on disk.
 
-# Uninstall (unlinks from profile; keeps source checkout, credentials, and history)
-node bin/install.mjs --profile desktop --uninstall
-```
+## 6. Credits and license
 
----
-
-## 5. Acknowledgments & License
-
-Built upon **[panqing0313](https://github.com/panqing0313)**'s pioneering [`dsh-plugin-weixin`](https://github.com/panqing0313/dsh-plugin-weixin) and Tencent's [`@tencent-weixin/openclaw-weixin`](https://github.com/Tencent/openclaw-weixin) (MIT). Special thanks to **panqing0313** for the WeChat iLink transport bridge and multi-account foundation.
-
-Released under the [MIT License](LICENSE).
+Based on [panqing0313/dsh-plugin-weixin](https://github.com/panqing0313/dsh-plugin-weixin) and [Tencent/openclaw-weixin](https://github.com/Tencent/openclaw-weixin). [MIT License](LICENSE).

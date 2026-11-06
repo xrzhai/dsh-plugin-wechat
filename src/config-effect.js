@@ -38,7 +38,7 @@ export const CONFIG_EFFECTS = Object.freeze({
   'accountId': 'restart', 'cwd': 'restart', 'workspaceTitle': 'restart',
   'maxMessageLength': 'restart', 'sendIntervalMs': 'restart', 'sendCooldownMs': 'restart',
   'groupBotNames': 'restart',
-  'richContent': 'restart', 'codeFileThreshold': 'restart',
+  'allowedMediaDirs': 'restart', 'richContent': 'restart', 'codeFileThreshold': 'restart',
   'senderRatePerMinute': 'restart', 'maxQueuedPerConversation': 'restart',
   'markdownMode': 'restart', 'sourceContext': 'restart',
   'progressAfterMs': 'restart', 'progressToolAfterMs': 'restart', 'progressEveryMs': 'restart',

@@ -1,10 +1,34 @@
-/** Opt-in, controller-scoped bridge to existing host project sessions. */
+/** Controller-scoped bridge to existing host project sessions. */
 import fs from 'node:fs'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { SessionHost, assertNoPendingInbox } from './session-host.js'
+import { allowlistForAccount, RegistryReadError } from './account-registry.js'
 import { isAllowedSender } from './security/allowlist.js'
 import { clip, dispatchedTurn, lastSeq, recentSessionTurns } from './session-dispatch-reader.js'
+
+function withinOptionalList(list, id) {
+  return typeof id === 'string' && id.length > 0 &&
+    (list === undefined || (Array.isArray(list) && (list.length === 0 || list.includes(id))))
+}
+
+export function dispatcherSenderAllowed(config, source) {
+  if (config.enabled === false || !source || typeof source.accountId !== 'string' || !source.accountId ||
+    !withinOptionalList(config.sessionDispatcherSenders, source.senderId)) return false
+  try {
+    const allowlist = allowlistForAccount(source.accountId, config, { failClosed: true })
+    return Array.isArray(allowlist.allowedSenders) && Array.isArray(allowlist.allowedChats) &&
+      isAllowedSender(allowlist, source.senderId, source.conversationId)
+  } catch (error) {
+    if (error instanceof RegistryReadError) return false
+    throw error
+  }
+}
+
+export function dispatcherTargetAllowed(config, id) {
+  // Exclude controller topics and legacy private memory sessions even when cold.
+  return withinOptionalList(config.sessionDispatcherTargets, id) && !id.startsWith('weixin-') && !id.startsWith('wx-mem-')
+}
 
 const string = { type: 'string', minLength: 1, maxLength: 512 }
 const object = (properties, required = []) => ({ type: 'object', properties, required, additionalProperties: false })
@@ -98,7 +122,7 @@ export class SessionDispatcher {
       }))
     }
   }
-  enabled() { return !this.stopped.signal.aborted && this.config().sessionDispatcherEnabled === true }
+  enabled() { return !this.stopped.signal.aborted && [true, undefined].includes(this.config().sessionDispatcherEnabled) }
   mount(agent) {
     if (!this.enabled() || this.mounts.has(agent) || !agent?.ctx?.tools?.register) return
     const off = []
@@ -125,14 +149,17 @@ export class SessionDispatcher {
     const source = this.sourceFor?.(caller)
     if (!source || source.isSideSession || caller.session?.header?.origin === 'subagent' || this.locks.has(caller.session.id)) throw new Error('Recursive or non-controller session dispatch is not allowed.')
     const config = this.config()
-    if (config.enabled === false || !Array.isArray(config.allowedSenders) || !isAllowedSender(config, source.senderId, source.conversationId)
-      || !Array.isArray(config.sessionDispatcherSenders) || !config.sessionDispatcherSenders.includes(source.senderId)) throw new Error('This sender is not authorized for host session access.')
+    if (!dispatcherSenderAllowed(config, source)) throw new Error('This sender is not authorized for host session access.')
     if (exec.signal?.aborted) throw new Error('The calling turn was cancelled.')
     return { ...source, sessionId: caller.session.id }
   }
   allowedTarget(sessionId) {
-    const targets = this.config().sessionDispatcherTargets
-    return Array.isArray(targets) && targets.includes(sessionId)
+    return dispatcherTargetAllowed(this.config(), sessionId)
+  }
+  isProject(row) {
+    if (row.header?.origin === 'subagent') return false
+    const agent = row.agent ?? this.ctx.get('agents')?.get?.(row.sessionId)
+    return !agent || !this.sourceFor?.(agent)
   }
   async execute(name, args, exec, bound) {
     const source = this.assertSource(exec, bound)
@@ -141,7 +168,7 @@ export class SessionDispatcher {
       const rows = await this.host.list(exec.signal)
       this.assertSource(exec, bound)
       const status = args.status ?? 'active'
-      const matches = rows.filter((row) => this.allowedTarget(row.sessionId) && (status === 'all' || (status === 'active' ? row.status !== 'archived' : row.status === status))
+      const matches = rows.filter((row) => row.sessionId !== source.sessionId && this.allowedTarget(row.sessionId) && this.isProject(row) && (status === 'all' || (status === 'active' ? row.status !== 'archived' : row.status === status))
         && (!args.cwd_pattern || row.cwd?.toLowerCase().includes(args.cwd_pattern.toLowerCase()))
         && (!args.query || `${row.title} ${row.sessionId}`.toLowerCase().includes(args.query.toLowerCase())))
         .sort((a, b) => b.lastUpdatedMs - a.lastUpdatedMs)
@@ -156,18 +183,19 @@ export class SessionDispatcher {
       return { sessions, truncated: sessions.length < matches.length,
         ...(sessions.some((row) => row.totalEvents === null) ? { notice: 'Cold session counts are unknown (null); their update time may reflect title/creation only. Use session_query for the current snapshot.' } : {}) }
     }
+    if (args.session_id === source.sessionId) throw new Error('Self-dispatch is not allowed.')
     if (!this.allowedTarget(args.session_id)) throw new Error('This target session is not authorized for dispatcher access.')
     if (name === 'session_query') {
       const row = await this.host.read(args.session_id, exec.signal)
       this.assertSource(exec, bound)
       if (!this.allowedTarget(args.session_id)) throw new Error('Target authorization was revoked.')
+      if (!this.isProject(row)) throw new Error('Weixin controllers and subagent sessions are not project targets.')
       return { ...metadata(row, source.sessionId), ...recentSessionTurns(row.events, args.depth ?? 5, args.include_tools !== false) }
     }
     return this.dispatch(args, exec, source)
   }
   async dispatch(args, exec, source) {
     const id = args.session_id
-    if (id === source.sessionId) throw new Error('Self-dispatch is not allowed.')
     if (this.locks.has(id) && args.action === 'followup') throw new Error('This session already has a dispatch in progress. Query it instead of resubmitting.')
     this.locks.set(id, (this.locks.get(id) ?? 0) + 1)
     let job
@@ -183,6 +211,7 @@ export class SessionDispatcher {
         agent = await this.host.resume(id, exec.signal, (observed) => {
           this.assertSource(exec, exec.agent)
           if (!this.allowedTarget(id)) throw new Error('Target authorization was revoked; session was not resumed.')
+          if (!this.isProject(observed ?? row)) throw new Error('Weixin controllers and subagent sessions are not project targets.')
           assertWritable(observed ?? row, this.config())
         })
       }
@@ -275,8 +304,7 @@ export class SessionDispatcher {
   }
   async notifyJob(job) {
     const config = this.config()
-    if (!Array.isArray(config.sessionDispatcherSenders) || !config.sessionDispatcherSenders.includes(job.source.senderId)
-      || !Array.isArray(config.allowedSenders) || !isAllowedSender(config, job.source.senderId, job.source.conversationId)) return
+    if (!dispatcherSenderAllowed(config, job.source)) return
     if (job.notified || !this.enabled() || !this.allowedTarget(job.sessionId) || typeof this.notify !== 'function') return
     job.notified = true
     try {

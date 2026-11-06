@@ -18,6 +18,7 @@ test('a fresh workspace gets a starter persona + memory note, and neither overwr
     const instructions = fs.readFileSync(persona, 'utf8')
     const note = fs.readFileSync(memory, 'utf8')
     assert.match(instructions, /大肥鱼/)
+    for (const tool of ['session_list', 'session_query', 'session_dispatch']) assert.ok(instructions.includes(tool))
     assert.match(instructions, /按需读取/)
     assert.match(instructions, /用户表示第一次使用/)
     assert.match(instructions, /不要把新话题当成第一次使用/)

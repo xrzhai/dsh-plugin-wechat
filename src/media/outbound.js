@@ -2,26 +2,14 @@
  * Outbound media: send a local file back to Weixin as an image, video or file
  * attachment.
  *
- * The seam between the channel and the vendored Tencent upload/send pipeline:
- * this module owns everything dsh-weixin is allowed to decide (which file, is it
- * inside an allowed directory, MIME → kind, how big) and delegates every
- * protocol/crypto step to `vendor/openclaw-weixin/messaging/send-media.js`.
- *
- * Three deliberate properties:
- *  - **Nothing is sent without both gates.** A path is sent only when it
- *    resolves inside an allowed directory AND the file exists and is a regular
- *    file. Weixin text is not an authorization credential, so an agent reply
- *    must not be able to name `/etc/passwd` (or `../../etc/passwd`) and have it
- *    uploaded to Tencent's CDN.
- *  - **The upload waits for the file to settle.** A tool that is still writing
- *    the file when the turn ends would otherwise upload a truncated part.
- *  - **Failure is returned, never thrown.** The caller must still deliver the
- *    text half of a reply; see {@link OutboundMediaError}.
+ * Local files are unrestricted unless an explicit directory list is supplied.
+ * Resolve paths and wait for stable, nonempty files before uploading them.
  * @module dsh-weixin/media/outbound
  */
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 /**
  * Largest file this channel will upload. The CDN path reads the whole file into
@@ -51,29 +39,9 @@ export class OutboundMediaError extends Error {
   }
 }
 
-/**
- * The directories an agent reply is allowed to reference.
- *
- * `cwd` (the DSH session working directory) and `~/.dsh/weixin` (the plugin's
- * own state tree) are the only two places a Weixin conversation's files can be
- * produced, and the outbound directory scope is pinned to exactly these — see
- * `docs/security.md`, "出站附件" for the reasoning.
- *
- * @param {{ cwd?: string, stateDir?: string, allowedDirs?: string[] }} [params]
- * @returns {string[]} absolute, deduplicated directory paths
- */
-export function allowedMediaDirs(params = {}) {
-  const candidates = [
-    ...(Array.isArray(params.allowedDirs) ? params.allowedDirs : []),
-    params.cwd,
-    params.stateDir ?? path.join(os.homedir(), '.dsh', 'weixin'),
-  ]
-  const seen = new Set()
-  for (const candidate of candidates) {
-    if (typeof candidate !== 'string' || candidate.trim() === '') continue
-    seen.add(path.resolve(candidate))
-  }
-  return [...seen]
+/** Only explicit directories restrict access. Lookup bases are separate. */
+export function allowedMediaDirs({ allowedDirs = [] } = {}) {
+  return [...new Set(allowedDirs)]
 }
 
 /**
@@ -91,7 +59,7 @@ export function allowedMediaDirs(params = {}) {
 export function isInside(root, candidate) {
   const rel = path.relative(root, candidate)
   if (rel === '') return true
-  return !rel.startsWith('..') && !path.isAbsolute(rel)
+  return rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel)
 }
 
 /**
@@ -111,31 +79,26 @@ export function isInside(root, candidate) {
  *   the first root it resolves inside.
  * @returns {Promise<{ ok: true, path: string } | { ok: false, reason: string, code: string }>}
  */
-export async function resolveAllowedPath(filePath, roots) {
+export async function resolveAllowedPath(filePath, roots = [], { cwd = process.cwd(), stateDir = path.join(os.homedir(), '.dsh', 'weixin') } = {}) {
   if (typeof filePath !== 'string' || filePath.trim() === '') {
     return { ok: false, reason: 'empty path', code: 'invalid-path' }
   }
-  // An agent writes `![shot](desktop.png)` meaning "the file I just made", which
-  // lives in the agent's working directory — one of `roots` — NOT wherever this
-  // host process happens to have been started. Resolving against
-  // `process.cwd()` therefore lands outside every allowed directory and every
-  // relative reference is refused, which is indistinguishable to the user from
-  // the feature not existing at all.
-  //
-  // Trying each root in order (rather than only the first) keeps a deployment
-  // that allows several directories working: the reference resolves inside
-  // whichever one actually holds the file.
-  // Expand the home shorthand before `path.isAbsolute` and before joining it to
-  // a root. Doing this later turns `~/shot.png` into `<root>/~/shot.png`, so the
-  // shorthand can never match again. Expansion only changes the spelling: the
-  // resulting absolute path still has to pass the same containment check below,
-  // which means an allowed root must explicitly include that home path.
+  if (/^file:/i.test(filePath)) {
+    try {
+      filePath = fileURLToPath(filePath)
+    } catch {
+      return { ok: false, reason: 'invalid file URL', code: 'invalid-path' }
+    }
+  }
   const expandedFilePath = filePath === '~'
     ? os.homedir()
-    : filePath.startsWith('~/')
+    : /^~[/\\]/.test(filePath)
       ? path.join(os.homedir(), filePath.slice(2))
       : filePath
   const isAbsolute = path.isAbsolute(expandedFilePath)
+  if (roots.some((dir) => typeof dir !== 'string' || !dir.trim())) {
+    return { ok: false, reason: 'invalid allowed directory', code: 'path-not-allowed' }
+  }
   // The `..`-escape verdict must be read off the reference the agent WROTE.
   // `path.join(root, 'sub/../../x')` collapses the `..` on the way in, so a
   // containment check against the joined string can no longer tell a climb from
@@ -144,7 +107,7 @@ export async function resolveAllowedPath(filePath, roots) {
   const escapedWithDotDot = /(^|[/\\])\.\.([/\\]|$)/.test(filePath)
   const expandedCandidates = isAbsolute
     ? [expandedFilePath]
-    : roots.map((root) => path.join(root, expandedFilePath))
+    : [...new Set([cwd, stateDir, ...roots])].map((base) => path.resolve(base, expandedFilePath))
 
   const refusals = []
   /** A contained candidate whose file is not there; a later root may still have it. */
@@ -199,6 +162,7 @@ async function containPath(expanded, roots) {
     existed = false
     real = await realpathNearestAncestor(absolute)
   }
+  if (roots.length === 0) return { ok: true, path: real, existed }
   const realRoots = (await Promise.all(roots.map((root) => realpathIfDirectory(root)))).filter(
     (root) => root !== null,
   )
@@ -293,8 +257,7 @@ export function mediaKindForMime(mime) {
  * An agent turn can end while a background tool is still writing its output; a
  * file that changes size between two polls is not ready, so the wait extends
  * until it is stable for {@link SETTLE_STABLE_MS} or {@link SETTLE_TIMEOUT_MS}
- * elapses (in which case whatever is on disk is sent, matching the caller's
- * "deliver something" contract).
+ * elapses, in which case the upload is refused.
  *
  * @param {string} filePath
  * @param {() => Promise<void>} sleep
@@ -308,28 +271,30 @@ async function waitForStableSize(filePath, sleep) {
     try {
       size = (await fs.stat(filePath)).size
     } catch {
-      return
+      return 'the file does not exist'
     }
     if (size !== previous) {
       previous = size
       stableSince = Date.now()
     } else if (Date.now() - stableSince >= SETTLE_STABLE_MS) {
-      return
+      return undefined
     }
     await sleep(SETTLE_POLL_MS)
   }
+  return 'the file is still being written'
 }
 
 /**
  * Resolve a referenced local path into everything needed to send it.
  *
- * This is the whole authorization decision; {@link sendOutboundMedia} performs
- * no further checks. Pure I/O — nothing here talks to Weixin — so the tests can
+ * Both the command handler and the uploader use this check. Pure I/O — nothing here talks to Weixin — so the tests can
  * exercise the gate without a server.
  *
  * @param {object} params
  * @param {string} params.filePath
- * @param {string[]} params.allowedDirs
+ * @param {string[]} [params.allowedDirs]
+ * @param {string} [params.cwd]
+ * @param {string} [params.stateDir]
  * @param {number} [params.maxBytes]
  * @param {() => Promise<void>} [params.sleep]  Test seam.
  * @returns {Promise<{ ok: true, path: string, size: number, mime: string, kind: 'video'|'image'|'file', name: string }
@@ -337,15 +302,19 @@ async function waitForStableSize(filePath, sleep) {
  */
 export async function resolveOutboundMedia(params) {
   const maxBytes = params.maxBytes ?? DEFAULT_MAX_MEDIA_BYTES
-  const resolved = await resolveAllowedPath(params.filePath, params.allowedDirs)
+  const resolved = await resolveAllowedPath(params.filePath, params.allowedDirs, params)
   if (!resolved.ok) return { ok: false, status: resolved.reason }
 
   const filePath = resolved.path
-  await waitForStableSize(filePath, params.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))))
+  const problem = await waitForStableSize(filePath, params.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))))
+  if (problem) return { ok: false, status: problem }
 
+  // Re-check the canonical path after waiting: a writer may have replaced it with a symlink.
+  const final = await resolveAllowedPath(filePath, params.allowedDirs, params)
+  if (!final.ok) return { ok: false, status: final.reason }
   let stat
   try {
-    stat = await fs.stat(filePath)
+    stat = await fs.stat(final.path)
   } catch {
     return { ok: false, status: 'the file does not exist' }
   }
@@ -355,10 +324,10 @@ export async function resolveOutboundMedia(params) {
     return { ok: false, status: `the file is larger than the ${Math.floor(maxBytes / (1024 * 1024))}MB upload limit` }
   }
 
-  const mime = await mimeFor(filePath)
+  const mime = await mimeFor(final.path)
   return {
     ok: true,
-    path: filePath,
+    path: final.path,
     size: stat.size,
     mime,
     kind: mediaKindForMime(mime),
@@ -370,7 +339,9 @@ export async function resolveOutboundMedia(params) {
  * Upload one local file to the Weixin CDN and send it to `to`.
  *
  * @param {object} params
- * @param {string} params.filePath  Already validated (see {@link resolveOutboundMedia}).
+ * @param {string} params.filePath
+ * @param {string[]} [params.allowedDirs]
+ * @param {number} [params.maxBytes]
  * @param {string} params.to        Conversation id (`msg.to_user_id`).
  * @param {string} params.contextToken  Echoed inbound token; iLink routes by it.
  * @param {string} params.cdnBaseUrl
@@ -380,9 +351,10 @@ export async function resolveOutboundMedia(params) {
  * @throws {OutboundMediaError} when the upload or the send fails.
  */
 export async function sendOutboundMedia(params) {
-  const { filePath, to, contextToken, cdnBaseUrl, opts, text } = params
-  const mime = await mimeFor(filePath)
-  const kind = mediaKindForMime(mime || '')
+  const { to, contextToken, cdnBaseUrl, opts, text } = params
+  const resolved = await resolveOutboundMedia(params)
+  if (!resolved.ok) throw new OutboundMediaError(resolved.status, 'invalid-file')
+  const { path: filePath, kind } = resolved
   const { sendWeixinMediaFile } = await import('../../vendor/openclaw-weixin/messaging/send-media.js')
   try {
     const result = await sendWeixinMediaFile({
@@ -419,66 +391,12 @@ export function mediaSendOptions(params) {
 // Detection: which local files does an agent's reply point at?
 // ---------------------------------------------------------------------------
 
-/**
- * Extensions that are *attachments by nature* — a document, archive or media
- * container the user is meant to receive, never something that renders inline.
- *
- * This set is what makes a markdown LINK an upload. An image in a link
- * (`[shot](a.png)`) is plausibly the agent pointing at where a picture lives,
- * and turning every link into an upload would send source trees to Tencent. But
- * `[报告](报告.pdf)` cannot mean anything except "here is the file" — nothing
- * renders a PDF inline in a WeChat reply, and this is exactly the shape agents
- * write for documents (measured: every real .pdf/.docx reply in this project's
- * own transcripts used link syntax with a relative path, and none arrived).
- *
- * Anything not listed here keeps the stricter rule: only image syntax.
- */
-const ATTACHMENT_EXT = 'pdf|docx?|xlsx?|pptx?|csv|zip|tar|gz|tgz|7z|rar|mp3|wav|m4a|ogg|mp4|mov|webm|mkv|avi|silk'
+// Accept local links regardless of extension; angle brackets quote paths with spaces.
+const MARKDOWN_REF_RE = /!?\[([^\]\n]*)\]\(\s*(?:<([^<>\n]+)>|([^()\n]+?(?:\([^()\n]*\)[^()\n]*)*?))(?:\s+"[^"\n]*")?\s*\)/g
 
-/** Every extension this channel will deliver, image or attachment. */
-const MEDIA_EXT = `png|jpe?g|gif|webp|bmp|${ATTACHMENT_EXT}|txt|md|json|log`
-
-/**
- * Markdown image reference: `![alt](path)`.
- *
- * Image syntax is accepted for **any** media extension: `![x](a.pdf)` is
- * unambiguous, because the agent chose the upload-shaped delimiter itself.
- *
- * The path may be wrapped in `<...>` — the usual way to write a path containing
- * spaces — and `<...>` contents are allowed to contain spaces.
- */
-const MARKDOWN_IMAGE_RE = /!\[([^\]\n]*)\]\(\s*(?:<([^<>\n]+)>|([^)\s]+))(?:\s+"[^"]*")?\s*\)/g
-
-/**
- * Markdown link reference: `[text](path)`.
- *
- * Deliberately narrower than the image form — see {@link ATTACHMENT_EXT} for
- * why only attachment extensions qualify. `[alt](a.png)` stays a link *about*
- * an image and is not uploaded.
- */
-const MARKDOWN_LINK_RE = /(?<!!)\[([^\]\n]*)\]\(\s*(?:<([^<>\n]+)>|([^)\s]+))(?:\s+"[^"]*")?\s*\)/g
-
-/**
- * An explicit path written on its own line, or in a list/bullet.
- *
- * Absolute, home-relative and Windows-shaped paths are accepted for any media
- * extension. A *relative* path is accepted too, but only when it carries an
- * attachment extension (see {@link RELATIVE_SAFE_RE}): `report.pdf` alone on a
- * line is an instruction to send that document, while `shot.png` alone on a
- * line is ambiguous — the agent may only be naming a file it discussed. A wrong
- * guess fails closed: the resolver tries every allowed root and reports why
- * nothing was sent, and it can never reach outside the configured directories.
- *
- * The token may not contain a quote/backtick/angle bracket, so prose is still
- * never mistaken for a path.
- */
-const BARE_PATH_RE = new RegExp(
-  `^[\\s>\\-+*]*((?:(?:~/|/|[A-Za-z]:[\\\\/])[^\\s\`'"<>|]*?|(?![/~])[^\\s\`'"<>|]*?)\\.(?:${MEDIA_EXT}))\\s*$`,
-  'gim',
-)
-
-/** A relative path is auto-detected only for these extensions. */
-const RELATIVE_SAFE_RE = new RegExp(`\\.(${ATTACHMENT_EXT})$`, 'i')
+// A whole line can name an absolute path (including spaces or no extension),
+// or a relative filename. Prose mentioning a filename is not a send request.
+const BARE_PATH_RE = /^[ \t]*(?:[-+*>][ \t]+)?((?:(?:~[/\\]|\.{1,2}[/\\]|\/|[A-Za-z]:[/\\])[^<>`"|\r\n]+|[^\s<>`"|]+\.[\w-]+))[ \t]*\r?$/gm
 
 /** How many files one reply may carry: iLink sends one item per request. */
 export const MAX_MEDIA_PER_REPLY = 5
@@ -521,24 +439,14 @@ export function detectMediaReferences(text) {
   // form (which may contain spaces) and group 3 the bare form (which may not).
   const target = (match) => match[2] ?? match[3]
 
-  for (const match of scanText.matchAll(MARKDOWN_IMAGE_RE)) {
+  for (const match of scanText.matchAll(MARKDOWN_REF_RE)) {
     const value = target(match)
-    if (value === undefined) continue
-    push(text.slice(match.index ?? 0, (match.index ?? 0) + match[0].length), value, match[1], match.index ?? 0)
-  }
-  for (const match of scanText.matchAll(MARKDOWN_LINK_RE)) {
-    const value = target(match)
-    // A link is only a reference when the target is an attachment by nature.
-    if (value === undefined || !RELATIVE_SAFE_RE.test(value)) continue
-    push(text.slice(match.index ?? 0, (match.index ?? 0) + match[0].length), value, match[1], match.index ?? 0)
+    if (value.startsWith('#') || value.startsWith('//')) continue
+    push(text.slice(match.index, match.index + match[0].length), value, match[1], match.index)
   }
   for (const match of scanText.matchAll(BARE_PATH_RE)) {
     const value = match[1]
-    // A bare relative path is only a reference for attachment extensions; the
-    // regex admits any extension so it can capture both shapes, so the filter
-    // lives here where the leading shape is still known.
-    const absolute = /^(?:~\/|\/|[A-Za-z]:[\\/])/.test(value)
-    if (!absolute && !RELATIVE_SAFE_RE.test(value)) continue
+    if (value.startsWith('//')) continue
     push(text.slice(match.index ?? 0, (match.index ?? 0) + match[0].length), value, undefined, match.index ?? 0)
   }
 
@@ -860,7 +768,9 @@ export function splitOutboundMedia(text) {
  * @param {string} params.text
  * @param {string} params.to
  * @param {string} [params.contextToken]
- * @param {string[]} params.allowedDirs
+ * @param {string[]} [params.allowedDirs]
+ * @param {string} [params.cwd]
+ * @param {string} [params.stateDir]
  * @param {string} params.cdnBaseUrl
  * @param {{ baseUrl: string, token: string, accountId?: string }} params.opts
  * @param {number} [params.maxBytes]
@@ -871,7 +781,8 @@ export function splitOutboundMedia(text) {
  */
 export async function deliverOutboundMedia(params) {
   const send = params.send ?? sendOutboundMedia
-  const { text, media } = splitOutboundMedia(params.text ?? '')
+  const text = params.text ?? ''
+  const media = detectMediaReferences(text)
   const sent = []
   const failed = []
   /** @type {Array<{ raw: string, alt?: string }>} */
@@ -880,7 +791,7 @@ export async function deliverOutboundMedia(params) {
   for (const reference of media) {
     const resolved = await resolveOutboundMedia({
       filePath: reference.path,
-      allowedDirs: params.allowedDirs,
+      cwd: params.cwd, stateDir: params.stateDir, allowedDirs: params.allowedDirs,
       ...(params.maxBytes === undefined ? {} : { maxBytes: params.maxBytes }),
     })
     if (!resolved.ok) {
@@ -896,7 +807,7 @@ export async function deliverOutboundMedia(params) {
         to: params.to,
         contextToken: params.contextToken,
         cdnBaseUrl: params.cdnBaseUrl,
-        opts: params.opts,
+        opts: params.opts, maxBytes: params.maxBytes, allowedDirs: params.allowedDirs,
       })
       sent.push(resolved.path)
       delivered.push(reference)

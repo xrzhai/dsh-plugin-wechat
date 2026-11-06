@@ -22,6 +22,7 @@ function clientEssentialPaths() {
 
 const EXPECTED_RESTART = [
   'accountId',
+  'allowedMediaDirs',
   'cdnBaseUrl',
   'codeFileThreshold',
   'cwd',
@@ -85,18 +86,14 @@ test('retired configuration has no schema or effect mapping', () => {
   }
 })
 
-test('workspace title and dispatcher controls are exposed to the settings card', () => {
-  const paths = new Set(FIELDS.flatMap((group) => group.fields.map((field) => field.path)))
-  const essentialPaths = clientEssentialPaths()
-  for (const field of [
-    'workspaceTitle',
-    'sessionDispatcherEnabled',
-    'sessionDispatcherSenders',
-    'sessionDispatcherTargets',
-    'protectedSessions',
-    'readOnlyPaths',
-  ]) {
-    assert.equal(paths.has(field), true, `${field} must be present in ConfigController.FIELDS`)
-    assert.equal(essentialPaths.has(field), true, `${field} must pass the card essential-path filter`)
+test('settings show the remote session switch last and keep advanced restrictions in the schema', () => {
+  assert.deepEqual(FIELDS.map(group => group.group), ['基本设置', '消息与回复', '谁可以使用', '远程查看与管理 DSH 会话'])
+  assert.deepEqual(FIELDS.at(-1).fields.map(field => field.path), ['sessionDispatcherEnabled'])
+  const essential = clientEssentialPaths()
+  for (const field of ['sessionDispatcherEnabled', 'senderRatePerMinute', 'workspaceTitle']) assert.ok(essential.has(field))
+  assert.equal(FIELDS.flatMap(group => group.fields).find(field => field.path === 'senderRatePerMinute').default, 0)
+  for (const field of ['sessionDispatcherSenders', 'sessionDispatcherTargets', 'protectedSessions', 'readOnlyPaths']) {
+    assert.ok(Config.dict[field])
+    assert.ok(!essential.has(field))
   }
 })

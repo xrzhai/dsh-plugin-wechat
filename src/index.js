@@ -27,6 +27,7 @@ import { configureOutbound, sendChunked } from './outbound.js'
 import { ensureSecretModes, redactSecrets } from './credentials.js'
 import { neutralizeTags } from './message/fence.js'
 import { quoteBlock } from './message/quote.js'
+import { dispatcherSenderAllowed, dispatcherTargetAllowed } from './session-dispatcher.js'
 import { DEFAULT_MAX_QUEUE, DEFAULT_PER_MINUTE, createSenderLimiter } from './message/sender-limit.js'
 import { createSenderDailyLimiter } from './message/sender-daily.js'
 import { isAllowedSender, denialReason } from './security/allowlist.js'
@@ -91,9 +92,9 @@ export const inject = ['agents']
  */
 export const Config = z.object({
   enabled: z.boolean().default(true).description('Start the Weixin long-poll loop when the plugin loads.'),
-  sessionDispatcherEnabled: z.boolean().default(false).description('Opt in to explicitly authorized session read/control for dispatcher senders. Never enables itself.'),
-  sessionDispatcherSenders: z.array(z.string()).default([]).description('Explicit sender IDs allowed to read and control host project sessions; empty denies everyone.'),
-  sessionDispatcherTargets: z.array(z.string()).default([]).description('Exact target session IDs visible to all dispatcher senders; empty denies access. No wildcard.'),
+  sessionDispatcherEnabled: z.boolean().default(true).description('Allow authorized WeChat contacts to view and manage other DSH sessions.'),
+  sessionDispatcherSenders: z.array(z.string()).default([]).description('Optional subset of authorized contacts; empty allows all contacts authorized for this account.'),
+  sessionDispatcherTargets: z.array(z.string()).default([]).description('Optional target session IDs; empty allows ordinary local DSH sessions.'),
   protectedSessions: z.array(z.string()).default([]).description('Session IDs that session_dispatch must treat as read-only.'),
   readOnlyPaths: z.array(z.string()).default([]).description('Absolute workspace roots that session_dispatch must treat as read-only, including descendants and symlink aliases.'),
   accountId: z.string().default('').description('Weixin account id to use; empty means the only saved account.'),
@@ -132,6 +133,7 @@ export const Config = z.object({
   // `groupReplyWhen` above.
   typingIndicator: z.boolean().default(true).description('Show a typing indicator while the agent works, when a typing ticket is available.'),
   mediaEnabled: z.boolean().default(true).description('Send local files the agent references in its reply as Weixin images/videos/file attachments.'),
+  allowedMediaDirs: z.array(z.string()).default([]).description('Optional local directories for outgoing attachments; empty allows any regular local file.'),
   maxMediaBytes: z.number().default(DEFAULT_MAX_MEDIA_BYTES).description('Largest referenced file that will be uploaded to the Weixin CDN.'),
   maxInboundMediaBytes: z
     .number()
@@ -175,8 +177,7 @@ export function apply(ctx, config) {
   const sessionDispatcherConfig = () => {
     const live = withSavedConfig(baseConfig)
     const saved = readSavedConfig()
-    // Empty security lists revoke access. The legacy general config overlay
-    // treats empty arrays as defaults, which must not resurrect these grants.
+    // Clearing a saved list must take effect even when the base config has entries.
     for (const key of ['allowedSenders', 'allowedChats', 'sessionDispatcherSenders',
       'sessionDispatcherTargets', 'protectedSessions', 'readOnlyPaths']) {
       if (Object.hasOwn(saved, key)) live[key] = saved[key]
@@ -293,10 +294,9 @@ export function apply(ctx, config) {
         onDispatchReply: async ({ accountId, conversationId, senderId, targetSessionId, text }) => {
           // Exact origin only. Never fall back to another bot or interpret
           // project output as attachments. Recheck after the async refresh.
-          const allowed = (live) => live.enabled !== false && live.sessionDispatcherEnabled === true
-            && Array.isArray(live.sessionDispatcherSenders) && live.sessionDispatcherSenders.includes(senderId)
-            && Array.isArray(live.sessionDispatcherTargets) && live.sessionDispatcherTargets.includes(targetSessionId)
-            && isAllowedSender(live, senderId, conversationId)
+          const allowed = (live) => live.enabled !== false && [undefined, true].includes(live.sessionDispatcherEnabled)
+            && dispatcherSenderAllowed(live, { accountId, conversationId, senderId })
+            && dispatcherTargetAllowed(live, targetSessionId)
           if (!allowed(sessionDispatcherConfig())) return
           const transport = transports.get(accountId)
           if (!transport || !conversationId) throw new Error('Originating Weixin account is unavailable for dispatch notification.')
@@ -337,7 +337,8 @@ export function apply(ctx, config) {
           const outbound = await resolveOutboundReply({
             config: liveCfg,
             transport: liveTransport,
-            mediaDirs: allowedMediaDirs({ cwd, stateDir: stateRoot, allowedDirs: liveCfg.allowedMediaDirs }),
+            cwd,
+            mediaDirs: allowedMediaDirs({ allowedDirs: config.allowedMediaDirs }),
             stateRoot,
             reply: spontaneousText,
             conversationId: targetConvId,
@@ -362,11 +363,7 @@ export function apply(ctx, config) {
         log,
       })
       outbox.start()
-      const liveLimiter = () => {
-        const live = withSavedConfig(config)
-        return createSenderLimiter({ perMinute: Number(live.senderRatePerMinute ?? DEFAULT_PER_MINUTE) || 1_000_000 })
-      }
-      senderLimiter = liveLimiter()
+      senderLimiter = createSenderLimiter({ perMinute: config.senderRatePerMinute })
       // 每人每日配额：比「每分钟」更贴群的一层，按账号分开计。它读实时配置，
       // 所以设置卡改完下一次消息就生效。工厂存在模块级变量里是因为
       // bringUpLoop() 在另一个函数里，长得够不到这里的 const。
@@ -538,9 +535,8 @@ export function apply(ctx, config) {
         warn,
         fileLog,
         stateRoot,
-        // Resolved once: the allowlist is a property of the deployment, not of
-        // the message, and re-resolving per reply would re-stat every directory.
-        mediaDirs: allowedMediaDirs({ cwd, stateDir: stateRoot }),
+        cwd,
+        mediaDirs: allowedMediaDirs({ allowedDirs: config.allowedMediaDirs }),
         senderGate: (senderId) => senderLimiter.check(`${account.accountId}|${senderId}`),
         // 每日配额在账号维度上另算：同一个人在不同账号下各有自己的额度。
         senderDailyGate: (senderId) => senderDailyLimiterFor(account.accountId, senderId),
@@ -862,7 +858,7 @@ export function weixinSourceBlock(message) {
   return `<weixin_source ${fields.join(' ')} />`
 }
 
-function createInboundHandler({ config, accountId, transport, bridge, seen, log, warn, fileLog, stateRoot, mediaDirs, senderGate, senderDailyGate }) {
+function createInboundHandler({ config, accountId, transport, bridge, seen, log, warn, fileLog, stateRoot, cwd, mediaDirs, senderGate, senderDailyGate }) {
   // The effective allowlist is per account: an account-level override in the
   // registry narrows (or replaces) the global list.
   // `accountId` is always set here (bringUpAccount passes it), but the
@@ -882,7 +878,7 @@ function createInboundHandler({ config, accountId, transport, bridge, seen, log,
   // first-contact enrolment takes effect on the very message that triggered it.
   const effectiveConfig = { current: resolveAccountConfig() }
   const personaCommands = (conversationId) => createSendCommands({
-    conversationId, mediaDirs,
+    conversationId, mediaDirs, cwd, stateDir: stateRoot,
     ...(effectiveConfig.current.maxMediaBytes === undefined ? {} : { maxBytes: effectiveConfig.current.maxMediaBytes }),
     warn, sendMedia: (params) => transport.sendMedia(params),
   })
@@ -925,19 +921,6 @@ function createInboundHandler({ config, accountId, transport, bridge, seen, log,
       // back to the durable queue under the gateway's existing contract.
       return INBOUND_NOT_ACCEPTED
     }
-    // 1. Truly unknown item kinds (TOOL_CALL_*, anything the protocol adds
-    //    later) still get one short notice rather than silence. Media kinds are
-    //    NOT unsupported — they are normalized into descriptors by the transport
-    //    and downloaded below, after authorization.
-    if (message.unsupported !== undefined) {
-      await sendChunked(transport, config, {
-        conversationId: message.conversationId,
-        text: createTranslator(effectiveConfig.current.locale).t('notice.unsupported', { kind: message.unsupported }),
-        contextToken: message.contextToken,
-      })
-      return
-    }
-
     // 1a-bis. Group policy (C14). The transport already turns a non-blank
     //        group_id into the conversation id; what was missing is that nothing
     //        downstream knew the difference, so the bot answered every message
@@ -958,43 +941,6 @@ function createInboundHandler({ config, accountId, transport, bridge, seen, log,
       return
     }
 
-    // 1b. Per-sender pacing. The account-wide limiter protects the Weixin
-    //     account from a ban; this protects the bot (and the token bill) from
-    //     one person sending thirty messages into a running turn. A refused
-    //     message is answered once per window — silence would read as a bug.
-    const gate = typeof senderGate === 'function' ? senderGate(message.senderId) : undefined;
-    if (gate !== undefined && gate.allowed === false) {
-
-      if (gate.shouldWarn === true) {
-        await sendChunked(transport, config, {
-          conversationId: message.conversationId,
-          text: createTranslator(effectiveConfig.current.locale).t('notice.rateLimited', {
-            seconds: Math.max(1, Math.ceil(gate.retryAfterMs / 1000)),
-          }),
-          contextToken: message.contextToken,
-        }).catch(() => {})
-
-      }
-      return
-    }
-
-    // Daily limits are scoped to each account.
-    const dailyGate = typeof senderDailyGate === 'function' ? senderDailyGate(message.senderId) : undefined
-    if (dailyGate !== undefined && dailyGate.allowed === false) {
-
-      if (dailyGate.shouldWarn === true) {
-        await sendChunked(transport, config, {
-          conversationId: message.conversationId,
-          text: createTranslator(effectiveConfig.current.locale).t('notice.dailyLimited', {
-            limit: dailyGate.limit,
-          }),
-          contextToken: message.contextToken,
-        }).catch(() => {})
-
-      }
-      return
-    }
-
     // 2. Authorization first: before dedupe, before a session exists, and —
     //    critically — before any download. An unauthorized sender must not be
     //    able to make this host issue requests to Tencent's CDN, so nothing
@@ -1004,7 +950,7 @@ function createInboundHandler({ config, accountId, transport, bridge, seen, log,
       // is permitted. The first contact is not necessarily the scanner.
       const { allowedSenders = [], allowedChats = [] } = effectiveConfig.current
       let enrolled = false
-      if (accountId && allowedSenders.length === 0 && (allowedChats.length === 0 || allowedChats.includes(message.conversationId))) {
+      if (message.unsupported === undefined && accountId && allowedSenders.length === 0 && (allowedChats.length === 0 || allowedChats.includes(message.conversationId))) {
         try {
           enrolled = enrolFirstContact(accountId, message.senderId, (line) => {
             log(`${line}`)
@@ -1045,6 +991,56 @@ function createInboundHandler({ config, accountId, transport, bridge, seen, log,
         warn(`refused message from ${message.senderId}: ${denialReason(effectiveConfig.current, message.senderId, message.conversationId)}`)
         return
       }
+    }
+
+    // 1. Truly unknown item kinds (TOOL_CALL_*, anything the protocol adds
+    //    later) still get one short notice rather than silence. Media kinds are
+    //    NOT unsupported — they are normalized into descriptors by the transport
+    //    and downloaded below, after authorization.
+    if (message.unsupported !== undefined) {
+      await sendChunked(transport, config, {
+        conversationId: message.conversationId,
+        text: createTranslator(effectiveConfig.current.locale).t('notice.unsupported', { kind: message.unsupported }),
+        contextToken: message.contextToken,
+      })
+      return
+    }
+
+    // 1b. Per-sender pacing. The account-wide limiter protects the Weixin
+    //     account from a ban; this protects the bot (and the token bill) from
+    //     one person sending thirty messages into a running turn. A refused
+    //     message is answered once per window — silence would read as a bug.
+    const gate = typeof senderGate === 'function' ? senderGate(message.senderId) : undefined;
+    if (gate !== undefined && gate.allowed === false) {
+
+      if (gate.shouldWarn === true) {
+        await sendChunked(transport, config, {
+          conversationId: message.conversationId,
+          text: createTranslator(effectiveConfig.current.locale).t('notice.rateLimited', {
+            seconds: Math.max(1, Math.ceil(gate.retryAfterMs / 1000)),
+          }),
+          contextToken: message.contextToken,
+        }).catch(() => {})
+
+      }
+      return
+    }
+
+    // Daily limits are scoped to each account.
+    const dailyGate = typeof senderDailyGate === 'function' ? senderDailyGate(message.senderId) : undefined
+    if (dailyGate !== undefined && dailyGate.allowed === false) {
+
+      if (dailyGate.shouldWarn === true) {
+        await sendChunked(transport, config, {
+          conversationId: message.conversationId,
+          text: createTranslator(effectiveConfig.current.locale).t('notice.dailyLimited', {
+            limit: dailyGate.limit,
+          }),
+          contextToken: message.contextToken,
+        }).catch(() => {})
+
+      }
+      return
     }
 
     // 3. Dedupe: iLink can redeliver a message after a reconnect.
@@ -1241,7 +1237,7 @@ function createInboundHandler({ config, accountId, transport, bridge, seen, log,
           lateOutbound ??= await resolveOutboundReply({
             config,
             transport,
-            mediaDirs,
+            mediaDirs, cwd,
             stateRoot,
             reply: late.text,
             conversationId: message.conversationId,
@@ -1290,7 +1286,7 @@ function createInboundHandler({ config, accountId, transport, bridge, seen, log,
       const outbound = await resolveOutboundReply({
         config,
         transport,
-        mediaDirs,
+        mediaDirs, cwd,
         stateRoot,
         reply: reply.text,
         conversationId: message.conversationId,
@@ -1325,7 +1321,7 @@ function createInboundHandler({ config, accountId, transport, bridge, seen, log,
  * rule, and its two gates, live in `src/media/outbound.js`:
  *
  *  1. the reply references a file (`![alt](path)` or a line that is just a path);
- *  2. that path resolves inside {@link mediaDirs} and is an existing regular file.
+ *  2. the referenced regular file passes size, stability and any explicit directory checks.
  *
  * A refusal or a failed upload never loses the answer: the reference stays in the
  * text and `deliverOutboundMedia` appends one line naming the file and why it did
@@ -1354,6 +1350,8 @@ export async function resolveOutboundReply(params) {
       to: params.conversationId,
       contextToken: params.contextToken,
       allowedDirs: params.mediaDirs,
+      cwd: params.cwd,
+      stateDir: params.stateRoot,
       cdnBaseUrl: params.transport.cdnBaseUrl,
       opts: {
         baseUrl: params.transport.baseUrl,
@@ -1377,8 +1375,8 @@ export async function resolveOutboundReply(params) {
       // plugin-driven attachment went out as `to=undefined`, the getUploadUrl
       // request lost `to_user_id`, and the server answered `{ret:-2}` — the
       // file never reached the upload path at all. Adapt the differing key.
-      send: ({ filePath, to, contextToken, cdnBaseUrl }) =>
-        params.transport.sendMedia({ filePath, conversationId: to, contextToken, cdnBaseUrl }),
+      send: ({ filePath, to, contextToken, cdnBaseUrl, maxBytes, allowedDirs }) =>
+        params.transport.sendMedia({ filePath, conversationId: to, contextToken, cdnBaseUrl, maxBytes, allowedDirs }),
     })
     if (result.sent.length > 0) {
       const names = result.sent.map((filePath) => filePath.split('/').pop()).join(', ')

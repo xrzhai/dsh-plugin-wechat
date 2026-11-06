@@ -1,3 +1,4 @@
+import { resolveOutboundMedia } from '../src/media/outbound.js'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -212,4 +213,24 @@ test('failed transient messages remain unqueued even when they contain a code bl
   await sendChunked(transport, config, { conversationId: 'synthetic-chat', text: reply, durable: false })
   assert.deepEqual(queue, [])
   assert.deepEqual(media, [])
+})
+
+test('generated snippets outside the configured directories fall back to their original code', async (t) => {
+  const { root } = setup(t)
+  const allowed = path.join(root, 'exports')
+  fs.mkdirSync(allowed)
+  const delivered = [], refusals = []
+  const transport = {
+    send: async m => delivered.push(m.text),
+    sendMedia: async params => {
+      assert.deepEqual(params.allowedDirs, [allowed])
+      assert.equal(params.maxBytes, 1024)
+      const result = await resolveOutboundMedia(params)
+      if (!result.ok) { refusals.push(result.status); throw new Error(result.status) }
+    },
+  }
+  await sendChunked(transport, { ...config, maxMediaBytes: 1024, allowedMediaDirs: [allowed] }, { conversationId: 'chat', text: reply })
+  assert.equal(refusals.length, 2)
+  assert.ok(refusals.every(reason => reason.includes('outside')))
+  assert.ok(delivered.join('').includes(code))
 })

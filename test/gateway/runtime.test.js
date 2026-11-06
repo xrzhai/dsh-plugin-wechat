@@ -127,6 +127,43 @@ test('a recent unrelated file is not sent, while a referenced result still is', 
   assert.equal(f.media[0].filePath, fs.realpathSync(path.join(f.root, 'unrelated.pdf')))
 })
 
+test('reply and /send use the actual session cwd and can deliver a local file outside it', async t => {
+  const parent = fs.mkdtempSync(path.join(stateDir(), 'external-'))
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }))
+  const external = path.join(parent, 'external report.pdf')
+  fs.writeFileSync(external, 'external')
+  const f = fixture(t, {
+    enabled: true,
+    beforeApply(root) {
+      fs.mkdirSync(path.join(root, 'workspace'))
+      fs.writeFileSync(path.join(root, 'workspace', 'inside.pdf'), 'inside')
+    },
+    configOverrides: root => ({ cwd: path.join(root, 'workspace'), mediaEnabled: true }),
+    async deliver() { return { text: '[report](<' + external + '>)' } },
+  })
+  await until(() => f.started.length === 1, 'runtime starts')
+  await f.started[0].testInbound({ ...f.message('external'), text: 'report please' })
+  await f.started[0].testInbound({ ...f.message('relative'), text: '/send inside.pdf' })
+  assert.deepEqual(f.media.map(m => m.filePath), [external, path.join(f.root, 'workspace', 'inside.pdf')].map(p => fs.realpathSync(p)))
+})
+
+test('an explicit attachment directory applies to both reply references and /send', async t => {
+  const f = fixture(t, {
+    enabled: true,
+    beforeApply(root) {
+      fs.mkdirSync(path.join(root, 'allowed'))
+      fs.writeFileSync(path.join(root, 'private.pdf'), 'private')
+    },
+    configOverrides: root => ({ cwd: root, mediaEnabled: true, allowedMediaDirs: [path.join(root, 'allowed')] }),
+    async deliver() { return { text: '[report](private.pdf)' } },
+  })
+  await until(() => f.started.length === 1, 'runtime starts')
+  await f.started[0].testInbound({ ...f.message('plain'), text: 'report please' })
+  await f.started[0].testInbound({ ...f.message('command'), text: '/send private.pdf' })
+  assert.deepEqual(f.media, [])
+  assert.equal(f.sent.length, 2)
+})
+
 test('unconfirmed and discarded turns report whether an input was executed', async (t) => {
   const f = fixture(t, {
     enabled: true,
@@ -508,6 +545,28 @@ test('outbox stops between segments if registry becomes corrupt during delivery'
   assert.equal(queue.pending().length, 1)
   assert.equal(queue.pending()[0].nextSegment, 1)
   assert.equal(fs.readFileSync(file, 'utf8'), '{broken after first segment')
+})
+
+test('the default minute limit lets an authorized owner send a burst of commands', async t => {
+  const f = fixture(t, { enabled: true })
+  await until(() => f.started.length === 1, 'runtime starts')
+  for (let i = 0; i < 25; i++) await f.started[0].testInbound({ ...f.message('burst-' + i), text: '/list' })
+  assert.equal(f.sent.length, 25)
+  assert.ok(f.sent.every(m => m.text.includes('/use')))
+})
+
+test('strangers receive no quota or unsupported notices; an explicit minute limit applies to the owner', async t => {
+  const f = fixture(t, { enabled: true, configOverrides: () => ({ senderRatePerMinute: 1, senderDailyLimit: 3 }) })
+  await until(() => f.started.length === 1, 'runtime starts')
+  const inbound = f.started[0].testInbound
+  for (let i = 0; i < 4; i++) await inbound({ ...f.message('denied-' + i), senderId: 'stranger', conversationId: 'stranger', text: '/list' })
+  await inbound({ ...f.message('denied-kind'), senderId: 'stranger', unsupported: 'future kind' })
+  assert.deepEqual(f.sent, [])
+  await inbound({ ...f.message('owner-1'), text: '/list' })
+  await inbound({ ...f.message('owner-2'), text: '/list' })
+  assert.equal(f.sent.length, 2)
+  assert.match(f.sent[0].text, /\/use/)
+  assert.match(f.sent[1].text, /发得有点快|too fast/i)
 })
 
 test('an empty sender list enrolls only the first contact in a permitted chat', async (t) => {

@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "WeChat",
-    "description": "Chat with your DSH assistant from WeChat: send text, images, files and voice notes, and manage topics, reminders and accounts."
+    "description": "Chat with your DSH assistant from WeChat: send text, images, files and voice notes, and manage topics, remote sessions and accounts."
   },
   "help.compact": "  /compact — Compact current session history immediately"
 }
