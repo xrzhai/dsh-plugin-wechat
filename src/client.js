@@ -239,6 +239,19 @@ window.__ModuleLoader__.load({
 					],
 					result: { mode: "strict", typeSymbol: `${PKG}#weixinConfig/reset:result`, create: _statusResult },
 				},
+				...[
+					["archivedChildren", ["parentSessionId"]],
+					["updateArchivedChildren", ["parentSessionId", "addJson", "removeJson"]],
+				].map(([method, names]) => {
+					const id = `${PKG}#weixinConfig/${method}`;
+					return {
+						id, service: "configController", namespace: "weixinConfig", method,
+						invocation: { kind: "direct" },
+						parameters: names.map((name, i) => ({ name, wire: name, source: "json",
+							codec: { mode: "strict", typeSymbol: `${id}:p${i}`, create: _str } })),
+						result: { mode: "strict", typeSymbol: `${id}:result`, create: _statusResult },
+					};
+				}),
 			],
 		};
 
@@ -715,6 +728,19 @@ window.__ModuleLoader__.load({
 			await ensureCardModule();
 		}
 
+		async function registerCatalog(ctx) {
+			const [menu, storage] = await Promise.all([
+				require.async("./client.subagent.js"), require.async("./client.subagent-cache.js"),
+			]);
+			const remote = ctx.remote.weixinConfig;
+			const cache = storage.createArchiveCache({
+				archivedChildren: async parent => unwrap(await remote.archivedChildren(parent)),
+				updateArchivedChildren: async (...args) => unwrap(await remote.updateArchivedChildren(...args)),
+			});
+			ctx.effect(() => () => cache.dispose?.());
+			menu.registerSubagentMenu(ctx, cache);
+		}
+
 		async function apply(ctx) {
 			const disposeRemote = await ctx.remote.$mount(TYPERT_REMOTE);
 			// Every namespace is its own Cordis service, so each one the card
@@ -724,19 +750,24 @@ window.__ModuleLoader__.load({
 			// is how the directory chooser came to report itself absent.
 			// `remote.directoryPicker` belongs to the shell's own assembly, not
 			// to this plugin, so it needs the same explicit declaration.
+			// Keep settings and QR login independent of the session header services.
+			const catalog = ctx.inject(
+				["remote.weixinConfig", "sessions", "uiWorkspace", "sidebarRight", "slots", "locale"],
+				registerCatalog,
+			);
 			const ui = ctx.inject(
 				["remote.weixin", "remote.weixinConfig", "remote.directoryPicker", "slots", "locale"],
 				registerUi,
 			);
 			try {
-				await ui;
+				await Promise.all([ui, catalog]);
 			} catch (error) {
-				await ui.dispose();
+				await Promise.all([ui.dispose(), catalog.dispose()]);
 				await disposeRemote();
 				throw error;
 			}
 			return async () => {
-				await ui.dispose();
+				await Promise.all([ui.dispose(), catalog.dispose()]);
 				await disposeRemote();
 			};
 		}

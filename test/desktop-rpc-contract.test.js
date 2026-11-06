@@ -56,7 +56,7 @@ test('backend registers precisely the same retained Weixin methods', async () =>
   const configMethods = Object.getOwnPropertyDescriptor(
     ConfigController.prototype, '@deepseek-ai/dsh-typert-protocol/remote-methods',
   ).value.methods.map((d) => d.method).sort()
-  assert.deepEqual(configMethods, ['list', 'reset', 'save'])
+  assert.deepEqual(configMethods, ['archivedChildren', 'list', 'reset', 'save', 'updateArchivedChildren'])
   for (const method of configMethods) assert.equal(typeof ConfigController.prototype[method], 'function')
 })
 

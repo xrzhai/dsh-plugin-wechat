@@ -71,7 +71,7 @@ test('config RPC does not expose the removed stranger action', () => {
   const marker = '@deepseek-ai/dsh-typert-protocol/remote-methods'
   const descriptor = Object.getOwnPropertyDescriptor(ConfigController.prototype, marker)
   assert.ok(descriptor?.value)
-  assert.deepEqual(descriptor.value.methods.map((entry) => entry.method), ['list', 'save', 'reset'])
+  assert.deepEqual(descriptor.value.methods.map((entry) => entry.method), ['list', 'save', 'reset', 'archivedChildren', 'updateArchivedChildren'])
 })
 
 test('/new distinguishes a bare command from an explicit title using real session storage', (t) => {
