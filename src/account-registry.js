@@ -14,10 +14,8 @@
 // an account after every re-login.
 //
 // Writes go through tmp+rename (the convention from src/sessions.js). Missing
-// files still mean a fresh install, but authorization reads fail closed when an
-// existing registry cannot be read: falling back to the global allowlist could
-// widen access and losing the file must never turn into a second first-contact
-// enrolment.
+// files still use the first-run behavior, but an existing unreadable registry
+// must not be treated as empty for authorization or read-modify-write operations.
 // @module dsh-weixin/account-registry
 import { readTextFileCached } from './atomic.js'
 import path from 'node:path'
@@ -51,7 +49,7 @@ export function readRegistry({ failClosed = false } = {}) {
     parsed = JSON.parse(readTextFileCached(registryFile()))
   } catch (error) {
     if (error?.code === 'ENOENT') return {}
-    const message = `dsh-weixin: ignoring malformed ${registryFile()}: ${String(error?.message ?? error)}`
+    const message = `dsh-weixin: cannot read account registry ${registryFile()}; restore or repair it (${String(error?.message ?? error)})`
     if (failClosed) throw new RegistryReadError(message, { cause: error })
     process.emitWarning(message)
     return {}
@@ -60,9 +58,25 @@ export function readRegistry({ failClosed = false } = {}) {
     // The schema stamp shares the object with the account entries; it is
     // metadata, not an account, so it must not leak into the map.
     delete parsed.schemaVersion
+    if (failClosed) {
+      for (const [id, entry] of Object.entries(parsed)) {
+        if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+          throw new RegistryReadError(`dsh-weixin: invalid account entry ${id} in ${registryFile()}; restore or repair the account registry`)
+        }
+        for (const key of ['allowedSenders', 'allowedChats']) {
+          if (Object.hasOwn(entry, key) && (!Array.isArray(entry[key]) || !entry[key].every((item) => typeof item === 'string'))) {
+            throw new RegistryReadError(`dsh-weixin: invalid ${key} for account ${id} in ${registryFile()}; restore or repair the account registry`)
+          }
+        }
+        if ((Object.hasOwn(entry, 'paused') && typeof entry.paused !== 'boolean') ||
+            (Object.hasOwn(entry, 'firstContactEnrolledAt') && typeof entry.firstContactEnrolledAt !== 'string')) {
+          throw new RegistryReadError(`dsh-weixin: invalid authorization state for account ${id} in ${registryFile()}; restore or repair the account registry`)
+        }
+      }
+    }
     return parsed
   }
-  const message = `dsh-weixin: ignoring ${registryFile()}: expected a JSON object`
+  const message = `dsh-weixin: account registry ${registryFile()} is not a JSON object; restore or repair it`
   if (failClosed) throw new RegistryReadError(message)
   process.emitWarning(message)
   return {}
@@ -134,12 +148,12 @@ export function touchAccount(accountId, warn = () => {}, options = {}) {
   const throttleMs = options.throttleMs ?? TOUCH_WRITE_INTERVAL_MS
   const previous = lastTouchWriteAt.get(key) ?? 0
   if (throttleMs > 0 && now - previous < throttleMs) return false
-  lastTouchWriteAt.set(key, now)
-  const registry = readRegistry()
+  const registry = readRegistry({ failClosed: true })
   const entry = ensureAccountEntry(registry, accountId)
   entry.lastSeenAt = new Date(now).toISOString()
-  writeRegistry(registry, warn, { durable: false })
-  return true
+  const persisted = writeRegistry(registry, warn, { durable: false })
+  if (persisted) lastTouchWriteAt.set(key, now)
+  return persisted
 }
 
 /** Forget the throttle state — used by tests that switch state directories. */
@@ -157,17 +171,23 @@ export function resetTouchThrottle() {
  * @returns {boolean} whether the pause state was persisted
  */
 export function setAccountPaused(accountId, paused, warn = () => {}, options = {}) {
-  const registry = readRegistry()
+  const registry = readRegistry({ failClosed: true })
   const entry = ensureAccountEntry(registry, accountId)
   entry.paused = paused === true
   entry.pausedAt = entry.paused ? new Date().toISOString() : undefined
   return writeRegistry(registry, warn, options)
 }
 
-/** Whether an account is paused. Missing entry means "not paused". */
+/** Whether an account is paused. An unreadable registry also stops delivery. */
 export function isAccountPaused(accountId) {
   if (typeof accountId !== 'string' || accountId === '') return false
-  return readRegistry()[accountId]?.paused === true
+  try {
+    return readRegistry({ failClosed: true })[accountId]?.paused === true
+  } catch (error) {
+    if (!(error instanceof RegistryReadError)) throw error
+    process.emitWarning(error.message)
+    return true
+  }
 }
 
 /**
@@ -175,20 +195,19 @@ export function isAccountPaused(accountId) {
  * The card shows the label next to the raw id, which is otherwise meaningless.
  */
 export function setAccountLabel(accountId, label, warn = () => {}) {
-  const registry = readRegistry()
+  const registry = readRegistry({ failClosed: true })
   const entry = ensureAccountEntry(registry, accountId)
   const trimmed = typeof label === 'string' ? label.trim() : ''
   if (trimmed === '') delete entry.label
   else entry.label = trimmed
-  writeRegistry(registry, warn)
+  return writeRegistry(registry, warn)
 }
 
 /**
  * Read one account's label back, for callers that render or prefix with it.
  *
- * Read-only and failure-tolerant per the registry's own rule: a missing or
- * malformed registry must never block messaging, so any problem reads as "no
- * label" and the caller falls back to the account id.
+ * Read-only and failure-tolerant: any problem reads as "no label" and the
+ * caller falls back to the account id.
  *
  * @param {string} accountId
  * @returns {string} the stored label, or '' when there is none
@@ -222,7 +241,7 @@ export function labelForAccount(accountId) {
  * @param {string[] | undefined} [chats] optional conversation ids for this account
  */
 export function setAccountAllowlist(accountId, senders, chats, warn = () => {}) {
-  const registry = readRegistry()
+  const registry = readRegistry({ failClosed: true })
   const entry = ensureAccountEntry(registry, accountId)
   const clean = (list) => (Array.isArray(list) ? list.map((item) => String(item).trim()).filter((item) => item !== '') : [])
   const sendersClean = clean(senders)
@@ -231,7 +250,7 @@ export function setAccountAllowlist(accountId, senders, chats, warn = () => {}) 
   else entry.allowedSenders = sendersClean
   if (chatsClean.length === 0) delete entry.allowedChats
   else entry.allowedChats = chatsClean
-  writeRegistry(registry, warn)
+  return writeRegistry(registry, warn)
 }
 
 /**
@@ -248,9 +267,6 @@ export function setAccountAllowlist(accountId, senders, chats, warn = () => {}) 
 export function allowlistForAccount(accountId, config, options = {}) {
   const registry = readRegistry(options)
   const entry = typeof accountId === 'string' && accountId !== '' ? registry[accountId] : undefined
-  if (options.failClosed === true && entry !== undefined && (entry === null || typeof entry !== 'object' || Array.isArray(entry))) {
-    throw new RegistryReadError(`dsh-weixin: account entry ${accountId} in ${registryFile()} is not a JSON object`)
-  }
   const senders = Array.isArray(entry?.allowedSenders) && entry.allowedSenders.length > 0
     ? entry.allowedSenders
     : (config.allowedSenders ?? [])
@@ -290,7 +306,7 @@ export function enrolFirstContact(accountId, senderId, hasOverride, note = () =>
   if (typeof accountId !== 'string' || accountId === '') return false
   if (typeof senderId !== 'string' || senderId === '') return false
   if (hasOverride()) return false
-  const registry = readRegistry()
+  const registry = readRegistry({ failClosed: true })
   // Re-check against a fresh read: the caller's snapshot may be stale if a
   // concurrent handler for the same account enrolled between the two reads.
   const entry = registry[accountId]
@@ -299,7 +315,7 @@ export function enrolFirstContact(accountId, senderId, hasOverride, note = () =>
   const fresh = ensureAccountEntry(registry, accountId)
   fresh.allowedSenders = [senderId]
   fresh.firstContactEnrolledAt = new Date().toISOString()
-  writeRegistry(registry, () => {})
+  if (!writeRegistry(registry, () => {})) return false
   note(`first contact ${senderId} enrolled into account ${accountId}'s allowlist`)
   return true
 }

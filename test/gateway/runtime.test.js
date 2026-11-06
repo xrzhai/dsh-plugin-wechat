@@ -13,6 +13,7 @@ import { configureWeixinStateDir, configFile, stateDir } from '../../src/state.j
 import { lockFile } from '../../src/instance-lock.js'
 import { readReminders, writeReminders } from '../../src/message/scheduler.js'
 import { readSubscriptions, writeSubscriptions } from '../../src/message/subscriptions.js'
+import { createOutbox } from '../../src/message/outbox.js'
 import { saveWeixinAccount, registerWeixinAccountId } from '../../vendor/openclaw-weixin/auth/accounts.js'
 
 const ACCOUNT = 'runtime-fixture'
@@ -252,11 +253,13 @@ for (const { label, contents } of [
   test(`an account registry containing ${label} refuses inbound without overwriting it`, async (t) => {
     const f = fixture(t, {
       enabled: true,
-      beforeApply: (root) => fs.writeFileSync(path.join(root, 'accounts-registry.json'), contents),
+      allowedSenders: [],
+      beforeApply: () => setAccountAllowlist(ACCOUNT, ['synthetic-owner']),
     })
     const registryPath = path.join(f.root, 'accounts-registry.json')
 
     await until(() => f.started.length === 1, 'transport starts')
+    fs.writeFileSync(registryPath, contents)
     await f.started[0].testInbound(f.message(`corrupt-${label.replaceAll(' ', '-')}`))
 
     assert.equal(f.sessions.length, 0)
@@ -268,11 +271,11 @@ for (const { label, contents } of [
 test('a non-ENOENT registry read error refuses inbound without replacing the path', async (t) => {
   const f = fixture(t, {
     enabled: true,
-    beforeApply: (root) => fs.mkdirSync(path.join(root, 'accounts-registry.json')),
   })
   const registryPath = path.join(f.root, 'accounts-registry.json')
 
   await until(() => f.started.length === 1, 'transport starts')
+  fs.mkdirSync(registryPath)
   await f.started[0].testInbound(f.message('registry-read-error'))
 
   assert.equal(f.sessions.length, 0)
@@ -292,11 +295,12 @@ test('a restored registry resumes its original narrower account allowlist', asyn
   const f = fixture(t, {
     enabled: true,
     allowedSenders: ['global-owner'],
-    beforeApply: (root) => fs.writeFileSync(path.join(root, 'accounts-registry.json'), corrupt),
+    beforeApply: () => setAccountAllowlist(ACCOUNT, ['synthetic-owner']),
   })
   const registryPath = path.join(f.root, 'accounts-registry.json')
 
   await until(() => f.started.length === 1, 'transport starts')
+  fs.writeFileSync(registryPath, corrupt)
   await f.started[0].testInbound({ ...f.message('corrupt-global-owner'), senderId: 'global-owner', conversationId: 'global-owner' })
   assert.equal(f.sessions.length, 0, 'corruption must not fall back to the broader global list')
   assert.equal(fs.readFileSync(registryPath, 'utf8'), corrupt)
@@ -307,6 +311,91 @@ test('a restored registry resumes its original narrower account allowlist', asyn
   await f.started[0].testInbound({ ...f.message('restored-owner'), senderId: 'synthetic-owner', conversationId: 'synthetic-owner' })
   assert.equal(f.sessions.length, 1)
   assert.deepEqual(JSON.parse(fs.readFileSync(registryPath, 'utf8'))[ACCOUNT].allowedSenders, ['synthetic-owner'])
+})
+
+test('settings operations report a corrupt registry without changing the file or restarting the account', async (t) => {
+  const f = fixture(t, { enabled: true })
+  await until(() => f.started.length === 1, 'transport starts')
+  const file = path.join(f.root, 'accounts-registry.json')
+  const corrupt = '{synthetic-corrupt-registry\n'
+  fs.writeFileSync(file, corrupt)
+  for (const operation of [
+    () => f.login.pause(ACCOUNT),
+    () => f.login.resume(ACCOUNT),
+    () => f.login.label(ACCOUNT, 'new label'),
+    () => f.login.allowlist(ACCOUNT, 'stranger', ''),
+    () => f.login.status(),
+  ]) {
+    await assert.rejects(operation(), (error) => error.code === 'registry_unreadable' && /accounts-registry\.json/.test(error.message))
+    assert.equal(fs.readFileSync(file, 'utf8'), corrupt)
+  }
+  assert.equal(f.started.length, 1)
+  assert.equal(f.started[0].testRunning, true)
+})
+
+test('an unreadable registry at startup does not start an account transport', async (t) => {
+  const corrupt = '{startup-corrupt\n'
+  const f = fixture(t, { enabled: true, beforeApply: (root) => fs.writeFileSync(path.join(root, 'accounts-registry.json'), corrupt) })
+  await until(() => f.login.remindersProvider !== undefined, 'runtime setup finishes')
+  await tick()
+  assert.equal(f.started.length, 0)
+  assert.equal(f.prepared.length, 0)
+  assert.equal(fs.readFileSync(path.join(f.root, 'accounts-registry.json'), 'utf8'), corrupt)
+})
+
+test('corrupt registry blocks scheduled generation and reminders while a transport is live', async (t) => {
+  let summaries = 0
+  const f = fixture(t, { enabled: true, summarize: async () => { summaries += 1; return { text: 'must not send' } } })
+  await until(() => f.started.length === 1 && f.login.subscriptionScheduler !== undefined, 'runtime starts')
+  const file = path.join(f.root, 'accounts-registry.json')
+  const corrupt = '{synthetic-corrupt-registry\n'
+  fs.writeFileSync(file, corrupt)
+  f.login.remindersProvider.schedule({ accountId: ACCOUNT, conversationId: 'test-user', text: 'blocked reminder', fireAt: Date.now() - 1 })
+  f.login.subscriptionScheduler.schedule({ accountId: ACCOUNT, conversationId: 'test-user', prompt: 'blocked subscription', when: { ok: true, kind: 'once', fireAt: Date.now() - 1 } })
+  await tick()
+  await tick()
+  assert.equal(summaries, 0)
+  assert.deepEqual(f.sent, [])
+  assert.equal(readReminders(f.root).items.length, 1)
+  assert.equal(readSubscriptions(f.root).items.length, 1)
+  assert.equal(fs.readFileSync(file, 'utf8'), corrupt)
+})
+
+test('outbox retry waits while the authorization registry is corrupt', async (t) => {
+  const f = fixture(t, { enabled: true })
+  await until(() => f.started.length === 1 && typeof f.login.outboxFlush === 'function', 'runtime starts')
+  const queue = createOutbox({ stateRoot: f.root, transportFor: () => undefined })
+  queue.enqueue({ accountId: ACCOUNT, conversationId: 'test-user', text: 'synthetic queued reply' })
+  const file = path.join(f.root, 'accounts-registry.json')
+  fs.writeFileSync(file, '{broken')
+  const blocked = await f.login.outboxFlush({ force: true })
+  assert.equal(blocked.sent, 0)
+  assert.equal(blocked.remaining, 1)
+  assert.deepEqual(f.sent, [])
+  assert.equal(fs.readFileSync(file, 'utf8'), '{broken')
+  fs.writeFileSync(file, '{}')
+  const restored = await f.login.outboxFlush({ force: true })
+  assert.equal(restored.sent, 1)
+  assert.equal(f.sent[0].text, 'synthetic queued reply')
+})
+
+test('outbox stops between segments if registry becomes corrupt during delivery', async (t) => {
+  const f = fixture(t, { enabled: true })
+  await until(() => f.started.length === 1 && typeof f.login.outboxFlush === 'function', 'runtime starts')
+  const queue = createOutbox({ stateRoot: f.root, transportFor: () => undefined })
+  queue.enqueue({ accountId: ACCOUNT, conversationId: 'test-user', segments: ['first', 'second'] })
+  const file = path.join(f.root, 'accounts-registry.json')
+  const delivered = []
+  f.started[0].send = async (message) => {
+    delivered.push(message.text)
+    fs.writeFileSync(file, '{broken after first segment')
+  }
+  const result = await f.login.outboxFlush({ force: true })
+  assert.deepEqual(delivered, ['first'])
+  assert.equal(result.sent, 0)
+  assert.equal(result.remaining, 1)
+  assert.equal(queue.pending()[0].nextSegment, 1)
+  assert.equal(fs.readFileSync(file, 'utf8'), '{broken after first segment')
 })
 
 test('an empty sender list enrolls only the first contact in a permitted chat', async (t) => {

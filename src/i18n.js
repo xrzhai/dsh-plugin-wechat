@@ -34,6 +34,8 @@ export const CATALOG = Object.freeze({
     'error.processing': { zh: '（处理失败：{reason}）', en: '(Processing failed: {reason})' },
     'error.accountPauseWrite': { zh: '无法保存账号暂停状态；连接状态未改变', en: 'Could not save the account pause state; the connection was left unchanged' },
     'error.accountResumeWrite': { zh: '无法保存账号恢复状态；连接状态未改变', en: 'Could not save the account resume state; the connection was left unchanged' },
+    'error.accountRegistryRead': { zh: '账号授权表无法读取，请恢复或修复状态目录中的 accounts-registry.json；原文件未被修改。', en: 'The account authorization registry cannot be read. Restore or repair accounts-registry.json in the state directory; the original file was left unchanged.' },
+    'error.accountRegistryWrite': { zh: '无法保存账号信息，请查看日志。', en: 'Unable to save the account registry; check the logs.' },
     'error.reminderInvalidTime': { zh: '这个提醒时间不可用', en: 'That reminder time is not valid' },
     'error.reminderStorageReadOnly': {
         zh: '提醒暂时不能保存，为保护原有提醒，本次没有新增；可重启 DSH 后再试，若仍失败，请在日志中搜索“reminders.json”查看具体原因。',

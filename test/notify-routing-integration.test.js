@@ -229,6 +229,16 @@ test('apply routes notify HTTP requests to the latest conversation and returns 5
   assert.equal(sent[1].conversationId, OLD_CONVERSATION)
   assert.equal(sent[1].text, 'second notification')
 
+  const registry = path.join(root, 'accounts-registry.json')
+  fs.writeFileSync(registry, '{synthetic-corruption')
+  assert.deepEqual(await postNotify(notifyHandler, 'blocked notification'), {
+    status: 502,
+    body: { ok: false, error: 'send failed' },
+  })
+  assert.equal(sent.length, 2)
+  assert.equal(fs.readFileSync(registry, 'utf8'), '{synthetic-corruption')
+  fs.writeFileSync(registry, '{}')
+
   writeLines({})
   const sentBeforeEmpty = sent.length
   assert.deepEqual(await postNotify(notifyHandler, 'must not send'), {

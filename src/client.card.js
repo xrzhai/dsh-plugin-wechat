@@ -316,6 +316,7 @@ window.__ModuleLoader__.load({
 			const [message, setMessage] = react.useState("");
 			const [accounts, setAccounts] = react.useState([]);
 			const [statusState, setStatusState] = react.useState("loading");
+			const [statusError, setStatusError] = react.useState("");
 			const statusRequestRef = react.useRef(0);
 			const [sessionExpired, setSessionExpired] = react.useState(false);
 			const [loggingOut, setLoggingOut] = react.useState(false);
@@ -352,8 +353,12 @@ window.__ModuleLoader__.load({
 					// top-level boolean.
 					setSessionExpired(s?.sessionExpired === true || s.accounts.some(account => account?.sessionExpired === true));
 					setStatusState("ready");
-				} catch {
-					if (request === statusRequestRef.current) setStatusState("error");
+					setStatusError("");
+				} catch (err) {
+					if (request === statusRequestRef.current) {
+						setStatusError(err?.code === "registry_unreadable" ? String(err.message ?? "") : "");
+						setStatusState("error");
+					}
 				}
 			}, [ctx]);
 
@@ -850,7 +855,7 @@ window.__ModuleLoader__.load({
 				//#endregion status
 				statusState === "error"
 					? createElement("div", { role: "alert", style: noticeStyle },
-						createElement("span", null, t(
+						createElement("span", null, statusError || t(
 							"Failed to connect to WeChat service. Retry, or restart DSH if you just upgraded.",
 							"微信服务连接失败，请重试；若刚安装或升级插件，请重启 DSH。")),
 						createElement("button", { onClick: refreshStatus, style: buttonStyleFor(false) }, t("Retry", "重试")))

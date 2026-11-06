@@ -332,6 +332,12 @@ export function createOutbox({ stateRoot, transportFor, warn = () => {}, log = (
             segmentIndex = item.nextSegment - 1
             continue
           }
+          // Authorization or transport availability may change while a prior
+          // segment is in flight. Leave the remaining segments queued.
+          if (transportFor(item.accountId) === undefined) {
+            blocked = true
+            break
+          }
           try {
             await transport.send({
               conversationId: item.conversationId,

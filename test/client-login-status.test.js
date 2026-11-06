@@ -117,6 +117,22 @@ test('failed status RPC is not presented as logged out; retry restores bound acc
   assert.equal(button(recovered, '扫码登录微信'), undefined)
 })
 
+test('a registry read failure tells the operator to restore the authorization file', async () => {
+  let broken = true
+  const f = fixture(async () => {
+    if (broken) throw Object.assign(new Error('账号授权表无法读取，请恢复 accounts-registry.json'), { code: 'registry_unreadable' })
+    return { accounts: [{ accountId: 'synthetic-account' }] }
+  })
+  const failed = await f.mount()
+  assert.match(text(failed), /请恢复 accounts-registry\.json/)
+  assert.doesNotMatch(text(failed), /未登录/)
+  broken = false
+  await button(failed, '重试').props.onClick()
+  assert.match(text(f.render()), /已绑定/)
+  assert.doesNotMatch(text(f.render()), /请恢复 accounts-registry\.json/)
+  await f.unmount()
+})
+
 test('only a successful empty account list is presented as logged out', async () => {
   const f = fixture(async () => ({ accounts: [] }))
   const tree = await f.mount()
