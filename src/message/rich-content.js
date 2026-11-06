@@ -19,6 +19,7 @@
 // {@link planRichContent}. Nothing here is aware of Weixin.
 import fs from 'node:fs'
 import path from 'node:path'
+import { randomUUID } from 'node:crypto'
 
 /** Files shorter than this stay in the bubble; longer ones ship as a file. */
 export const DEFAULT_CODE_FILE_CHARS = 1200
@@ -241,9 +242,9 @@ export function planRichContent(markdown, options = {}) {
 /**
  * Write planned snippet files into the state directory and return their paths.
  *
- * Each reply gets its own directory and each file is created exclusively, so
- * overlapping uploads cannot read content written by another reply. Callers
- * can use `written` to fall back to the body of any file that failed to write.
+ * Each file gets a unique name and is created exclusively, so overlapping
+ * uploads cannot read content written by another reply. Callers can use
+ * `written` to fall back to the body of any file that failed to write.
  *
  * @param {{ name: string, body: string }[]} files
  * @param {string} dir  Directory to write into (created if missing).
@@ -255,16 +256,14 @@ export function writeSnippets(files, dir, options = {}) {
   const written = []
   let failed = 0
   if (files.length === 0) return { written, failed }
-  let replyDir
   try {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
-    replyDir = fs.mkdtempSync(path.join(dir, 'reply-'))
   } catch (error) {
     warn(`could not create the snippet directory: ${String(error?.message ?? error)}`)
     return { written, failed: files.length }
   }
   for (const file of files) {
-    const target = path.join(replyDir, file.name)
+    const target = path.join(dir, `${randomUUID()}-${file.name}`)
     try {
       fs.writeFileSync(target, file.body.endsWith('\n') ? file.body : `${file.body}\n`, { mode: 0o600, flag: 'wx' })
       written.push({ name: file.name, path: target })

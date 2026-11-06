@@ -95,7 +95,7 @@ for (const failure of ['write', 'media']) {
 }
 
 test('same-second concurrent uploads and multiple snippets retain their own contents', async (t) => {
-  setup(t)
+  const { root } = setup(t)
   t.mock.method(Date, 'now', () => 1_800_000_000_000)
   const firstStarted = deferred(), releaseFirst = deferred(), reads = []
   const transport = {
@@ -119,6 +119,8 @@ test('same-second concurrent uploads and multiple snippets retain their own cont
   assert.deepEqual(bodies('chat-A'), ['const alpha = 111111111;\n', 'const alphaTwo = 333333333;\n'])
   assert.deepEqual(bodies('chat-B'), ['const beta = 222222222;\n'])
   assert.equal(new Set(reads.map((r) => r.file)).size, 3)
+  assert.ok(reads.every((r) => path.dirname(r.file) === path.join(root, 'snippets')))
+  assert.ok(fs.readdirSync(path.join(root, 'snippets'), { withFileTypes: true }).every((entry) => entry.isFile()))
 })
 
 test('one failed attachment falls back without repeating a successful attachment', async (t) => {
