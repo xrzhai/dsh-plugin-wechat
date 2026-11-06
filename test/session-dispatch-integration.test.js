@@ -68,6 +68,32 @@ test('attach mounts only main controllers, deduplicates tools and fences other a
   assert.equal(f.bridge.sessionDispatcher.mounts.size, 0)
 })
 
+test('account and raw conversation identity keep contexts and later replies separate', async (t) => {
+  const f = fixture(t)
+  const sources = [
+    { account: 'bot-A', conversation: 'shared-chat' },
+    { account: 'bot-B', conversation: 'shared-chat' },
+    { account: 'bot-A', conversation: 'a@b' },
+    { account: 'bot-A', conversation: 'a-b' },
+    { account: 'bot@A', conversation: 'shared-chat' },
+  ]
+  const records = await Promise.all(sources.map(({ account, conversation }) => f.bridge.attach(conversation, account)))
+  assert.equal(new Set(records).size, sources.length)
+  assert.equal(new Set(records.map((record) => record.agent.session.id)).size, sources.length)
+  const delivered = []
+  for (const [index, record] of records.entries()) {
+    record.onSpontaneousReply = async (reply) => delivered.push(reply)
+    record.agent.session.snapshotEvents = () => [
+      { seq: 1, type: 'turn/start' },
+      { seq: 2, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: `result-${index}` }] } } },
+      { seq: 3, type: 'turn/end', data: { reason: { kind: 'completed' } } },
+    ]
+  }
+  await f.bridge.testPollSpontaneous()
+  assert.deepEqual(delivered.map(({ accountId, conversationId, text }) => ({ accountId, conversationId, text })),
+    sources.map(({ account, conversation }, index) => ({ accountId: account, conversationId: conversation, text: `result-${index}` })))
+})
+
 test('late opt-in mounts tools on existing controller without recreating session', async (t) => {
   const f = fixture(t, { enabled: false })
   const main = await f.bridge.attach('chat', 'account')

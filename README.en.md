@@ -71,6 +71,8 @@ These shortcuts are handled locally by the plugin without spending model tokens:
 
 To deliver a file, ask the assistant to include its path in the reply, or use `/send <file-path>`. Only files inside allowed directories can be sent; the plugin does not scan the workspace and guess which files to deliver.
 
+Topics are separated by WeChat account and chat. After upgrading to source-isolated topics, old topic links are not migrated automatically; the original DSH session history remains in DSH.
+
 ---
 
 ## 4. Instructions for AI Agents (Automated Install / Upgrade / Uninstall)
