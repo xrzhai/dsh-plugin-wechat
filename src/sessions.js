@@ -564,6 +564,7 @@ const COMMANDS = [
     helpKey: 'help.new',
   },
   { id: 'list', pattern: /^\/(?:list|sessions)$/i, build: identity, helpRank: 2, helpKey: 'help.list' },
+  { id: 'outbox', pattern: /^\/outbox(?:\s+(retry))?$/i, build: m => ({ retry: Boolean(m[1]) }), helpRank: 14, helpKey: 'help.outbox' },
   {
     id: 'use',
     pattern: /^\/use(?:\s+(\d+))?$/i,
@@ -713,6 +714,9 @@ export function runSessionCommand(lines, conversationId, text, accountId, contex
   }
   if (command.command === 'list') {
     return lines.render(conversationId, accountId)
+  }
+  if (command.command === 'outbox') {
+    return context?.handleOutbox?.(command.retry) ?? t('error.featureUnavailable')
   }
   if (command.command === 'clear') {
     // Deliberately refuses an argument: `/clear 3` would read like `/use 3`

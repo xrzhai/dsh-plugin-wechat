@@ -1073,7 +1073,18 @@ function createInboundHandler({ config, accountId, transport, bridge, seen, log,
     //    `/status` additionally gets account-level facts read fresh here (the
     //    registry entry may have changed since this handler was built).
     const registryEntry = accountId ? readRegistry()[accountId] : undefined
+    let durableCommandReply = true
     const commandReply = await bridge.handleCommand(message.conversationId, message.text, accountId, {
+      handleOutbox: async retry => {
+        // A receipt for a queue operation must not itself become a queued reply.
+        durableCommandReply = false
+        const t = createTranslator(effectiveConfig.current.locale).t
+        const conversationId = message.conversationId
+        if (!accountId || !conversationId || !outbox) return t('error.featureUnavailable')
+        if (retry) return t('outbox.result', await outbox.flush({ force: true, accountId, conversationId }))
+        const count = outbox.pending().filter(item => item.accountId === accountId && item.conversationId === conversationId).length
+        return t('outbox.pending', { count })
+      },
       accountId,
       accountLabel: registryEntry?.label ?? null,
       paused: accountId ? isAccountPaused(accountId) : false,
@@ -1091,6 +1102,7 @@ function createInboundHandler({ config, accountId, transport, bridge, seen, log,
       await sendChunked(transport, config, {
         conversationId: message.conversationId,
         text: replyText,
+        durable: durableCommandReply,
         contextToken: message.contextToken,
       })
       fileLog.info(`answered session command ${JSON.stringify(message.text.trim())} for ${message.conversationId}`)

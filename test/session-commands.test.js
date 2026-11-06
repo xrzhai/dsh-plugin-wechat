@@ -3,10 +3,10 @@ import assert from 'node:assert/strict'
 import { buildCommandsHelp, commandIds, isInterruptCommand, parseSessionCommand, runSessionCommand } from '../src/sessions.js'
 import { createTranslator } from '../src/i18n.js'
 
-const core = ['new', 'list', 'use', 'clear', 'cancel', 'compact', 'status', 'send', 'help']
-const removed = ['diag', 'outbox', 'quiet', 'snooze', 'media', 'usage', 'remind', 'remindlist', 'remindcancel', 'subscribe', 'subscribelist', 'subscribecancel', 'export', 'backup', 'config', 'steer']
+const core = ['new', 'list', 'use', 'clear', 'cancel', 'compact', 'status', 'outbox', 'send', 'help']
+const removed = ['diag', 'quiet', 'snooze', 'media', 'usage', 'remind', 'remindlist', 'remindcancel', 'subscribe', 'subscribelist', 'subscribecancel', 'export', 'backup', 'config', 'steer']
 
-test('only the nine core command types are registered', () => {
+test('only the gateway command types are registered', () => {
   assert.deepEqual(commandIds().sort(), [...core].sort())
   for (const input of removed) {
     assert.equal(parseSessionCommand(`/${input}`)?.command, 'unknown_slash', input)
@@ -21,6 +21,8 @@ test('core commands parse arguments and established aliases', () => {
   const cases = [
     ['/new', { command: 'new' }],
     ['/NEW 写周报', { command: 'new', arg: '写周报' }],
+    ['/outbox', { command: 'outbox', retry: false }],
+    ['/outbox retry', { command: 'outbox', retry: true }],
     ['/list', { command: 'list' }],
     ['/sessions', { command: 'list' }],
     ['/use 2', { command: 'use', index: 2 }],
