@@ -146,8 +146,64 @@ test('a damaged account reports its error without disabling another account', as
   assert.equal(button(healthy, '暂停').props.disabled, false)
   assert.equal(button(broken, '暂停').props.disabled, true)
   assert.equal(button(broken, '改名称').props.disabled, true)
+  assert.equal(button(broken, '编辑联系人').props.disabled, true)
   assert.match(text(broken), /请修复 accounts-registry\.json/)
   assert.doesNotMatch(text(broken), /已暂停/)
+  await f.unmount()
+})
+
+test('account row displays and edits the account contact without submitting chat restrictions', async () => {
+  let contacts = ['first-contact']
+  const calls = []
+  const f = fixture(async () => ({ accounts: [{ accountId: 'account-a', allowedSenders: contacts, accountAllowedSenders: contacts }] }), {
+    weixin: { allowlist: async (...args) => { calls.push(args); contacts = ['correct-person'] } },
+  })
+  const mounted = await f.mount()
+  assert.match(text(mounted), /允许联系人: first-contact/)
+  button(mounted, '编辑联系人').props.onClick()
+  let view = f.render()
+  const input = nodes(view).find(node => node.type === 'input' && node.props.value === 'first-contact')
+  assert.ok(input)
+  input.props.onChange({ target: { value: 'correct-person' } })
+  view = f.render()
+  button(view, '保存').props.onClick()
+  await waitFor(() => text(f.render()).includes('correct-person'), 'updated contact is displayed')
+  assert.deepEqual(calls, [['account-a', 'correct-person']])
+  assert.match(text(f.render()), /允许联系人: correct-person/)
+  await f.unmount()
+})
+
+test('inherited contacts are shown separately and a failed edit remains retryable', async () => {
+  let fail = true
+  const calls = []
+  const f = fixture(async () => ({ accounts: [{ accountId: 'account-b', allowedSenders: ['global-person'], accountAllowedSenders: [] }] }), {
+    weixin: { allowlist: async (...args) => { calls.push(args); if (fail) throw new Error('save failed') } },
+  })
+  const mounted = await f.mount()
+  assert.match(text(mounted), /允许联系人（全局）: global-person/)
+  button(mounted, '编辑联系人').props.onClick()
+  let view = f.render()
+  const input = nodes(view).find(node => node.type === 'input' && node.props.placeholder?.includes('全局白名单'))
+  assert.equal(input.props.value, '')
+  input.props.onChange({ target: { value: 'new-person' } })
+  button(f.render(), '保存').props.onClick()
+  await waitFor(() => text(f.render()).includes('save failed'), 'save error appears')
+  view = f.render()
+  assert.ok(nodes(view).some(node => node.type === 'input' && node.props.value === 'new-person'))
+  fail = false
+  button(view, '保存').props.onClick()
+  await waitFor(() => calls.length === 2, 'retry submits again')
+  assert.deepEqual(calls, [['account-b', 'new-person'], ['account-b', 'new-person']])
+  await f.unmount()
+})
+
+test('account contact labels follow the English client locale', async () => {
+  const f = fixture(async () => ({ accounts: [{ accountId: 'account-c', allowedSenders: ['person'], accountAllowedSenders: ['person'] }] }), { locale: 'en' })
+  const view = await f.mount()
+  assert.match(text(view), /Allowed contacts: person/)
+  button(view, 'Edit contacts').props.onClick()
+  assert.ok(button(f.render(), 'Save'))
+  assert.ok(button(f.render(), 'Cancel'))
   await f.unmount()
 })
 

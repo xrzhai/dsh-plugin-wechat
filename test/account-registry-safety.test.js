@@ -4,7 +4,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import {
-  allowlistForAccount, enrolFirstContact, isAccountPaused, readRegistry, registryFile, resetTouchThrottle,
+  allowlistForAccount, enrolFirstContact, isAccountPaused, readRegistry, registryFile, RegistryReadError, resetTouchThrottle,
   setAccountAllowlist, setAccountLabel, setAccountPaused, touchAccount,
 } from '../src/account-registry.js'
 
@@ -33,10 +33,10 @@ for (const other of [null, ['broken'], { allowedSenders: 'invalid', extra: { kee
     assert.equal(setAccountPaused('synthetic-account', true), true)
     assert.equal(setAccountPaused('synthetic-account', false), true)
     assert.equal(touchAccount('synthetic-account', () => {}, { throttleMs: 0 }), true)
-    assert.equal(enrolFirstContact('new-account', 'first-contact', () => false), true)
+    assert.equal(enrolFirstContact('new-account', 'first-contact'), true)
     assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8'))['other-account'], other)
     assert.equal(isAccountPaused('other-account'), true)
-    assert.throws(() => setAccountLabel('other-account', 'must fail'), { code: 'ACCOUNT_REGISTRY_UNREADABLE' })
+    assert.throws(() => setAccountLabel('other-account', 'must fail'), RegistryReadError)
     assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8'))['other-account'], other)
   })
 }
@@ -45,7 +45,7 @@ const mutations = [
   ['pause', () => setAccountPaused('synthetic-account', true)],
   ['label', () => setAccountLabel('synthetic-account', 'new label')],
   ['allowlist', () => setAccountAllowlist('synthetic-account', ['stranger'])],
-  ['enrollment', () => enrolFirstContact('synthetic-account', 'stranger', () => false)],
+  ['enrollment', () => enrolFirstContact('synthetic-account', 'stranger')],
   ['last seen', () => touchAccount('synthetic-account', () => {}, { throttleMs: 0 })],
 ]
 
@@ -60,7 +60,7 @@ for (const contents of [
     const file = fixture(t)
     fs.writeFileSync(file, contents)
     for (const [name, mutate] of mutations) {
-      assert.throws(mutate, (error) => error.code === 'ACCOUNT_REGISTRY_UNREADABLE' && /restore or repair/.test(error.message), name)
+      assert.throws(mutate, (error) => error instanceof RegistryReadError && /restore or repair/.test(error.message), name)
       assert.equal(fs.readFileSync(file, 'utf8'), contents, name)
     }
     assert.equal(isAccountPaused('synthetic-account'), true)
@@ -71,7 +71,7 @@ test('non-ENOENT read failures block every mutation and delivery', (t) => {
   const file = fixture(t)
   fs.mkdirSync(file)
   for (const [name, mutate] of mutations) {
-    assert.throws(mutate, (error) => error.code === 'ACCOUNT_REGISTRY_UNREADABLE', name)
+    assert.throws(mutate, (error) => error instanceof RegistryReadError, name)
     assert.equal(fs.statSync(file).isDirectory(), true, name)
   }
   assert.equal(isAccountPaused('synthetic-account'), true)
@@ -80,7 +80,7 @@ test('non-ENOENT read failures block every mutation and delivery', (t) => {
 test('a missing registry retains first-run behavior and a restored registry can be changed', (t) => {
   const file = fixture(t)
   assert.equal(isAccountPaused('synthetic-account'), false)
-  assert.equal(enrolFirstContact('synthetic-account', 'synthetic-owner', () => false), true)
+  assert.equal(enrolFirstContact('synthetic-account', 'synthetic-owner'), true)
   assert.deepEqual(readRegistry()['synthetic-account'].allowedSenders, ['synthetic-owner'])
   fs.writeFileSync(file, '{broken')
   assert.throws(() => setAccountLabel('synthetic-account', 'new'), /restore or repair/)

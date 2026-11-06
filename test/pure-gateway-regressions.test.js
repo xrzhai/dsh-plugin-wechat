@@ -44,10 +44,18 @@ test('controller RPC descriptor only exposes methods implemented on the prototyp
   const descriptor = Object.getOwnPropertyDescriptor(WeixinLoginController.prototype, marker)
   assert.ok(descriptor?.value)
   const methods = descriptor.value.methods.map((entry) => entry.method)
-  for (const removed of ['memoryEventRemove', 'donateQr', 'donateQrAlipay', 'strangers']) {
+  for (const removed of [
+    'memoryEventRemove', 'donateQr', 'donateQrAlipay', 'strangers',
+    'reminders', 'remindCancel', 'journal', 'journalExport', 'outbox', 'outboxRetry', 'outboxDrop',
+    'metrics', 'storage', 'stats', 'usageLedger', 'migrateSummary', 'migrateExport', 'migrateInspect', 'migrateRestore',
+  ]) {
     assert.ok(!methods.includes(removed), removed)
+    assert.equal(WeixinLoginController.prototype[removed], undefined, removed)
   }
-  for (const retained of ['migrateSummary', 'migrateExport', 'migrateInspect', 'migrateRestore']) {
+  for (const retained of [
+    'startLogin', 'poll', 'submitVerifyCode', 'cancel', 'status', 'logout', 'sessions', 'useSession',
+    'removeSession', 'pause', 'resume', 'label', 'allowlist', 'onboarding', 'promptPreview',
+  ]) {
     assert.ok(methods.includes(retained), retained)
   }
   for (const method of methods) {
@@ -64,13 +72,6 @@ test('config RPC does not expose the removed stranger action', () => {
   const descriptor = Object.getOwnPropertyDescriptor(ConfigController.prototype, marker)
   assert.ok(descriptor?.value)
   assert.deepEqual(descriptor.value.methods.map((entry) => entry.method), ['list', 'save', 'reset'])
-})
-
-test('/是 and /不用 stay ordinary chat after the answer handler was removed', () => {
-  const context = { persona: { answer: () => { throw new Error('must not be called') } } }
-  for (const text of ['/是', '/好的', '/行', '/不用 我住在上海', '/算了', '/yes explain']) {
-    assert.equal(runSessionCommand(sessionLines(), 'conversation', text, 'account', context), undefined, text)
-  }
 })
 
 test('/new distinguishes a bare command from an explicit title using real session storage', (t) => {

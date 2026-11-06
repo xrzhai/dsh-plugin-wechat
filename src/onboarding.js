@@ -23,7 +23,6 @@ export const ONBOARDING_STEPS = Object.freeze([
   'workspace',
   'verify',
   'host',
-  'backup',
 ])
 
 /**
@@ -37,7 +36,6 @@ export const ONBOARDING_STEPS = Object.freeze([
  * @property {string[]} [allowedSenders] Global sender allowlist.
  * @property {string} [workingDirectory] Configured DSH working directory.
  * @property {boolean} [workingDirectoryExists] Whether that directory is usable.
- * @property {boolean} [backupEnabled]
  */
 
 function senderList(value) {
@@ -99,14 +97,14 @@ export function buildOnboardingChecklist(input = {}) {
           ? `全局名单中有 ${globalSenders.length} 位联系人；账号级名单可能覆盖全局名单，请以每个账号的实际设置为准。`
           : '至少一个已登录账号保存了单独的联系人名单；它会覆盖全局名单，请逐账号核对实际允许的人。'
         : accountCount > 0
-          ? '还没有检测到联系人名单。请让扫码者尽早发送第一条消息；系统会把该账号实际遇到的首位联系人自动登记，随后请核对名单。这条记录不能证明发送者就是扫码人。'
+          ? '还没有检测到联系人名单。若账号此前未登记且聊天符合允许范围，系统会登记实际收到的首位联系人；这不能证明发送者就是扫码人，别人可能抢先。请扫码者尽早发消息并核对账号专属名单；身份不明时先暂停账号。'
           : '绑定微信账号后，再选择谁能和助理对话。',
       detailEn: allowlisted
         ? globalSenders.length > 0
           ? `The global list contains ${globalSenders.length} contact(s). Account-level lists may override it, so check the effective list for each account.`
           : 'At least one signed-in account has its own contact list. It overrides the global list, so review the effective list for each account.'
         : accountCount > 0
-          ? 'No contact list was detected. Ask the person who signed in to send the first message soon. The account will automatically enrol the first contact it actually receives and you should review the result; this does not prove that the sender is the person who scanned the code.'
+          ? 'No contact list was detected. If the account has not enrolled anyone and the chat is permitted, it enrols the first contact it actually receives; this does not prove that the sender is the person who scanned the code, and someone else may arrive first. Ask the scanner to message soon and review the account-specific list; pause the account if identity is uncertain.'
           : 'Bind a WeChat account first, then choose who may chat with the assistant.',
       why: '名单里的人可以让助理在这台电脑上读取或修改文件、执行命令；只加入你信任的人。',
       whyEn: 'People in this list can ask the assistant to read or change files and run commands on this computer. Only add people you trust.',
@@ -162,22 +160,6 @@ export function buildOnboardingChecklist(input = {}) {
           : 'The DSH version could not be identified. If you hit problems, run npm run doctor to collect diagnostics.',
       why: '只有核对过的版本，清单才会把这一项标为已完成。',
       whyEn: 'This item is marked complete only for versions that have actually been checked.',
-    },
-    {
-      id: 'backup',
-      title: '备份账号和聊天数据（建议）',
-      titleEn: 'Back up account and chat data (recommended)',
-      required: false,
-      state: input.backupEnabled === true ? 'done' : 'note',
-      action: 'options',
-      detail: input.backupEnabled === true
-        ? '设置中已开启自动备份。这里只确认开关状态，不代表最近一份备份已经验证；可用 npm run doctor 查看最近备份是否存在及更新时间。'
-        : '这份清单还没有确认自动备份已经开启。备份包含登录信息、会话、提醒和设置，不包含媒体、日志和下载的语音模型；请到「高级 → 网关配置」确认开关，并用 npm run doctor 查看最近的完成记录。',
-      detailEn: input.backupEnabled === true
-        ? 'Automatic backups are enabled in settings. This only confirms the switch, not that the latest backup has been verified. Use npm run doctor to see whether a recent backup exists and when it was made.'
-        : 'This checklist has not confirmed that automatic backups are enabled. Backups include sign-in data, conversations, reminders and settings, but not media, logs or downloaded speech models. Confirm the switch under Advanced → Gateway options and use npm run doctor to check recent completed backups.',
-      why: '有可用的完成备份时，换机、误删或状态文件损坏后可以尝试恢复；没有完成备份就没有这层保障。备份范围和完整性仍需另外核对。',
-      whyEn: 'A completed backup can help recover from a device change, accidental deletion or damaged state file. Without one, that protection is absent. Backup coverage and integrity still need separate checks.',
     },
   ]
 
@@ -236,8 +218,8 @@ export function quickstartLines(options = {}) {
     {
       command: login,
       note: english
-        ? 'Sign in to WeChat in DSH, then have the person who scanned the code send the first message soon and review the list. Whichever contact arrives first is enrolled; this does not prove that sender is the person who scanned the code.'
-        : '在 DSH 里扫码绑定微信后，请扫码者尽早发送第一条消息，并核对允许名单。系统会登记实际收到的首位联系人；这不能证明发送者就是扫码人。',
+        ? 'Sign in to WeChat in DSH, then have the person who scanned the code send a message soon and review the account-specific list. With no effective list and no previous enrolment, whichever permitted contact arrives first is enrolled; this does not prove that sender is the person who scanned the code. Pause the account if identity is uncertain.'
+        : '在 DSH 里扫码绑定微信后，请扫码者尽早发消息，并核对账号专属名单。生效名单为空且未登记过时，系统会登记允许范围内实际收到的首位联系人；这不能证明发送者就是扫码人。身份不明时请先暂停账号。',
     },
     {
       command: 'node bin/onboard.mjs',

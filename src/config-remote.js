@@ -2,11 +2,7 @@
 //
 // The plugin's options live in two places: the composition's Config schema (a
 // profile YAML patch or the bundle row) and a JSON overlay at
-// `<state>/config.json`. Before this service existed, the card could only edit
-// the handful of ASR fields it happened to know about, so every other option --
-// the sender allowlist, the message-length cap, the busy-message policy, the
-// media size limits -- was reachable only by hand-editing JSON. This service
-// turns the whole schema into something a form can render and write back.
+// `<state>/config.json`. This service exposes the editable fields to the form.
 //
 // The field list below is the single source of truth for the UI. It is
 // deliberately data, not code: the card renders whatever it is handed, so
@@ -23,7 +19,6 @@ import { CATALOG } from "./i18n.js";
 const T = {
   boolean: "boolean",
   string: "string",
-  text: "text", // multi-line string
   number: "number",
   stringList: "stringList", // one entry per line
   enum: "enum",
@@ -94,42 +89,6 @@ export const FIELDS = [
         labelEn: CATALOG['config.workspaceTitle.label'].en,
         hint: CATALOG['config.workspaceTitle.hint'].zh,
         hintEn: CATALOG['config.workspaceTitle.hint'].en,
-      },
-      {
-        path: "chatProvider",
-        type: T.string,
-        default: "",
-        label: "主对话使用的服务",
-        labelEn: "Chat service",
-        hint: "日常聊天使用哪个模型服务（例如 magpie）；留空就沿用 DSH 当前的默认设置。",
-        hintEn: "The model service for everyday chat (for example, magpie). Leave empty to use the current DSH default.",
-      },
-      {
-        path: "chatModel",
-        type: T.string,
-        default: "",
-        label: "主对话使用的模型",
-        labelEn: "Chat model",
-        hint: "日常聊天使用哪个模型（例如 auto/gemini-3.8-flash）。",
-        hintEn: "The model for everyday chat (for example, auto/gemini-3.8-flash).",
-      },
-      {
-        path: "sideProvider",
-        type: T.string,
-        default: "",
-        label: "后台任务使用的服务",
-        labelEn: "Background task service",
-        hint: "定时消息、群聊摘要等后台任务使用哪个模型服务。留空时会继续沿用现有的后台模型选择规则，包括旧版按用途指定的服务；如果仍没有匹配，就使用 DSH 默认模型。",
-        hintEn: "The model service for scheduled messages, group summaries and other background work. Empty keeps the existing background model-selection rules, including legacy per-purpose services, then falls back to the DSH default model if none match.",
-      },
-      {
-        path: "sideModel",
-        type: T.string,
-        default: "",
-        label: "后台任务使用的模型",
-        labelEn: "Background task model",
-        hint: "后台任务使用哪个模型；需要和服务一栏一起填写。",
-        hintEn: "The model for background work; fill this together with the service above.",
       },
     ],
   },
@@ -294,40 +253,16 @@ function coerce(field, raw, t) {
   if (field.type === T.string) {
     const text = String(raw ?? '')
     // An emptied box means "no value of mine", not "the empty string". For a
-    // field whose default IS empty (`accountId`, `cwd`, the ASR bridge) storing
-    // "" would be indistinguishable from unset in behavior but not in the
-    // report: the form would say "saved" where it should say "default". For a
-    // field whose default is NOT empty (`asr.hfEndpoint`) an empty box is
-    // ambiguous, and clearing the override is the reading that lets an operator
-    // get back to the default, so a reset is always available from the form.
+    // field whose default is empty, storing "" would be indistinguishable from
+    // unset in behavior but not in the form's source indicator.
     if (text.trim() === '' && field.default === '') return undefined
     return text
-  }
-  if (field.format === 'env') {
-    // Stored as an object, edited as KEY=VALUE lines.
-    const result = {}
-    const list = Array.isArray(raw) ? raw : String(raw ?? '').split('\n')
-    for (const line of list) {
-      const text = String(line).trim()
-      if (!text || text.startsWith('#')) continue
-      const eq = text.indexOf('=')
-      if (eq <= 0) {
-        throw new RemoteError('bad_value', `${t(field.label, field.labelEn)}：${t(`每行请按“名称=值”的格式填写；收到「${text}」`, `Use one “name=value” entry per line; received “${text}”`)}`, {})
-      }
-      result[text.slice(0, eq).trim()] = text.slice(eq + 1)
-    }
-    return result
   }
   return String(raw ?? '')
 }
 
 /** Render a stored value back into the text the form shows. */
 function present(field, value) {
-  if (field.format === 'env' && value !== null && typeof value === 'object' && !Array.isArray(value)) {
-    return Object.entries(value)
-      .map(([key, val]) => `${key}=${val}`)
-      .join('\n')
-  }
   if (field.type === T.stringList) {
     return Array.isArray(value) ? value.join('\n') : ''
   }
@@ -505,10 +440,7 @@ function deletePath(object, dotted) {
   }
   if (cursor === null || typeof cursor !== 'object') return
   delete cursor[parts.at(-1)]
-  // Prune now-empty parents. Without this, clearing `asr.model` and `asr.env`
-  // leaves `"asr": {}` behind — harmless to the reader (an empty object merges
-  // nothing) but it makes the file look like it still carries settings, and a
-  // user comparing the form against the file would think a reset did not work.
+  // Prune parents left empty by the removal.
   for (let index = chain.length - 1; index > 0; index -= 1) {
     const node = chain[index]
     if (node === null || typeof node !== 'object' || Array.isArray(node)) continue

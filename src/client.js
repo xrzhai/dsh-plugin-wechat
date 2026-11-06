@@ -126,118 +126,7 @@ window.__ModuleLoader__.load({
 					],
 					result: { mode: "strict", typeSymbol: `${PKG}#weixin/useSession:result`, create: _statusResult },
 				},
-				{
-					id: `${PKG}#weixin/reminders`,
-					service: "weixinLoginController",
-					namespace: "weixin",
-					method: "reminders",
-					invocation: { kind: "direct" },
-					parameters: [],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixin/reminders:result`, create: _statusResult },
-				},
-				{
-					id: `${PKG}#weixin/remindCancel`,
-					service: "weixinLoginController",
-					namespace: "weixin",
-					method: "remindCancel",
-					invocation: { kind: "direct" },
-					parameters: [
-						{ name: "id", wire: "id", source: "json", codec: { mode: "strict", typeSymbol: `${PKG}#weixin/remindCancel:p0`, create: _str } },
-					],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixin/remindCancel:result`, create: _statusResult },
-				},
-				{
-					id: `${PKG}#weixin/journal`,
-					service: "weixinLoginController",
-					namespace: "weixin",
-					method: "journal",
-					invocation: { kind: "direct" },
-					parameters: [
-						{ name: "options", wire: "options", source: "json", codec: { mode: "strict", typeSymbol: `${PKG}#weixin/journal:p0`, create: _strMap } },
-					],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixin/journal:result`, create: _statusResult },
-				},
-				{
-					id: `${PKG}#weixin/journalExport`,
-					service: "weixinLoginController",
-					namespace: "weixin",
-					method: "journalExport",
-					invocation: { kind: "direct" },
-					parameters: [
-						{ name: "options", wire: "options", source: "json", codec: { mode: "strict", typeSymbol: `${PKG}#weixin/journalExport:p0`, create: _strMap } },
-					],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixin/journalExport:result`, create: _statusResult },
-				},
-				{
-					id: `${PKG}#weixin/outbox`,
-					service: "weixinLoginController",
-					namespace: "weixin",
-					method: "outbox",
-					invocation: { kind: "direct" },
-					parameters: [],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixin/outbox:result`, create: _statusResult },
-				},
-				{
-					id: `${PKG}#weixin/outboxRetry`,
-					service: "weixinLoginController",
-					namespace: "weixin",
-					method: "outboxRetry",
-					invocation: { kind: "direct" },
-					parameters: [],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixin/outboxRetry:result`, create: _statusResult },
-				},
-				{
-					id: `${PKG}#weixin/outboxDrop`,
-					service: "weixinLoginController",
-					namespace: "weixin",
-					method: "outboxDrop",
-					invocation: { kind: "direct" },
-					parameters: [
-						{ name: "options", wire: "options", source: "json", codec: { mode: "strict", typeSymbol: `${PKG}#weixin/outboxDrop:p0`, create: _strMap } },
-					],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixin/outboxDrop:result`, create: _statusResult },
-				},
-				{
-					id: `${PKG}#weixin/metrics`,
-					service: "weixinLoginController",
-					namespace: "weixin",
-					method: "metrics",
-					invocation: { kind: "direct" },
-					parameters: [],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixin/metrics:result`, create: _statusResult },
-				},
-				{
-					id: `${PKG}#weixin/storage`,
-					service: "weixinLoginController",
-					namespace: "weixin",
-					method: "storage",
-					invocation: { kind: "direct" },
-					parameters: [],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixin/storage:result`, create: _statusResult },
-				},
-				{
-					id: `${PKG}#weixin/stats`,
-					service: "weixinLoginController",
-					namespace: "weixin",
-					method: "stats",
-					invocation: { kind: "direct" },
-					parameters: [
-						{ name: "options", wire: "options", source: "json", codec: { mode: "strict", typeSymbol: `${PKG}#weixin/stats:p0`, create: _strMap } },
-					],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixin/stats:result`, create: _statusResult },
-				},
 
-				{
-					id: `${PKG}#weixin/usageLedger`,
-					service: "weixinLoginController",
-					namespace: "weixin",
-					method: "usageLedger",
-					invocation: { kind: "direct" },
-					parameters: [
-						{ name: "options", wire: "options", source: "json", codec: { mode: "strict", typeSymbol: `${PKG}#weixin/usageLedger:p0`, create: _strMap } },
-					],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixin/usageLedger:result`, create: _statusResult },
-				},
 
 				{
 					id: `${PKG}#weixin/onboarding`,
@@ -247,48 +136,6 @@ window.__ModuleLoader__.load({
 					invocation: { kind: "direct" },
 					parameters: [],
 					result: { mode: "strict", typeSymbol: `${PKG}#weixin/onboarding:result`, create: _statusResult },
-				},
-				{
-					id: `${PKG}#weixin/migrateSummary`,
-					service: "weixinLoginController",
-					namespace: "weixin",
-					method: "migrateSummary",
-					invocation: { kind: "direct" },
-					parameters: [],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixin/migrateSummary:result`, create: _statusResult },
-				},
-				{
-					id: `${PKG}#weixin/migrateExport`,
-					service: "weixinLoginController",
-					namespace: "weixin",
-					method: "migrateExport",
-					invocation: { kind: "direct" },
-					parameters: [
-						{ name: "options", wire: "options", source: "json", codec: { mode: "strict", typeSymbol: `${PKG}#weixin/migrateExport:p0`, create: _strMap } },
-					],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixin/migrateExport:result`, create: _statusResult },
-				},
-				{
-					id: `${PKG}#weixin/migrateInspect`,
-					service: "weixinLoginController",
-					namespace: "weixin",
-					method: "migrateInspect",
-					invocation: { kind: "direct" },
-					parameters: [
-						{ name: "options", wire: "options", source: "json", codec: { mode: "strict", typeSymbol: `${PKG}#weixin/migrateInspect:p0`, create: _strMap } },
-					],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixin/migrateInspect:result`, create: _statusResult },
-				},
-				{
-					id: `${PKG}#weixin/migrateRestore`,
-					service: "weixinLoginController",
-					namespace: "weixin",
-					method: "migrateRestore",
-					invocation: { kind: "direct" },
-					parameters: [
-						{ name: "options", wire: "options", source: "json", codec: { mode: "strict", typeSymbol: `${PKG}#weixin/migrateRestore:p0`, create: _strMap } },
-					],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixin/migrateRestore:result`, create: _statusResult },
 				},
 
 				{
@@ -352,70 +199,8 @@ window.__ModuleLoader__.load({
 					parameters: [
 						{ name: "accountId", wire: "accountId", source: "json", codec: { mode: "strict", typeSymbol: `${PKG}#weixin/allowlist:p0`, create: _str } },
 						{ name: "senders", wire: "senders", source: "json", codec: { mode: "strict", typeSymbol: `${PKG}#weixin/allowlist:p1`, create: _str } },
-						{ name: "chats", wire: "chats", source: "json", codec: { mode: "strict", typeSymbol: `${PKG}#weixin/allowlist:p2`, create: _str } },
 					],
 					result: { mode: "strict", typeSymbol: `${PKG}#weixin/allowlist:result`, create: _statusResult },
-				},
-				// weixinAsr namespace (AsrController)
-				{
-					id: `${PKG}#weixinAsr/listModels`,
-					service: "asrController",
-					namespace: "weixinAsr",
-					method: "listModels",
-					invocation: { kind: "direct" },
-					parameters: [],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixinAsr/listModels:result`, create: _statusResult },
-				},
-				{
-					id: `${PKG}#weixinAsr/setModelDir`,
-					service: "asrController",
-					namespace: "weixinAsr",
-					method: "setModelDir",
-					invocation: { kind: "direct" },
-					parameters: [{ name: "dir", wire: "dir", source: "json", codec: { mode: "strict", typeSymbol: `${PKG}#weixinAsr/setModelDir:p0`, create: _str } }],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixinAsr/setModelDir:result`, create: _statusResult },
-				},
-				{
-					id: `${PKG}#weixinAsr/downloadModel`,
-					service: "asrController",
-					namespace: "weixinAsr",
-					method: "downloadModel",
-					invocation: { kind: "direct" },
-					parameters: [{ name: "repo", wire: "repo", source: "json", codec: { mode: "strict", typeSymbol: `${PKG}#weixinAsr/downloadModel:p0`, create: _str } }],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixinAsr/downloadModel:result`, create: _statusResult },
-				},
-				{
-					id: `${PKG}#weixinAsr/downloadStatus`,
-					service: "asrController",
-					namespace: "weixinAsr",
-					method: "downloadStatus",
-					invocation: { kind: "direct" },
-					parameters: [{ name: "repo", wire: "repo", source: "json", codec: { mode: "strict", typeSymbol: `${PKG}#weixinAsr/downloadStatus:p0`, create: _str } }],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixinAsr/downloadStatus:result`, create: _statusResult },
-				},
-				{
-					id: `${PKG}#weixinAsr/getDownloadSettings`,
-					service: "asrController",
-					namespace: "weixinAsr",
-					method: "getDownloadSettings",
-					invocation: { kind: "direct" },
-					parameters: [],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixinAsr/getDownloadSettings:result`, create: _statusResult },
-				},
-				{
-					id: `${PKG}#weixinAsr/setDownloadSettings`,
-					service: "asrController",
-					namespace: "weixinAsr",
-					method: "setDownloadSettings",
-					invocation: { kind: "direct" },
-					// `wire` MUST equal the parameter name. Two parameters may not
-					// share a wire field, so a second `wire: "input"` would throw
-					// at mount time and take the whole plugin down with it.
-					parameters: [
-						{ name: "endpoint", wire: "endpoint", source: "json", codec: { mode: "strict", typeSymbol: `${PKG}#weixinAsr/setDownloadSettings:p0`, create: _str } },
-						{ name: "proxy", wire: "proxy", source: "json", codec: { mode: "strict", typeSymbol: `${PKG}#weixinAsr/setDownloadSettings:p1`, create: _str } },
-					],
-					result: { mode: "strict", typeSymbol: `${PKG}#weixinAsr/setDownloadSettings:result`, create: _statusResult },
 				},
 				// weixinConfig namespace (ConfigController) — the options form.
 				{
@@ -723,7 +508,7 @@ window.__ModuleLoader__.load({
 		// This list must NOT name the namespaces: `remote.weixin` only comes into
 		// existence inside apply() when $mount installs it, so waiting for it here
 		// is a deadlock — the boot audit reports
-		// `pending (waiting for services: remote.weixin, remote.weixinAsr)`.
+		// `pending (waiting for services: remote.weixin)`.
 		// `remote` itself is safe because the api-gateway provides it before any
 		// bundle activates. The namespaces are declared on the inner ctx.inject
 		// below, which runs after $mount has created them.
@@ -940,7 +725,7 @@ window.__ModuleLoader__.load({
 			// `remote.directoryPicker` belongs to the shell's own assembly, not
 			// to this plugin, so it needs the same explicit declaration.
 			const ui = ctx.inject(
-				["remote.weixin", "remote.weixinAsr", "remote.weixinConfig", "remote.directoryPicker", "slots", "locale"],
+				["remote.weixin", "remote.weixinConfig", "remote.directoryPicker", "slots", "locale"],
 				registerUi,
 			);
 			try {

@@ -1,5 +1,13 @@
 # Third-party notices
 
+## QR matrix encoder (vendored)
+
+The desktop login QR uses the `vendor/QRCode` encoder from
+[`qrcode-terminal@0.12.0`](https://github.com/gtanner/qrcode-terminal/tree/v0.12.0/vendor/QRCode),
+included under `vendor/qrcode-terminal/`. The package's Apache-2.0 license and
+the original encoder's MIT license and copyright notice are preserved there;
+see [ORIGIN.md](vendor/qrcode-terminal/ORIGIN.md).
+
 ## @tencent-weixin/openclaw-weixin (vendored)
 
 This project vendors a trimmed copy of the WeChat iLink transport from
@@ -20,7 +28,7 @@ Compiled ESM JavaScript from the published tarball's `dist/src/`, with `.map` fi
 
 - `api/api.js`, `api/types.js` — the iLink HTTP transport (`getUpdates`, `sendMessage`,
   `getConfig`, `sendTyping`, `getUploadUrl`, `notifyStart`/`notifyStop`) and uint64-safe JSON parsing.
-- `auth/accounts.js`, `auth/login-qr.js`, `auth/pairing.js` — local 0600 account store and QR login.
+- `auth/accounts.js` — local 0600 account store.
 - `storage/state-dir.js`, `storage/sync-buf.js` — state dir resolution and the long-poll sync buffer.
 - `util/logger.js`, `util/redact.js` — logging and secret redaction.
 - `util/random.js` — `generateId` / `tempFileName` (used for client ids and temp media names).
@@ -34,11 +42,6 @@ Compiled ESM JavaScript from the published tarball's `dist/src/`, with `.map` fi
 - `cdn/upload.js` — the high-level upload pipeline (`uploadFileToWeixin` for images,
   `uploadVideoToWeixin`, `uploadFileAttachmentToWeixin`) plus `downloadRemoteImageToTemp`.
 - `media/mime.js` — filename → MIME and MIME/URL → extension mapping.
-- `media/media-download.js` — `downloadMediaFromItem`: per-item-type download + decrypt + save
-  for inbound image / voice / file / video.
-- `media/silk-transcode.js` — SILK → WAV transcode via the optional `silk-wasm` dependency;
-  returns `null` (caller keeps the raw SILK) when `silk-wasm` is not installed. `silk-wasm`
-  is NOT vendored and NOT a dependency — see below.
 - `messaging/markdown-filter.js` — `StreamingMarkdownFilter`, the character-level state machine
   that turns streamed Markdown into WeChat-readable plain text.
 - `messaging/send-media.js` — `sendWeixinMediaFile`, which routes a local file by MIME to
@@ -46,8 +49,6 @@ Compiled ESM JavaScript from the published tarball's `dist/src/`, with `.map` fi
 - `messaging/send.js` — `sendMessageWeixin`, `sendMessageItemWeixin` and the media senders
   (`sendImageMessageWeixin`, `sendVideoMessageWeixin`, `sendFileMessageWeixin`). Vendored
   because `messaging/send-media.js` imports it.
-- `messaging/partial-quote.js` — `resolvePartialQuote`, needed by `messaging/inbound.js`
-  (see "What was changed", item 4).
 - `messaging/quote-store.js` — the outbound/inbound quote cache, kept because
   `auth/accounts.js` imports `deleteQuoteCacheForAccount` and `messaging/send.js` imports
   `getQuoteStore`.
@@ -59,9 +60,7 @@ item 4).
 
 ### What was changed
 
-The only modifications are mechanical de-coupling from the OpenClaw host and one import-site
-rewrite, so the vendored code runs under DSH. Every vendored file in `cdn/`, `media/` and
-`messaging/` is otherwise byte-identical to the published `dist/src/` build:
+The vendored code is decoupled from the OpenClaw host so it can run under DSH:
 
 1. Three imports from `openclaw/plugin-sdk/*` were rewritten to
    `vendor/openclaw-weixin/openclaw-shim.js`:
@@ -84,8 +83,7 @@ rewrite, so the vendored code runs under DSH. Every vendored file in `cdn/`, `me
    inbound `MsgContext` / quote-resolution layer that nothing vendored uses. So
    `messaging/send.js` now imports `getMediaLabel` from
    `vendor/openclaw-weixin/openclaw-shim.js`, which reproduces the function verbatim.
-   `messaging/partial-quote.js` is vendored alongside it for when the inbound layer is
-   wired up. This is a change of *import site only* for one four-case label function; it
+   This is a change of *import site only* for one four-case label function; it
    touches no protocol, crypto or authorization logic.
 5. `api/api.js` now throws `SendMessageRejectedError` when a parsed
    `sendmessage` response contains a nonzero `ret`. The typed error retains
@@ -93,25 +91,3 @@ rewrite, so the vendored code runs under DSH. Every vendored file in `cdn/`, `me
    distinguish an explicit server rejection from fetch, HTTP, or parse failures
    whose delivery outcome is unknown. The wire request and response handling
    are otherwise unchanged.
-
-No protocol, crypto or authorization logic was altered.
-
-### Optional runtime dependency: silk-wasm
-
-`media/silk-transcode.js` transcodes inbound voice messages from SILK to WAV. Upstream
-loads `silk-wasm@^3.7.1` (a devDependency there) through a lazily evaluated dynamic
-`import("silk-wasm")`, and returns `null` when the import fails. That import is left
-byte-for-byte as upstream ships it — no shim, no rewriting:
-
-- The specifier is dynamic, so nothing fails at module load time.
-- With `silk-wasm` absent, `silkToWav` logs a warning and returns `null`, and
-  `media/media-download.js` saves the raw SILK buffer instead (labelled `audio/silk`).
-  Inbound voice therefore still works, just without a WAV container.
-- Installing `silk-wasm` into this project enables WAV output with no code change.
-
-`silk-wasm` is a normal npm dependency, not vendored.
-
-## qrcode-terminal
-
-`qrcode-terminal@0.12.0` (MIT) — used only by `bin/login.js` to render the login QR code
-in the terminal. It is a normal npm dependency, not vendored.

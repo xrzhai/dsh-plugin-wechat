@@ -37,8 +37,6 @@ import path from 'node:path'
 
 import { stateDir } from './state.js'
 import { labelForAccount } from './account-registry.js'
-import { parseRecurrence, parseWhen } from './message/scheduler.js'
-import { parseSubscriptionWhen, describeSubscription } from './message/subscriptions.js'
 
 /** Filename under the state root holding every conversation's line list. */
 const LINES_FILE = 'sessions.json'
@@ -535,30 +533,12 @@ export function isInterruptCommand(text) {
   return typeof text === 'string' && CANCEL_COMMAND.test(text.trim())
 }
 
-/**
- * Parse a Weixin control command out of a message.
- *
- * Recognized only as the ENTIRE message, matching how `/steer` already works:
- * a message that merely mentions `/new` inside a sentence is a message, not a
- * command. That matters because the user is talking to an agent about their
- * code, and silently swallowing a sentence that starts with a slash would be a
- * worse failure than requiring the exact form.
- *
- * @param {string} text
- * @returns {{command: string} & Record<string, unknown> | undefined}
 // ---------------------------------------------------------------------------
 // The command table
 //
 // Every command the bot answers is one entry below: how it is recognised, what
 // it says in /help, and what it does. Adding a command used to mean editing
-// three places (a regex chain, a dispatch if-chain, the help array) and it was
-// easy to ship one and forget the other two — /subscribe shipped once with no
-// bare-command rule and fell through to the model.
-//
-// `parse` is a pattern plus a small builder; the order of the array is the
-// order the patterns are tried, which is why the more specific forms come
-// first (/subscribe <time> <text> before the bare form is irrelevant, but
-// /subscribe before /subscribelist is not).
+// three places (a regex chain, a dispatch if-chain, and the help array).
 // ---------------------------------------------------------------------------
 
 /** @typedef {{ id: string, pattern: RegExp, build: (match: RegExpExecArray) => object, help?: string, helpRank?: number, run?: (state: CommandState) => string | Promise<string> | undefined }} CommandRule */
@@ -573,19 +553,6 @@ export function isInterruptCommand(text) {
  */
 
 const identity = () => ({})
-
-/** A prefix that reached the clock parser but failed its hour/minute syntax. */
-function isInvalidClockError(result) {
-  return result?.invalidClock === true
-}
-
-/**
- * Phrases that used to answer a temporary persona/memory confirmation. The
- * question state was removed with the memory subsystem; keep these exact
- * slash-led messages on the ordinary chat path instead of turning them into
- * unknown commands. The word may be followed by the user's explanation.
- */
-const LEGACY_ANSWER_PATTERN = /^\/(?:是|是的|对|好的|好|行|改|不用|不是|不|别|算了|no|yes)(?:\s+[\S\s]+)?$/i
 
 /** @type {CommandRule[]} */
 const COMMANDS = [
@@ -632,59 +599,8 @@ const COMMANDS = [
     run: (state) => runStatus(state),
   },
   { id: 'help', pattern: /^\/(?:help|帮助|指令)(?:\s+(all))?$/i, build: (m) => ({ all: Boolean(m[1]) }), run: ({ context, command }) => buildCommandsHelp(context?.t, { all: command.all }) },
-  { id: 'diag', pattern: /^\/diag(?:\s+([\S\s]+))?$/i, build: (match) => ({ arg: match[1]?.trim() ?? '' }), helpRank: 22, helpKey: 'help.diag' },
-  { id: 'outbox', pattern: /^\/outbox(?:\s+([\s\S]+))?$/, build: (m) => ({ arg: m[1] ?? '' }), helpRank: 23, helpKey: 'help.outbox' },
-  { id: 'quiet', pattern: /^\/quiet(?:\s+([\s\S]+))?$/, build: (m) => ({ arg: m[1] ?? '' }), helpRank: 24, helpKey: 'help.quiet' },
-  { id: 'snooze', pattern: /^\/snooze(?:\s+(\S+))?$/, build: (m) => ({ arg: m[1] ?? '' }), helpRank: 25, helpKey: 'help.snooze' },
-  { id: 'media', pattern: /^\/media(?:\s+([\s\S]+))?$/i, build: (m) => ({ arg: m[1] ?? '' }), helpRank: 27, helpKey: 'help.media' },
-  { id: 'usage', pattern: /^\/usage$/i, build: identity, helpRank: 26, helpKey: 'help.usage' },
-  // `/remind 明天 9:00 内容`：时间本身可能带空格（`明天 9:00`、`下周一 10点`），
-  // 所以整段交给执行分支按前缀尝试解析，第一个能解析的前缀是时间，其余是内容。
-  {
-    id: 'remind',
-    pattern: /^\/remind\s+([\s\S]+)$/i,
-    build: (match) => ({ arg: match[1] }),
-    helpRank: 16,
-    helpKey: 'help.remind',
-  },
-  { id: 'remindlist', pattern: /^\/remindlist(?:\s+([\S\s]+))?$/i, build: (match) => ({ arg: match[1]?.trim() ?? '' }), helpRank: 17, helpKey: 'help.remindlist' },
-  {
-    id: 'remindcancel',
-    pattern: /^\/remindcancel\s+(\S+)$/i,
-    build: (match) => ({ id: match[1] }),
-    helpRank: 18,
-    helpKey: 'help.remindcancel',
-  },
-  // `/subscribe 明天 9:00 主题`: the time may contain spaces, so keep the whole
-  // argument and let the execution branch try parseable prefixes from longest
-  // to shortest. A bare command is recognised too, so it answers with usage.
-  {
-    id: 'subscribe',
-    pattern: /^\/(?:subscribe|订阅)(?:\s+([\s\S]+))?$/i,
-    build: (match) => ({ arg: match[1]?.trim() ?? '' }),
-    helpRank: 19,
-    helpKey: 'help.subscribe',
-  },
-  { id: 'export', pattern: /^\/(?:export|导出)(?:\s+(\d{1,3}))?$/i,
-    build: (match) => ({ days: match[1] === undefined ? undefined : Number(match[1]) }),
-    helpRank: 12,
-    helpKey: 'help.export',
-  },
-  { id: 'subscribelist', pattern: /^\/(?:subscribelist|订阅列表)$/i, build: identity, helpRank: 20, helpKey: 'help.subscribelist' },
-  {
-    id: 'subscribecancel',
-    pattern: /^\/(?:subscribecancel|订阅取消)\s+(\S+)$/i,
-    build: (match) => ({ id: match[1] }),
-    helpRank: 21,
-    helpKey: 'help.subscribecancel',
-  },
-  { id: 'config', pattern: /^\/config$/i, build: identity, helpRank: 26, helpKey: 'help.config' },
   { id: 'send', pattern: /^\/send(?:\s+([\S\s]+))?$/i, build: (match) => ({ arg: match[1]?.trim() ?? '' }), helpRank: 13, helpKey: 'help.send' },
 ]
-
-/** Commands answered by the inbound handler's persona bundle (state root lives there). */
-const PERSONA_COMMANDS = new Set(['export', 'send', 'diag', 'outbox', 'quiet', 'usage', 'media', 'config',
-])
 
 /**
  * The help text in one locale (C33). Command rules carry a `helpKey` into the
@@ -694,17 +610,16 @@ const PERSONA_COMMANDS = new Set(['export', 'send', 'diag', 'outbox', 'quiet', '
  * @param {(key: string) => string} [t]
  */
 export function buildCommandsHelp(t = (key) => translate(key, undefined), { all = false } = {}) {
-  const frequent = new Set(['new', 'list', 'use', 'cancel', 'compact', 'status', 'send'])
   return [
     t('help.header'),
     ...COMMANDS
-      .filter((rule) => rule.helpKey !== undefined && (all || frequent.has(rule.id)))
+      .filter((rule) => rule.helpKey !== undefined)
       .sort((left, right) => (left.helpRank ?? 99) - (right.helpRank ?? 99))
       .map((rule) => {
         const line = t(rule.helpKey)
         return line === rule.helpKey && rule.helpText ? rule.helpText : line
       }),
-    ...(!all ? [t('help.more'), t('help.example')] : []),
+    ...(!all ? [t('help.example')] : []),
   ].join('\n')
 }
 
@@ -721,11 +636,9 @@ export function parseSessionCommand(text) {
     const match = rule.pattern.exec(trimmed)
     if (match !== null) return { command: rule.id, ...rule.build(match) }
   }
-  if (!LEGACY_ANSWER_PATTERN.test(trimmed) && !/^\/steer(?:\s+[\s\S]*)?$/i.test(trimmed)) {
-    const unknownMatch = /^\/([a-zA-Z][a-zA-Z0-9_-]*|[\u4e00-\u9fa5]{1,12})(?:\s+([\s\S]*))?$/.exec(trimmed)
-    if (unknownMatch !== null) {
-      return { command: 'unknown_slash', raw: trimmed, name: unknownMatch[1] }
-    }
+  const unknownMatch = /^\/([a-zA-Z][a-zA-Z0-9_-]*|[\u4e00-\u9fa5]{1,12})(?:\s+([\s\S]*))?$/.exec(trimmed)
+  if (unknownMatch !== null) {
+    return { command: 'unknown_slash', raw: trimmed, name: unknownMatch[1] }
   }
   return undefined
 }
@@ -770,19 +683,12 @@ function runStatus({ lines, conversationId, accountId, context }) {
  * @param {string} [accountId] owning bot account; bare key when absent
  * @param {{ accountId?: string, accountLabel?: string | null, paused?: boolean,
  *   lastSeenAt?: string, allowlist?: { source: 'account' | 'global', senders: string[] },
- *   reminders?: import('./message/scheduler.js').ReminderScheduler,
- *   subscription?: import('./message/subscriptions.js').SubscriptionScheduler,
  *   cancelRunningTurn?: () => string,
+ *   compactSession?: (arg: string) => string | Promise<string>,
  *   t?: (key: string, params?: Record<string, unknown>) => string,
  *   persona?: Record<string, (arg?: string) => string | Promise<string>> }} [context]
- *   account-level facts for `/status`, assembled by the inbound handler;
- *   optional so the command works for bare callers too. `reminders` is the
- *   live scheduler for remind commands; without it /remind reports that
- *   scheduling is unavailable rather than crashing. `cancelRunningTurn` is the
- *   bridge's abort hook for `/cancel`: only the bridge holds the live agent
- *   handles, so this module asks it to do the interrupting and only relays the
- *   sentence it returns. `persona` bundles the remaining stateful handlers;
- *   their storage lives at the state root, which only the inbound handler knows.
+ *   Account facts are used by `/status`; the bridge supplies cancellation and
+ *   compaction. The inbound handler supplies the authorized `/send` handler.
  * @returns {string | Promise<string> | undefined}
  */
 export function runSessionCommand(lines, conversationId, text, accountId, context) {
@@ -829,206 +735,12 @@ export function runSessionCommand(lines, conversationId, text, accountId, contex
       : t('error.compactUnavailable')
   }
   if (command.command === 'unknown_slash') {
-    if (typeof context?.executeHostCommand === 'function') {
-      return context.executeHostCommand(command.raw, command.name)
-    }
     return `未知指令：/${command.name}（发送 /help 查看可用指令）`
   }
-  if (PERSONA_COMMANDS.has(command.command)) {
-    // All of them are answered by the inbound handler's persona bundle: it knows the
-    // state root, the mode table, the memory files and the session bridge (the
-    // /summary side session). A bare caller says so instead of pretending it
-    // stored something. The handler may be async (/summary) — return the
-    // promise as-is; the inbound handler awaits command replies.
-    const handler = context?.persona?.[command.command]
+  if (command.command === 'send') {
+    const handler = context?.persona?.send
     if (typeof handler !== 'function') return t('error.featureUnavailable')
     return handler(command.arg)
-  }
-  if (command.command === 'remind') {
-    // Scheduling needs the live scheduler; a caller without one (bare tests,
-    // tooling) gets an honest refusal rather than a silently dropped remind.
-    const scheduler = context?.reminders
-    if (scheduler === undefined) {
-      return t('error.reminderServiceUnavailable', { action: '安排提醒', actionEn: 'schedule a reminder' })
-    }
-    const raw = String(command.arg ?? '').trim()
-    const accountIdForRemind = context?.accountId ?? accountId ?? ''
-    if (/^(?:skip|跳过)$/i.test(raw)) {
-      const skipped = scheduler.skipNext(accountIdForRemind)
-      if (skipped === undefined) {
-        return t('error.reminderChangeUnclear', { action: '跳过下一次重复提醒', actionEn: 'skip the next repeating reminder' })
-      }
-      const next = new Date(skipped.fireAt).toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
-      return `已跳过下一次：${skipped.text}（${skipped.recurrenceLabel ?? '重复'}，下次 ${next}）`
-    }
-    if (raw === '') {
-      return '用法：/remind <时间> <内容>，例如 /remind 10m 该喝水了 或 /remind 明天 9:00 开会\n时间支持 10m / 2h / 1d30m、14:30、2026-10-19 09:00、明天 9:00、周五、下周三 10点、3小时后、每天 9:00'
-    }
-    // 时间可能自己带空格（`明天 9:00`），按前缀逐段尝试：优先采用最长的
-    // 可解析前缀，其余是内容。这样裸星期几不会抢在「周五 10点」前面命中，
-    // 也不用在正则里穷举所有中文写法。
-    // 重复写法（每天/工作日/每周X）先试 —— `每周一 10点` 里的「每周一」不能
-    // 被一次性规则当成日期，`每天 9:00` 更是一次性规则根本没有的形态。
-    const tokens = raw.split(/\s+/)
-    let when
-    let recurrence
-    let failure
-    let text = ''
-    for (let take = Math.min(tokens.length, 4); take >= 1; take -= 1) {
-      const prefix = tokens.slice(0, take).join(' ')
-      const repeat = parseRecurrence(prefix)
-      if (repeat.ok === true) {
-        recurrence = repeat
-        text = tokens.slice(take).join(' ')
-        break
-      }
-      const parsed = parseWhen(prefix)
-      if (parsed.ok === true) {
-        when = parsed
-        text = tokens.slice(take).join(' ')
-        break
-      }
-      if (isInvalidClockError(parsed) || isInvalidClockError(repeat)) {
-        failure = isInvalidClockError(parsed) ? parsed : repeat
-        break
-      }
-    }
-    if (when === undefined && recurrence === undefined) return `没有安排：${failure?.reason ?? parseWhen(tokens[0]).reason}`
-    if (text.trim() === '') {
-      return '用法：/remind <时间> <内容>，例如 /remind 明天 9:00 开会 或 /remind 每天 9:00 吃药（只给时间没有内容，没有可提醒的事）'
-    }
-    const planned = recurrence === undefined
-      ? scheduler.schedule({ accountId: accountIdForRemind, conversationId, text, fireAt: when.fireAt })
-      : scheduler.schedule({
-          accountId: accountIdForRemind,
-          conversationId,
-          text,
-          fireAt: recurrence.fireAt,
-          recurrence: recurrence.recurrence,
-          recurrenceLabel: recurrence.label,
-          hour: recurrence.hour,
-          minute: recurrence.minute,
-        })
-    if (planned.error !== undefined) return `没有安排：${planned.error}`
-    const label = recurrence === undefined ? when.label : `${recurrence.label}（重复）`
-    return `好的，${label} 我会提醒你（编号 ${planned.id}）。\n用 /remindlist 可以查看，/remindcancel ${planned.id} 取消。`
-  }
-  if (command.command === 'snooze') {
-    const scheduler = context?.reminders
-    if (scheduler === undefined) {
-      return t('error.reminderServiceUnavailable', { action: '把提醒往后推', actionEn: 'snooze a reminder' })
-    }
-    const raw = String(command.arg ?? '').trim()
-    if (raw === '') return '用法：/snooze 10m —— 把最近的一条提醒往后推；/remind skip 跳过重复提醒的下一次。'
-    const parsed = parseWhen(raw)
-    if (parsed.ok !== true) return `没听懂「${raw}」。用法：/snooze 10m、/snooze 1h。`
-    const minutes = Math.max(1, Math.round((parsed.fireAt - Date.now()) / 60_000))
-    const item = scheduler.snooze(context?.accountId ?? accountId ?? '', minutes)
-    if (item === undefined) {
-      return t('error.reminderChangeUnclear', { action: '把提醒往后推', actionEn: 'snooze the reminder' })
-    }
-    const at = new Date(item.fireAt).toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
-    return `已推后 ${minutes} 分钟：${item.text}（${at}）`
-  }
-  if (command.command === 'remindlist') {
-    const scheduler = context?.reminders
-    if (scheduler === undefined) {
-      return t('error.reminderServiceUnavailable', { action: '查看提醒', actionEn: 'list reminders' })
-    }
-    const items = scheduler.list(context?.accountId ?? accountId ?? '')
-
-    // ⑤ `/remindlist 2 1h`：第 2 条往后推一小时。编号和 /remindlist 打印的顺序一致
-    // （按触发时间排），不用用户自己先算出「哪条最早」。
-    const shift = /^(\d+)\s+(\S+)$/.exec(String(command.arg ?? '').trim())
-    if (shift !== null) {
-      const position = Number(shift[1])
-      if (position < 1 || position > items.length) return `没有第 ${position} 条（/remindlist 看现有 ${items.length} 条）。`
-      const span = parseWhen(shift[2])
-      if (span.ok !== true) return `没听懂「${shift[2]}」。用法：/remindlist 2 1h（第 2 条往后推一小时）。`
-      const minutes = Math.max(1, Math.round((span.fireAt - Date.now()) / 60_000))
-      const moved = scheduler.snoozeById(items[position - 1].id, minutes)
-      if (moved === undefined) {
-        return t('error.reminderChangeUnclear', {
-          action: `把第 ${position} 条提醒往后推`,
-          actionEn: `move reminder ${position}`,
-        })
-      }
-      const at = new Date(moved.fireAt).toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
-      return `已把第 ${position} 条推后 ${minutes} 分钟：${moved.text}（${at}）`
-    }
-    if (items.length === 0) return '这个账号现在没有待发的提醒。'
-    return [
-      '待发的提醒（/remindlist <序号> <时长> 可以把某一条往后推，例如 /remindlist 2 1h）：',
-      ...items.map((item, position) => {
-        const repeat = item.recurrence === undefined ? '' : `（${item.recurrenceLabel ?? '重复'}）`
-        return `${position + 1}. ${new Date(item.fireAt).toLocaleString()}${repeat} · ${item.text}（编号 ${item.id}）`
-      }),
-    ].join('\n')
-  }
-  if (command.command === 'remindcancel') {
-    const scheduler = context?.reminders
-    if (scheduler === undefined) {
-      return t('error.reminderServiceUnavailable', { action: '取消提醒', actionEn: 'cancel a reminder' })
-    }
-    const removed = scheduler.cancel(command.id, context?.accountId ?? accountId ?? '')
-    if (removed === true) return `已取消提醒 ${command.id}。`
-    return t('error.reminderChangeUnclear', { action: `取消提醒 ${command.id}`, actionEn: `cancel reminder ${command.id}` })
-  }
-  if (command.command === 'subscribe') {
-    const scheduler = context?.subscription
-    if (scheduler === undefined) {
-      return t('error.timedMessageServiceUnavailable', { action: '安排定时消息', actionEn: 'schedule a timed message' })
-    }
-    const usage = '用法：/subscribe <时间> <主题>，例如 /subscribe 每天 08:00 早安，问问我睡得怎么样\n时间支持 每天 HH:mm、每周日 HH:mm、裸 HH:mm（等于每天），以及一次性时间（10m、2026-11-01 09:00）'
-    const raw = String(command.arg ?? '').trim()
-    if (raw === '') return usage
-
-    // Match /remind: try the longest parseable prefix first. This keeps
-    // `周五 10点` together instead of taking bare `周五` and putting `10点`
-    // in the prompt, while time-like words later in the topic remain text.
-    const tokens = raw.split(/\s+/)
-    let when
-    let failure
-    let text = ''
-    for (let take = Math.min(tokens.length, 4); take >= 1; take -= 1) {
-      const parsed = parseSubscriptionWhen(tokens.slice(0, take).join(' '))
-      if (parsed.ok === true) {
-        when = parsed
-        text = tokens.slice(take).join(' ')
-        break
-      }
-      if (isInvalidClockError(parsed)) {
-        failure = parsed
-        break
-      }
-    }
-    if (when === undefined) return `没有安排：${failure?.reason ?? parseSubscriptionWhen(tokens[0]).reason}`
-    if (text.trim() === '') return usage
-    const accountIdForSub = context?.accountId ?? accountId ?? ''
-    const planned = scheduler.schedule({ accountId: accountIdForSub, conversationId, when, prompt: text })
-    if (planned.error !== undefined) return `没有安排：${planned.error}`
-    const recurring = planned.kind !== 'once'
-    const tail = recurring
-      ? `到点我会主动给你发一条（编号 ${planned.id}）。/subscribecancel ${planned.id} 取消。`
-      : `到点我会主动给你发一条（编号 ${planned.id}，只发这一次）。/subscribecancel ${planned.id} 取消。`
-    return `好的，${describeSubscription(planned)} ${tail}`
-  }
-  if (command.command === 'subscribelist') {
-    const scheduler = context?.subscription
-    if (scheduler === undefined) {
-      return t('error.timedMessageServiceUnavailable', { action: '查看定时消息', actionEn: 'list timed messages' })
-    }
-    const items = scheduler.list(context?.accountId ?? accountId ?? '')
-    if (items.length === 0) return '这个账号现在没有定时主动消息。用 /subscribe 安排一个。'
-    return ['定时主动消息：', ...items.map((item) => `${item.id} · ${describeSubscription(item)} · ${item.prompt}`)].join('\n')
-  }
-  if (command.command === 'subscribecancel') {
-    const scheduler = context?.subscription
-    if (scheduler === undefined) {
-      return t('error.timedMessageServiceUnavailable', { action: '取消定时消息', actionEn: 'cancel a timed message' })
-    }
-    const removed = scheduler.cancel(command.id, context?.accountId ?? accountId ?? '')
-    return removed === true ? `已取消定时消息 ${command.id}。` : t('error.timedMessageCancelUnclear', { id: command.id })
   }
   if (command.index === undefined) {
     return `${USE_USAGE}\n\n${lines.render(conversationId, accountId)}`

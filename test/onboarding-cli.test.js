@@ -130,46 +130,6 @@ test('doctor does not let a registry-only allowlist authorize a missing credenti
   assert.doesNotMatch(result.output, /allowed senders\s+authorized/)
 })
 
-test('doctor reads nested and persisted ASR model directories and identifies legacy keys', (t) => {
-  const fixture = tempState(t)
-  writeCredential(fixture.state, 'synthetic-account')
-  writeJson(path.join(fixture.state, 'accounts-registry.json'), {
-    schemaVersion: 1,
-    'synthetic-account': { allowedSenders: ['synthetic-owner'] },
-  })
-  const configured = path.join(fixture.root, 'configured-models')
-  const persisted = path.join(fixture.root, 'persisted-models')
-  const legacy = path.join(fixture.root, 'legacy-models')
-  for (const dir of [configured, persisted, legacy]) fs.mkdirSync(dir)
-
-  writeJson(path.join(fixture.state, 'config.json'), {
-    asr: { enabled: true, command: 'synthetic-asr', modelDir: configured },
-  })
-  writeJson(path.join(fixture.state, 'asr-config.json'), { modelDir: persisted })
-  const configuredResult = run('bin/doctor.mjs', fixture, ['--offline'])
-  assert.equal(configuredResult.status, 0, configuredResult.output)
-  assert.match(configuredResult.output, new RegExp(`voice transcription\\s+${configured.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`))
-
-  writeJson(path.join(fixture.state, 'config.json'), {
-    asr: { enabled: true, command: 'synthetic-asr' },
-  })
-  const persistedResult = run('bin/doctor.mjs', fixture, ['--offline'])
-  assert.equal(persistedResult.status, 0, persistedResult.output)
-  assert.match(persistedResult.output, new RegExp(`voice transcription\\s+${persisted.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`))
-
-  writeJson(path.join(fixture.state, 'config.json'), { asrEnabled: true, asrModelDir: legacy })
-  const legacyResult = run('bin/doctor.mjs', fixture, ['--offline'])
-  assert.equal(legacyResult.status, 0, legacyResult.output)
-  assert.match(legacyResult.output, /voice transcription \(legacy\).*nested asr\.command/)
-
-  writeJson(path.join(fixture.state, 'config.json'), {
-    asr: { enabled: true, command: '', modelDir: configured },
-  })
-  const disabledResult = run('bin/doctor.mjs', fixture, ['--offline'])
-  assert.equal(disabledResult.status, 0, disabledResult.output)
-  assert.doesNotMatch(disabledResult.output, /voice transcription/)
-})
-
 test('doctor dry-run and fix create active directories without creating or replacing legacy data', (t) => {
   const fixture = tempState(t)
   writeCredential(fixture.state, 'synthetic-account')
@@ -191,6 +151,9 @@ test('doctor dry-run and fix create active directories without creating or repla
   assert.equal(fs.statSync(path.join(fixture.state, 'sessions')).isDirectory(), true)
   assert.equal(fs.existsSync(path.join(fixture.state, 'knowledge')), false)
   assert.equal(fs.existsSync(path.join(fixture.state, 'memory')), false)
+  assert.equal(fs.existsSync(path.join(fixture.state, 'backups')), false)
+  assert.equal(fs.existsSync(path.join(fixture.state, 'journal')), false)
+  assert.equal(fs.existsSync(path.join(fixture.state, 'audit')), false)
 
   const persona = path.join(fixture.state, 'sessions', 'AGENTS.md')
   const memory = path.join(fixture.state, 'sessions', 'memory.md')
@@ -199,10 +162,19 @@ test('doctor dry-run and fix create active directories without creating or repla
   fs.writeFileSync(memory, 'CUSTOM MEMORY')
   fs.mkdirSync(path.dirname(legacy), { recursive: true })
   fs.writeFileSync(legacy, '{"keep":true}\n')
+  const oldTemp = path.join(fixture.state, 'old.tmp')
+  const malformed = path.join(fixture.state, 'historical.json')
+  fs.writeFileSync(oldTemp, 'HISTORICAL TEMP')
+  fs.utimesSync(oldTemp, new Date(0), new Date(0))
+  fs.writeFileSync(malformed, '{broken')
 
   const repeated = run('bin/doctor.mjs', fixture, ['--offline', '--fix'])
   assert.equal(repeated.status, 0, repeated.output)
   assert.equal(fs.readFileSync(persona, 'utf8'), 'CUSTOM PERSONA')
   assert.equal(fs.readFileSync(memory, 'utf8'), 'CUSTOM MEMORY')
   assert.equal(fs.readFileSync(legacy, 'utf8'), '{"keep":true}\n')
+  assert.equal(fs.readFileSync(oldTemp, 'utf8'), 'HISTORICAL TEMP')
+  assert.equal(fs.readFileSync(malformed, 'utf8'), '{broken')
+  assert.deepEqual(fs.readdirSync(fixture.state).filter((name) => name.startsWith('historical.json')), ['historical.json'])
+  assert.doesNotMatch(repeated.output, /voice transcription|audit chain|backups/)
 })

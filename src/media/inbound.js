@@ -27,7 +27,6 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 
 import { ensureInboxDir } from '../state.js'
-import { transcribeVoice } from './asr.js'
 
 /**
  * Largest inbound attachment this channel will accept.
@@ -168,8 +167,7 @@ function randomToken() {
  * its private `.inbound-tmp-*` directory remains; if it happens after the link,
  * the final file is already complete and the private link is merely redundant.
  * Later calls never sweep old temporary directories because they cannot prove
- * who owns them. `listInboundMedia` ignores non-files, so an abandoned temp
- * directory is also absent from `/media`.
+ * who owns them.
  *
  * Hard links are unavailable on some filesystems (for example, some FAT/exFAT
  * or network-backed volumes). In that case `link` rejects, no destination is
@@ -595,30 +593,7 @@ export async function downloadInboundMedia(params) {
       ...(params.dir === undefined ? {} : { dir: params.dir }),
       ...(params.token === undefined ? {} : { token: params.token }),
     })
-    const result = { ok: true, ...saved, kind, mime: mimeForName(saved.name, kind) }
-    // A video is the one attachment the model cannot open by itself (C22). It
-    // CAN read images, and ffmpeg already ships in the voice path, so a few
-    // stills turn "an mp4 you cannot read" into "three frames you can look at".
-    // Best effort: no ffmpeg, an unreadable codec or a zero-length clip leaves
-    // the file exactly as it was delivered before.
-    if (kind === 'video' && params.extractFrames !== false) {
-      try {
-        const { extractVideoFrames } = await import('./video-frames.js')
-        const stills = extractVideoFrames(saved.path, {
-          ...(params.ffmpegPath === undefined ? {} : { ffmpegPath: params.ffmpegPath }),
-          ...(params.warn === undefined ? {} : { warn: params.warn }),
-        })
-        if (stills.frames.length > 0) {
-          result.frames = stills.frames
-          if (typeof stills.durationSeconds === 'number') result.durationSeconds = stills.durationSeconds
-        } else if (typeof stills.error === 'string') {
-          result.framesError = stills.error
-        }
-      } catch (error) {
-        result.framesError = String(error?.message ?? error)
-      }
-    }
-    return result
+    return { ok: true, ...saved, kind, mime: mimeForName(saved.name, kind) }
   } catch (error) {
     if (error instanceof InboundMediaError) return { ok: false, reason: error.message, code: error.code }
     return { ok: false, reason: String(error?.message ?? error), code: 'unexpected' }
@@ -649,110 +624,6 @@ export function parseAesKey(aesKeyBase64) {
     `aes_key must decode to 16 raw bytes or 32 hex characters, got ${decoded.length} bytes`,
     'bad-aes-key',
   )
-}
-
-/**
- * Download, decrypt and save one inbound voice message, transcode the SILK
- * payload to WAV, and — when an ASR bridge is configured — transcribe it.
- *
- * WeChat voice is SILK, which neither DSH nor any common player can read, so the
- * transcode is attempted first and its absence is not an error. `silk-wasm` is
- * an optional dependency (`optionalDependencies`): the vendored
- * `silk-transcode.js` resolves it with a dynamic `import()` and returns null when
- * it is missing, exactly as upstream ships it, and this module then falls back to
- * the file it already saved.
- *
- * Transcription is a further, independent step: it needs both a WAV and a bridge
- * process, and either can be absent. Every outcome is reported through
- * `transcript` / `transcriptError` rather than being thrown, because a voice note
- * the host cannot understand is still a voice note the user sent.
- *
- * @param {Parameters<typeof downloadInboundMedia>[0] & {
- *   bridge?: import('./asr.js').AsrBridge,
- *   transcribe?: typeof transcribeVoice,
- *   silkToWav?: (silk: Buffer) => Promise<Uint8Array>,
- * }} params
- * @returns {Promise<Awaited<ReturnType<typeof downloadInboundMedia>> & {
- *   transcoded?: boolean, transcodeError?: string, transcodeCode?: string,
- *   transcript?: string, transcriptError?: string, transcriptCode?: string }>}
- */
-export async function downloadInboundVoice(params) {
-  const result = await downloadInboundMedia(params)
-  if (!result.ok) return result
-  const withWav = await transcodeVoiceToWav(result, params)
-  if (withWav.transcoded !== true) return withWav
-  const run = params.transcribe ?? transcribeVoice
-  const outcome = await run({
-    bridge: params.bridge,
-    wavPath: withWav.path,
-  })
-  if (outcome.ok === true) {
-    return { ...withWav, transcript: outcome.text }
-  }
-  return { ...withWav, transcriptError: outcome.reason, transcriptCode: outcome.code }
-}
-
-/**
- * The SILK → WAV half of {@link downloadInboundVoice}, split out so the transcode
- * and the transcription can be reasoned about (and tested) separately.
- *
- * @param {Exclude<Awaited<ReturnType<typeof downloadInboundMedia>>, { ok: false }>} result
- * @param {Parameters<typeof downloadInboundVoice>[0]} params
- */
-async function transcodeVoiceToWav(result, params) {
-  let silkToWav = params.silkToWav
-  if (silkToWav === undefined) {
-    try {
-      ;({ silkToWav } = await import('../../vendor/openclaw-weixin/media/silk-transcode.js'))
-    } catch (error) {
-      return voiceTranscodeFailure(
-        result,
-        `could not load the SILK transcoder: ${String(error?.message ?? error)}`,
-        'transcode-unavailable',
-      )
-    }
-  }
-  if (typeof silkToWav !== 'function') {
-    return voiceTranscodeFailure(result, 'the SILK transcoder is unavailable', 'transcode-unavailable')
-  }
-  try {
-    const silk = await fs.readFile(result.path)
-    const wav = await silkToWav(silk)
-    if (!(wav instanceof Uint8Array)) {
-      return voiceTranscodeFailure(
-        result,
-        'the SILK transcoder did not return a byte array',
-        'transcode-failed',
-      )
-    }
-    // Keep the SILK original and save the playable WAV beside it: the original
-    // is the only lossless copy, and a failed transcode must not destroy it.
-    const wavSaved = await saveInboundBuffer(Buffer.from(wav), `${result.name}.wav`, {
-      ...(params.dir === undefined ? {} : { dir: params.dir }),
-      ...(params.token === undefined ? {} : { token: params.token }),
-    })
-    return {
-      ...result,
-      path: wavSaved.path,
-      name: wavSaved.name,
-      bytes: wavSaved.bytes,
-      mime: 'audio/wav',
-      silkPath: result.path,
-      transcoded: true,
-    }
-  } catch (error) {
-    // Any transcode failure degrades to the SILK file we already saved.
-    return voiceTranscodeFailure(
-      result,
-      String(error?.message ?? error),
-      error instanceof InboundMediaError ? error.code : 'transcode-failed',
-    )
-  }
-}
-
-/** Degrade to the saved SILK original while retaining why WAV was unavailable. */
-function voiceTranscodeFailure(result, reason, code) {
-  return { ...result, transcoded: false, transcodeError: reason, transcodeCode: code }
 }
 
 /** Fallback stem when the message named nothing ("file.bin" upstream). */
@@ -810,62 +681,7 @@ export function describeMediaFailures(failures) {
   return lines.join('\n')
 }
 
-/**
- * Build the text handed to the agent for a successfully saved attachment.
- *
- * The agent gets an absolute path and an explicit instruction, because a bare
- * path in a prompt is easy to read as a question about the path rather than as
- * a file to open. The tool suggestion is per-kind so a voice note does not get
- * proposed to `read_image`.
- *
- * A transcribed voice note is a special case worth the extra care: the user's
- * actual words are prompt content, while everything this plugin says about the
- * file is commentary. They are therefore fenced and labelled differently —
- * `【语音转写】` for the words, `[语音已保存到本地…]` for the bookkeeping — so the
- * agent cannot mistake a transcript for the channel's own description, or quote
- * the description back to the user as what they said. An empty transcript is
- * stated as empty: a silent or unintelligible recording must not be answered as
- * if it had said something.
- *
- * @param {Array<{ ok: true, kind: string, path: string, name: string, bytes: number, transcoded?: boolean, transcript?: string, transcriptError?: string }>} saved
- * @param {string} [caption]
- * @returns {string}
- */
-export function describeInboundMedia(saved, caption) {
-  const blocks = saved.map((item) => {
-    const size = formatBytes(item.bytes)
-    const head = `[用户发送的${kindLabel(item.kind)}已保存到本地：${item.path}（${item.name}, ${size}）]`
-    if (item.kind === 'image') {
-      return `${head}\n请用 read_image 工具查看这个文件的内容。`
-    }
-    if (item.kind === 'voice') {
-      if (typeof item.transcript === 'string') {
-        if (item.transcript === '') {
-          return `${head}\n【语音转写】本机语音识别未能识别出任何内容（可能是静音、音乐或环境噪音），请据此说明你没有听清，不要臆测内容。`
-        }
-        return `${head}\n【语音转写】以下为语音识别结果，均按用户原话处理：\n${item.transcript}`
-      }
-      const reason = typeof item.transcriptError === 'string' ? `（转写失败：${item.transcriptError}）` : ''
-      if (item.transcoded === true) {
-        return `${head}\n这是一段已转码为 WAV 的语音${reason}，请用 read 工具处理（如无法直接读取音频，请说明）。`
-      }
-      // `transcodeError` contains diagnostic text and is logged by the caller.
-      // It may include arbitrary decoder/filesystem text, so the prompt gets
-      // only this fixed description and never the original error.
-      return `${head}\n这是微信 SILK 格式的语音，本机未能解码为可播放音频${reason}；如需内容请告知用户。`
-    }
-    if (item.kind === 'video') {
-      const length = typeof item.durationSeconds === 'number' ? `，时长 ${item.durationSeconds.toFixed(1)} 秒` : ''
-      if (Array.isArray(item.frames) && item.frames.length > 0) {
-        const lines = item.frames.map((frame) => `- ${frame.atSeconds}s：${frame.path}`).join('\n')
-        const extra = typeof item.framesError === 'string' ? `（部分帧未能抽取：${item.framesError}）` : ''
-        return `${head}\n这是一个视频文件${length}。已从中抽取 ${item.frames.length} 帧静图${extra}：\n${lines}\n请用 read_image 工具查看这些帧来了解视频内容；视频本身无法直接读取，需要更精确的画面时请告知用户。`
-      }
-      const why = typeof item.framesError === 'string' ? `（抽帧失败：${item.framesError}）` : ''
-      return `${head}\n这是一个视频文件${length}${why}，视频帧未能提取，无法直接读取内容；如需了解视频内容，请让用户描述或发送截图。`
-    }
-    return `${head}\n请用 read 工具读取这个文件的内容。`
-  })
-  if (typeof caption === 'string' && caption !== '') blocks.push(caption)
-  return blocks.join('\n\n')
+/** Format the media type and local path for the agent. */
+export function describeInboundMedia(saved) {
+  return saved.map((item) => `[用户发送的${kindLabel(item.kind)}已保存到本地：${item.path}]`).join('\n\n')
 }

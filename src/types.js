@@ -72,50 +72,16 @@
  */
 
 /**
- * Outcome of one transcription request against the ASR bridge.
+ * An inbound attachment after downloading, decrypting and saving it locally.
+ * Mirrors successful results from {@link module:dsh-weixin/media/inbound}.
  *
- * Never a rejection: every failure mode the bridge can present (missing
- * executable, crash mid-request, timeout, a well-formed `{ok:false}`, a
- * malformed line) is folded into `ok:false` plus a `code`, so the inbound
- * handler can always degrade to "here is the audio file" instead of losing the
- * message. `text` is `''` when the model genuinely recognised nothing — that is
- * a success, and callers must report it as such rather than inventing content.
- *
- * Mirrors the return of {@link module:dsh-weixin/media/asr.transcribeVoice}.
- *
- * @typedef {Object} TranscriptionResult
- * @property {boolean} ok
- * @property {string} [text]    Trimmed transcript; only when `ok` is true.
- * @property {string} [reason]  Human-readable failure, for the agent's note.
- * @property {'not-configured'|'spawn-failed'|'bridge-error'|'timeout'|'exited'|
- *           'closed'|'bad-response'|'unexpected'} [code]
- */
-
-/**
- * A voice note after download, optional SILK→WAV transcoding and optional
- * transcription.
- *
- * The three stages degrade independently on purpose, so the caller can tell
- * "we could not decode it" apart from "we decoded it but could not understand
- * it": `transcoded:false` means the saved audio is still SILK and
- * `transcodeError` explains why WAV was not produced, while `transcriptError`
- * means the audio was playable but the bridge failed.
- * `transcript` and `transcriptError` are mutually exclusive, and both are absent
- * when ASR is not configured at all.
- *
- * Mirrors what `downloadInboundVoice` returns from
- * {@link module:dsh-weixin/media/inbound}.
- *
- * @typedef {Object} DownloadedVoice
+ * @typedef {Object} DownloadedMedia
  * @property {true} ok
- * @property {string} path               Absolute path of the stored file.
- * @property {string} [silkPath]         Original SILK, kept when transcoding ran.
- * @property {boolean} [transcoded]      True only for a real decoded WAV.
- * @property {string} [transcodeError]   Detailed diagnostic; log only, never interpolate into a prompt.
- * @property {string} [transcodeCode]    Machine-readable counterpart of the above.
- * @property {string} [transcript]       User's words; `''` means "nothing heard".
- * @property {string} [transcriptError]  Why transcription failed, if it did.
- * @property {string} [transcriptCode]   Machine-readable counterpart of the above.
+ * @property {string} path       Absolute path of the stored file.
+ * @property {string} name       Saved filename.
+ * @property {number} bytes      Number of bytes saved.
+ * @property {string} kind       Attachment type.
+ * @property {string} mime       Media type inferred from the filename.
  */
 
 export {}

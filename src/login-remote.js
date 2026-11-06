@@ -20,9 +20,7 @@ import { logger } from "../vendor/openclaw-weixin/util/logger.js";
 import { redactToken } from "../vendor/openclaw-weixin/util/redact.js";
 import { readRegistry, RegistryReadError, setAccountAllowlist, setAccountLabel, setAccountPaused, validateAccountEntry } from "./account-registry.js";
 import { translate } from "./i18n.js";
-import { readSavedConfig, stateDir } from "./state.js";
-import { DEFAULT_RETENTION, directoryUsage } from "./message/retention.js";
-import { readOutbox } from "./message/outbox.js";
+import { readSavedConfig, stateDir, withSavedConfig } from "./state.js";
 import { remoteMethods } from "./typert-js.js";
 import { detectHostVersion, hostStatus } from "./host-compat.js";
 import { buildOnboardingChecklist } from "./onboarding.js";
@@ -30,11 +28,6 @@ import { qrDataUrl } from "./qr-png.js";
 import fs from "node:fs";
 import path from "node:path";
 import { SessionLines, accountScope } from "./sessions.js";
-import { readJournal, DEFAULT_JOURNAL_LIMIT } from "./message/journal.js";
-import { readJournalRange, renderChatMarkdown } from "./message/chat-export.js";
-import { computeStats, buildHealth } from "./message/stats.js";
-import { conversationRows, ledgerTotals } from "./message/usage-ledger.js";
-import { readBudget } from "./budget.js";
 
 const FIXED_BASE_URL = "https://ilinkai.weixin.qq.com";
 const DEFAULT_BOT_TYPE = "3";
@@ -160,6 +153,7 @@ export class WeixinLoginController extends TypertRemoteService {
         super(ctx, "weixinLoginController", { namespace: "weixin" });
         this.botType = options.botType ?? DEFAULT_BOT_TYPE;
         this.getWorkspaceDirectory = options.getWorkspaceDirectory;
+        this.getCompositionConfig = () => ctx.get?.("configController")?.config;
         // Network and rendering seams used by tests to hold individual calls
         // open. Production always uses the vendored fetch helpers.
         this.apiGetFetch = options.apiGetFetch ?? apiGetFetch;
@@ -187,16 +181,7 @@ export class WeixinLoginController extends TypertRemoteService {
          * @type {(() => void) | undefined}
          */
         this.onAccountBound = undefined;
-        /**
-         * Set by the plugin's setup once the reminder scheduler exists; the
-         * journal/reminders card methods read through it. Undefined in the
-         * CLI and in tests — the methods below must answer honestly when it
-         * is missing instead of pretending the feature is broken.
-         */
-        this.remindersProvider = undefined;
-        /** Set by the plugin's setup: the live outbox. */
-        this.outboxFlush = undefined;
-        this.outboxDropItem = undefined;
+
     }
 
     /** Start (or resume) a QR login; returns {qrcodeUrl, qrDataUrl, sessionKey, status}. */
@@ -518,7 +503,9 @@ export class WeixinLoginController extends TypertRemoteService {
                     // The EFFECTIVE allowlist for this account (account override
                     // over the global config), so the card shows what actually
                     // rules this account rather than one layer of it.
-                    const global = readSavedConfig();
+                    const composition = this.getCompositionConfig?.();
+                    const global = composition == null ? null : withSavedConfig(composition);
+                    const accountAllowedSenders = entry.allowedSenders ?? [];
                     accounts.push({
                         accountId: id,
                         userId: acct.userId ?? null,
@@ -526,8 +513,9 @@ export class WeixinLoginController extends TypertRemoteService {
                         paused: entry.paused === true,
                         sessionExpired: this.sessionExpiredAccounts.has(id),
                         lastSeenAt: typeof entry.lastSeenAt === "string" ? entry.lastSeenAt : null,
-                        allowedSenders: Array.isArray(entry.allowedSenders) && entry.allowedSenders.length > 0 ? entry.allowedSenders : (global.allowedSenders ?? []),
-                        allowedChats: Array.isArray(entry.allowedChats) && entry.allowedChats.length > 0 ? entry.allowedChats : (global.allowedChats ?? []),
+                        accountAllowedSenders,
+                        allowedSenders: accountAllowedSenders.length > 0 ? accountAllowedSenders : (global?.allowedSenders ?? (global ? [] : null)),
+                        allowedChats: Array.isArray(entry.allowedChats) && entry.allowedChats.length > 0 ? entry.allowedChats : (global?.allowedChats ?? (global ? [] : null)),
                     });
                 }
             } catch {
@@ -549,261 +537,6 @@ export class WeixinLoginController extends TypertRemoteService {
             pendingLogin: logins.size > 0,
             sessionExpired: this.sessionExpired,
         };
-    }
-
-    /**
-     * Pause one account's inbound loop without logging it out.
-     *
-     * Pausing is "stop listening on purpose": the credential stays, so resuming
-     * needs no re-scan. The host's next bring-up pass (this call re-arms the
-     * host immediately via `onAccountControlChange`) skips paused accounts.
-     */
-    /** Pending reminders for the settings card, soonest first. */
-    async reminders() {
-        if (this.remindersProvider === undefined) return { entries: [], available: false };
-        const entries = this.remindersProvider.list().map((r) => ({
-            id: r.id,
-            accountId: r.accountId,
-            conversationId: r.conversationId,
-            fireAt: r.fireAt,
-            text: r.text,
-        }));
-        return { entries, available: true };
-    }
-
-    /** Cancel one pending reminder from the settings card. */
-    async remindCancel(id) {
-        if (this.remindersProvider === undefined) return { removed: false, error: "\u8c03\u5ea6\u5668\u4e0d\u53ef\u7528" };
-        const removed = this.remindersProvider.cancel(String(id));
-        return removed ? { removed: true } : { removed: false, error: "\u6ca1\u6709\u8fd9\u4e2a\u7f16\u53f7" };
-    }
-
-    /** Message journal for the settings card: newest first, optional account filter. */
-    async journal(options) {
-        const opts = options ?? {};
-        const limitRaw = Number(opts.limit);
-        const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(Math.floor(limitRaw), 200) : DEFAULT_JOURNAL_LIMIT;
-        const accountId = typeof opts.accountId === "string" && opts.accountId !== "" ? opts.accountId : undefined;
-        const beforeRaw = Number(opts.before);
-        const before = Number.isFinite(beforeRaw) && beforeRaw > 0 ? beforeRaw : undefined;
-        const conversationId = typeof opts.conversationId === "string" && opts.conversationId !== "" ? opts.conversationId : undefined;
-        return { entries: readJournal(stateDir(), { limit, accountId, before, conversationId }) };
-    }
-
-    /**
-     * Render the journal (optionally one account, last `days` days) as a
-     * Markdown document for the settings card's one-click export. The card
-     * downloads the text itself — no file has to travel through the plugin.
-     */
-    async journalExport(options) {
-        const opts = options ?? {};
-        const accountId = typeof opts.accountId === "string" && opts.accountId !== "" ? opts.accountId : undefined;
-        const daysRaw = Number(opts.days);
-        const days = Number.isFinite(daysRaw) && daysRaw > 0 ? Math.min(Math.floor(daysRaw), 365) : 30;
-        const entries = readJournalRange(stateDir(), { accountId, days });
-        const markdown = renderChatMarkdown(entries, { title: accountId ? `聊天记录 · ${accountId}` : "聊天记录" });
-        return { count: entries.length, chars: markdown.length, markdown };
-    }
-
-    /**
-     * 统计页签: in/out counts, a daily series, the 24-hour distribution and the
-     * busiest conversations — computed from the journal on every read, so it
-     * can never disagree with the journal tab next to it.
-     */
-    /**
-     * How much room the state directory is taking, and how long each class is
-     * kept. The card shows it under 「统计」 so an operator can tell a year of
-     * history from a week without opening a terminal.
-     */
-    /**
-     * Undelivered text held by the outbox. A reply that could not be sent is
-     * kept on disk rather than lost; the card lists it so the operator can retry
-     * or drop it instead of wondering whether the bot answered.
-     */
-    outbox() {
-        const store = readOutbox(stateDir());
-        return {
-            items: store.items.map((item) => ({
-                id: item.id,
-                accountId: item.accountId,
-                conversationId: item.conversationId,
-                text: item.text,
-                createdAt: item.createdAt,
-                attempts: item.attempts,
-                lastError: item.lastError,
-            })),
-        };
-    }
-
-    /** Ask the plugin to retry everything now. */
-    async outboxRetry() {
-        const flush = this.outboxFlush;
-        if (typeof flush !== "function") return { ok: false, reason: "outbox-not-wired" };
-        const result = await flush({ force: true });
-        return { ok: true, ...result };
-    }
-
-    /** Drop one queued item by id. */
-    outboxDrop({ id }) {
-        const drop = this.outboxDropItem;
-        if (typeof drop !== "function") return { ok: false, reason: "outbox-not-wired" };
-        return { ok: drop(id) };
-    }
-
-    /**
-     * What a migration pack would contain, before anyone types a passphrase.
-     * The card uses this to show the size honestly and to offer "leave the
-     * photos behind" — `media/` is usually the bulk of a state directory.
-     */
-    async migrateSummary() {
-        const root = stateDir();
-        const plain = { files: 0, bytes: 0 };
-        const media = { files: 0, bytes: 0 };
-        const walk = (relative) => {
-            let entries = [];
-            try {
-                entries = fs.readdirSync(path.join(root, relative), { withFileTypes: true });
-            } catch {
-                return;
-            }
-            for (const entry of entries) {
-                if (entry.isDirectory()) {
-                    if (relative === "" && (entry.name === "backups" || entry.name === "node_modules")) continue;
-                    walk(relative === "" ? entry.name : `${relative}/${entry.name}`);
-                } else if (entry.isFile()) {
-                    if (relative === "" && entry.name === "instance.lock") continue;
-                    let size = 0;
-                    try {
-                        size = fs.statSync(path.join(root, relative, entry.name)).size;
-                    } catch {
-                        continue;
-                    }
-                    const isMedia = relative === "media" || relative.startsWith("media/");
-                    if (isMedia) {
-                        media.files += 1;
-                        media.bytes += size;
-                    } else {
-                        plain.files += 1;
-                        plain.bytes += size;
-                    }
-                }
-            }
-        };
-        walk("");
-        return {
-            stateRoot: root,
-            withoutMedia: plain,
-            media,
-            withMedia: { files: plain.files + media.files, bytes: plain.bytes + media.bytes },
-        };
-    }
-
-    /**
-     * Seal the whole state directory into one passphrase-protected file, written
-     * on this machine. The card cannot move bytes between machines, so it shows
-     * the path and the operator copies that one file across.
-     *
-     * @param {{ passphrase?: string, includeMedia?: boolean }} options
-     */
-    async migrateExport(options) {
-        const { sealState } = await import("./backup-crypto.js");
-        const passphrase = typeof options?.passphrase === "string" ? options.passphrase : "";
-        if (passphrase.length < 8) return { error: "口令至少 8 个字符 —— 它保护的是聊天原文与登录 token" };
-        const stamp = new Date().toISOString().replace(/[:.]/g, "").replace("T", "-").slice(0, 17);
-        const outFile = path.join(stateDir(), "backups", `migrate-${stamp}.enc`);
-        try {
-            const result = sealState(stateDir(), {
-                passphrase,
-                outFile,
-                includeMedia: options?.includeMedia !== false,
-                warn: () => {},
-            });
-            return { file: result.file, files: result.files, bytes: result.bytes };
-        } catch (error) {
-            return { error: String(error?.message ?? error) };
-        }
-    }
-
-    /**
-     * Open a pack on this machine and report what restoring it would write,
-     * without writing a single byte. The card shows that plan and asks again;
-     * `migrateRestore` is the second click.
-     *
-     * @param {{ file?: string, passphrase?: string }} options
-     */
-    async migrateInspect(options) {
-        const { openState } = await import("./backup-crypto.js");
-        const file = typeof options?.file === "string" ? options.file.trim() : "";
-        const passphrase = typeof options?.passphrase === "string" ? options.passphrase : "";
-        if (file === "") return { error: "需要一个 .enc 迁移包文件的路径" };
-        if (fs.existsSync(file) === false) return { error: `找不到文件：${file}` };
-        try {
-            const opened = openState(file, { passphrase });
-            const root = path.resolve(stateDir());
-            const preview = [];
-            let bytes = 0;
-            let replaces = 0;
-            for (const [rel, buffer] of opened.files) {
-                bytes += buffer.length;
-                const exists = fs.existsSync(path.join(root, rel));
-                if (exists) replaces += 1;
-                preview.push({ path: rel, bytes: buffer.length, exists });
-            }
-            return {
-                file,
-                sealedAt: typeof opened.sealedAt === "string" ? opened.sealedAt : "",
-                files: preview.length,
-                bytes,
-                replaces,
-                adds: preview.length - replaces,
-                hasConfig: preview.some((entry) => entry.path === "config.json"),
-                sample: preview.slice(0, 12),
-            };
-        } catch (error) {
-            const message = String(error?.message ?? error);
-            return {
-                error: /authenticate|bad decrypt|Unsupported state|wrong passphrase/i.test(message)
-                    ? "口令不对，或者这个包不是本插件封出来的"
-                    : message,
-            };
-        }
-    }
-
-    /**
-     * Write a previously inspected pack over this state directory. The archive is
-     * validated in full before the first byte (see restoreSealed), and a plain
-     * rollback copy is taken first so a restore can itself be undone.
-     *
-     * @param {{ file?: string, passphrase?: string }} options
-     */
-    async migrateRestore(options) {
-        const { openState, restoreSealed } = await import("./backup-crypto.js");
-        const file = typeof options?.file === "string" ? options.file.trim() : "";
-        const passphrase = typeof options?.passphrase === "string" ? options.passphrase : "";
-        if (file === "") return { error: "需要一个 .enc 迁移包文件的路径" };
-        if (fs.existsSync(file) === false) return { error: `找不到文件：${file}` };
-        let opened;
-        try {
-            opened = openState(file, { passphrase });
-        } catch (error) {
-            return { error: String(error?.message ?? error) };
-        }
-        // Keep a plain rollback copy first. Not having one is not a reason to
-        // refuse the restore the operator asked for — it is reported instead.
-        let safety = "";
-        try {
-            const { createBackup } = await import("./backup.js");
-            const backup = createBackup(stateDir(), { label: "before-migrate-restore", warn: () => {} });
-            safety = typeof backup?.path === "string" ? backup.path : "";
-        } catch {
-            safety = "";
-        }
-        try {
-            const result = restoreSealed(stateDir(), opened.files, { warn: () => {} });
-            return { restored: result.restored, safety, sealedAt: typeof opened.sealedAt === "string" ? opened.sealedAt : "" };
-        } catch (error) {
-            return { error: String(error?.message ?? error) };
-        }
     }
 
     /** Read or save AGENTS.md in the active workspace. */
@@ -844,95 +577,6 @@ export class WeixinLoginController extends TypertRemoteService {
         };
     }
 
-    async storage() {
-        const live = readSavedConfig();
-        return {
-            usage: directoryUsage(stateDir()),
-            retention: {
-                journalDays: Number(live.retentionJournalDays ?? DEFAULT_RETENTION.journalDays),
-                auditDays: Number(live.retentionAuditDays ?? DEFAULT_RETENTION.auditDays),
-                mediaDays: Number(live.retentionMediaDays ?? DEFAULT_RETENTION.mediaDays),
-                exportsDays: Number(live.retentionExportsDays ?? DEFAULT_RETENTION.exportsDays),
-                logsDays: Number(live.retentionLogsDays ?? DEFAULT_RETENTION.logsDays),
-            },
-        };
-    }
-
-    /**
-     * Process-lifetime counters plus the live queue depth, for the card's stats
-     * tab. A restart resets them, which the snapshot says out loud (`startedAt`,
-     * `uptimeMs`) so nobody reads a counter as a lifetime total.
-     */
-    async metrics() {
-        const snapshot = typeof this.metricsSnapshot === "function" ? this.metricsSnapshot() : undefined;
-        if (snapshot !== undefined) return snapshot;
-        return { startedAt: 0, uptimeMs: 0, counters: {}, gauges: {}, pendingOutbox: 0 };
-    }
-
-    async stats(options) {
-        const opts = options ?? {};
-        const daysRaw = Number(opts.days);
-        const days = Number.isFinite(daysRaw) && daysRaw > 0 ? Math.min(Math.floor(daysRaw), 90) : 14;
-        const accountId = typeof opts.accountId === "string" && opts.accountId !== "" ? opts.accountId : undefined;
-        const result = computeStats(stateDir(), { days, accountId });
-
-        const live = readSavedConfig();
-        const pending = readOutbox(stateDir()).items.length;
-        let connected = false;
-        try {
-            const status = await this.status();
-            connected = Array.isArray(status?.accounts) && status.accounts.some((account) => account?.accountId);
-        } catch {
-            connected = false;
-        }
-        const budget = readBudget(stateDir());
-        const health = buildHealth({
-            connected,
-            outboxPending: pending,
-            budgetUsed: budget.used,
-            budgetLimit: Number(live.backgroundDailyLimit ?? 0),
-            retention: {
-                journalDays: live.retentionJournalDays,
-                auditDays: live.retentionAuditDays,
-                mediaDays: live.retentionMediaDays,
-            },
-        });
-
-        return { ...result, health };
-    }
-
-    /**
-     * 每个会话用了什么模型、多少 token、折合多少元。
-     *
-     * 三个数字**都是估算**，卡片上也必须这么说：
-     *   - token 由提示词与回复的字符数折算（插件不在模型请求链路上，拿不到真实
-     *     usage），所以只会小于账单；
-     *   - 元由使用者自己填的单价折算，没填就只显示 token；
-     *   - 模型名是「我们请求的那条路由」。
-     */
-    async usageLedger(options) {
-        const opts = options ?? {};
-        const live = readSavedConfig();
-        const accountId =
-            typeof opts.accountId === "string" && opts.accountId !== ""
-                ? opts.accountId
-                : typeof live.accountId === "string" && live.accountId !== ""
-                  ? live.accountId
-                  : "";
-        const priceInPer1k = Number(live.pricePer1kInputYuan ?? 0);
-        const priceOutPer1k = Number(live.pricePer1kOutputYuan ?? 0);
-        const rows = conversationRows(stateDir(), accountId, {
-            priceInPer1k,
-            priceOutPer1k,
-        });
-        return {
-            accountId,
-            rows,
-            totals: ledgerTotals(rows),
-            prices: { priceInPer1k, priceOutPer1k },
-        };
-    }
-
     /**
      * What a first-run user still has to do.
      *
@@ -957,7 +601,6 @@ export class WeixinLoginController extends TypertRemoteService {
             hostVersion,
             hostTested: hostStatus(hostVersion).status === "tested",
             allowedSenders: Array.isArray(live.allowedSenders) ? live.allowedSenders : [],
-            backupEnabled: live.backupEnabled === true,
         });
     }
 
@@ -1004,13 +647,15 @@ export class WeixinLoginController extends TypertRemoteService {
      * takes effect on the account's NEXT message (the handler resolves the
      * list per bring-up); no reload needed.
      */
-    async allowlist(accountId, senders, chats) {
+    async allowlist(accountId, senders) {
         const id = String(accountId ?? "").trim();
         if (!id) throw new RemoteError("account id is required");
-        // The card sends one comma/newline-separated string per list (its
-        // codec layer only has string codecs); arrays are accepted too.
+        // The card edits senders only; preserve the stored chat override.
         const split = (value) => (Array.isArray(value) ? value : String(value ?? "").split(/[\n,]/));
-        if (!registryOperation(() => setAccountAllowlist(id, split(senders), split(chats), (m) => logger.warn(m)))) {
+        if (!registryOperation(() => {
+            const chats = readRegistry({ failClosed: true, accountId: id })[id]?.allowedChats;
+            return setAccountAllowlist(id, split(senders), chats, (m) => logger.warn(m));
+        })) {
             throw new RemoteError("registry_write_failed", translate("error.accountRegistryWrite", {}, readSavedConfig().locale), {});
         }
         // The inbound handler reads the allowlist once per bring-up, so saving
@@ -1173,4 +818,4 @@ export function purgeStaleLogins(now = Date.now(), { includeActive = false, incl
     }
 }
 
-remoteMethods(WeixinLoginController, ["startLogin", "poll", "submitVerifyCode", "cancel", "status", "logout", "sessions", "useSession", "removeSession", "pause", "resume", "label", "allowlist", "journal", "journalExport", "stats", "onboarding", "storage", "metrics", "outbox", "outboxRetry", "outboxDrop", "reminders", "remindCancel", "usageLedger", "migrateSummary", "migrateExport", "migrateInspect", "migrateRestore", "promptPreview"]);
+remoteMethods(WeixinLoginController, ["startLogin", "poll", "submitVerifyCode", "cancel", "status", "logout", "sessions", "useSession", "removeSession", "pause", "resume", "label", "allowlist", "onboarding", "promptPreview"]);

@@ -163,7 +163,7 @@ test('successful inbound media appends one attachment description without repeat
   assert.equal(f.delivered.length, 1)
   const prompt = f.delivered[0].text
   assert.match(prompt, /\[用户发送的图片已保存到本地：/)
-  assert.match(prompt, /请用 read_image 工具查看这个文件的内容。/)
+  assert.match(prompt, /photo\.png\]/)
   assert.equal(countOccurrences(prompt, 'CAPTION_SENTINEL'), 1)
   assert.doesNotMatch(prompt, /<weixin_/)
   assert.match(prompt, /&lt;weixin_memory>/)
