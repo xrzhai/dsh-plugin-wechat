@@ -13,7 +13,7 @@
     "src/message/subscriptions.js": 27,
     "src/message/media-archive.js": 25,
     "src/config-effect.js": 21,
-    "src/agent-bridge.js": 18,
+    "src/agent-bridge.js": 16,
     "src/message/links.js": 20,
     "src/asr-remote.js": 18,
     "src/login-remote.js": 25,

@@ -23,8 +23,9 @@ import { createHash } from 'node:crypto'
 import { readAssistantReply, readSettledTurns, describePending } from './session-reader.js'
 import { CATALOG } from './i18n.js'
 import { redactSecrets } from './credentials.js'
+import { assertNoPendingInbox } from './session-host.js'
 import { SessionDispatcher } from './session-dispatcher.js'
-import { baseSessionIdFor, scopedLineKey, SessionLines, runSessionCommand } from './sessions.js'
+import { baseSessionIdFor, scopedLineKey, SessionLines, parseSessionCommand, runSessionCommand } from './sessions.js'
 
 const NO_RUNNING_REPLY = '现在没有正在处理的回复，不需要停止。'
 
@@ -145,6 +146,7 @@ export class AgentBridge {
   /** @param {AgentBridgeOptions} options */
   constructor(options) {
     this.ctx = options.ctx
+    this.shutdown = new AbortController()
     this.cwd = options.cwd
     this.log = options.log ?? (() => {})
     this.errLog = options.errLog ?? options.log ?? (() => {})
@@ -289,7 +291,8 @@ export class AgentBridge {
     // Capture the target BEFORE the command runs: `/clear` replaces the line,
     // and the id to orphan is the one that was active up to now.
     const key = scopedLineKey(accountId, conversationId)
-    const previouslyActive = this.conversationTargets.get(key)
+    const clearedSessions = parseSessionCommand(text)?.command === 'clear'
+      ? this.lines.list(conversationId, accountId).map(line => line.sessionId) : []
     // `/cancel` needs the live agent handle, which only this class holds; the
     // command module stays transport-free and just relays the sentence.
     const reply = runSessionCommand(this.lines, conversationId, text, accountId, {
@@ -310,10 +313,12 @@ export class AgentBridge {
     // record must not keep answering (a queued message would otherwise reach a
     // session the user believes is gone). Disposal is best-effort; the host
     // transcript stays on disk as an orphan, untouched.
-    if (reply.includes('已清空') && typeof previouslyActive === 'string') {
-      const record = this.sessions.get(previouslyActive)
+    for (const sessionId of clearedSessions) {
+      const record = this.sessions.get(sessionId)
       if (record !== undefined) {
-        this.sessions.delete(previouslyActive)
+        this.sessions.delete(sessionId)
+        record.unconfirmed?.offClaim?.()
+        record.unconfirmed?.offDiscard?.()
         void Promise.resolve()
           .then(() => record.dispose())
           .catch((error) => this.errLog(`cleared session dispose failed: ${String(error)}`))
@@ -345,8 +350,8 @@ export class AgentBridge {
     const sessionId = this.conversationTargets.get(key) ?? this.lines.active(conversationId, accountId)
     const record = sessionId === undefined ? undefined : this.sessions.get(sessionId)
     if (record === undefined) return NO_RUNNING_REPLY
-    if (record.busy !== true) return NO_RUNNING_REPLY
     const agent = record.agent
+    if (record.busy !== true && !(record.unconfirmed && agent?.status === 'running')) return NO_RUNNING_REPLY
     if (typeof agent?.cancel !== 'function') {
       // An older host without cancel() would otherwise look like success while
       // the turn keeps running — say so instead of lying.
@@ -355,8 +360,12 @@ export class AgentBridge {
     try {
       // Marked BEFORE the call: the turn's own wait loop polls this flag and
       // must not race the abort into reporting a model failure.
-      record.cancelled = true
+      if (record.busy) record.cancelled = true
       agent.cancel({ kind: 'user' })
+      if (!record.busy && record.unconfirmed?.messageId) {
+        record.suppressedInputs ??= new Map()
+        record.suppressedInputs.set(record.unconfirmed.messageId, record.unconfirmed)
+      }
     } catch (error) {
       record.cancelled = false
       this.errLog(`cancel failed for ${sessionId}: ${String(error)}`)
@@ -369,8 +378,8 @@ export class AgentBridge {
   async #compactSession(conversationId, accountId, arg) {
     if (String(arg ?? '').trim() !== '') return '用法：/compact（不带参数）'
     const record = await this.attach(conversationId, accountId)
-    if (record.busy) {
-      return '当前话题还在处理上一条消息，等它完成后再试 /compact。'
+    if (record.busy || record.pendingLateReplies?.size > 0 || this.#hostUnconfirmed(record)) {
+      return '当前话题还在处理或交付上一条消息，完成后再试 /compact。'
     }
     let attempted = false
     try {
@@ -403,7 +412,7 @@ export class AgentBridge {
       const commands = this.ctx.get('commands')
       if (commands && typeof commands.execute === 'function') {
         const record = await this.attach(conversationId, accountId)
-        if (!record.busy) {
+        if (!record.busy && !(record.pendingLateReplies?.size > 0) && !this.#hostUnconfirmed(record)) {
           const out = await commands.execute(record.agent, raw, [], AbortSignal.timeout(60_000))
           if (out?.result?.text) {
             record.lastDeliveredSeq = this.#lastSeq(record.agent)
@@ -730,7 +739,11 @@ export class AgentBridge {
    * @param {AbortSignal} [params.signal]
    * @param {string} [params.senderId] the Weixin user whose message started the
    *   turn; carried into the tool audit so a line answers "who caused this".
-   * @returns {Promise<{ text: string, sessionId: string }>}
+   * @returns {Promise<{ text: string, sessionId: string, cancelled?: boolean,
+   *   uncertain?: boolean, notSubmitted?: boolean, late?: boolean, superseded?: boolean, status?: string }>}
+   * `uncertain` means host settlement is unconfirmed. `notSubmitted` means this
+   * message was not submitted because an earlier turn is still unconfirmed.
+   * `onLateReply` also receives `cancel-pending` and `discarded` events.
    */
   async deliver({ conversationId, accountId, text, onProgress, signal, busyMessageMode, onLateReply, onSpontaneousReply, senderId }) {
     const record = await this.attach(conversationId, accountId)
@@ -758,7 +771,7 @@ export class AgentBridge {
       // `/steer <instruction>` is always an injection, whatever the mode: the
       // command exists precisely to reach a turn that is already running.
       const steerCommand = parseSteerCommand(text)
-      if (mode === 'steer' || steerCommand !== undefined) {
+      if (record.cancelled !== true && (mode === 'steer' || steerCommand !== undefined)) {
         // A second group sender must not inherit the first sender's dispatcher
         // permission by steering their still-running controller turn.
         if (senderId !== record.auditMeta?.senderId) record.dispatchSenderMixed = true
@@ -776,6 +789,7 @@ export class AgentBridge {
       // queue (default): FIFO tail drained when the running turn settles.
       return await this.#enqueue({ record, conversationId, accountId, text, onProgress, signal, onLateReply, onSpontaneousReply, senderId })
     }
+    if (this.#hostUnconfirmed(record)) return { text: '', sessionId: record.agent.session?.id ?? '', uncertain: true, notSubmitted: true }
     record.busy = true
     try {
       const createUserMessage = await loadCreateUserMessage()
@@ -783,11 +797,8 @@ export class AgentBridge {
       this.#beginAuditTurn(record, { accountId, conversationId, senderId })
       // followup() wakes the driver for a turn; inject() would only queue
       // context, and steer() would wait for the next step boundary.
-      record.agent.followup(
-        createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }),
-      )
-      const settled = await this.#awaitReply({ record, before, onProgress, signal, onLateReply })
-      record.lastDeliveredSeq = Math.max(record.lastDeliveredSeq ?? -1, this.#lastSeq(record.agent))
+      const message = createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } })
+      const settled = await this.#submitTurn({ record, before, message, onProgress, signal, onLateReply })
       this.onUsage?.({
         kind: 'chat',
         accountId,
@@ -797,7 +808,6 @@ export class AgentBridge {
       })
       return settled
     } finally {
-      record.lastDeliveredSeq = Math.max(record.lastDeliveredSeq ?? -1, this.#lastSeq(record.agent))
       record.busy = false
       // The turn is over, so a stale cancel flag would suppress the NEXT
       // turn's reply entirely.
@@ -825,7 +835,6 @@ export class AgentBridge {
       this.log?.(`background model call skipped: ${verdict.reason ?? 'background budget exhausted'}`)
       return undefined
     }
-    this.onBackgroundCall?.()
     const key = scopedLineKey(accountId, conversationId)
     // The route is part of the identity: a session created under one model
     // cannot be re-pointed at another, so changing the background model has to
@@ -845,16 +854,16 @@ export class AgentBridge {
       this.log?.(`background call skipped: side session ${sessionId} is busy`)
       return undefined
     }
+    if (this.#hostUnconfirmed(record)) throw new Error(`side session ${sessionId} has an unconfirmed turn`)
     record.busy = true
     try {
       const createUserMessage = await loadCreateUserMessage()
       const before = this.#lastSeq(record.agent)
       this.#beginAuditTurn(record, { accountId, conversationId })
-      record.agent.followup(
-        createUserMessage({ content: [{ type: 'text', text: prompt }], source: { kind: 'user' } }),
-      )
-      // No onProgress / onLateReply: a summary must stay silent toward WeChat.
-      const settled = await this.#awaitReply({ record, before })
+      const message = createUserMessage({ content: [{ type: 'text', text: prompt }], source: { kind: 'user' } })
+      this.onBackgroundCall?.()
+      const settled = await this.#submitTurn({ record, before, message, signal: this.shutdown.signal })
+      if (settled.uncertain || settled.status || settled.superseded) throw new Error(`side session ${sessionId} did not complete: ${settled.text}`)
       this.onUsage?.({
         kind: 'summarize',
         accountId,
@@ -898,8 +907,8 @@ export class AgentBridge {
         entry.resolveDone(result)
         return result
       } finally {
-        record.lastDeliveredSeq = Math.max(record.lastDeliveredSeq ?? -1, this.#lastSeq(record.agent))
         record.busy = false
+        record.cancelled = false
       }
     }
     return entry.done
@@ -910,6 +919,7 @@ export class AgentBridge {
    * {@link #drainQueue}.
    */
   async #runQueuedTurn({ record, conversationId, entry }) {
+    if (this.#hostUnconfirmed(record)) return { text: '', sessionId: record.agent.session?.id ?? '', uncertain: true, notSubmitted: true }
     const createUserMessage = await loadCreateUserMessage()
     record.conversationId = entry.conversationId ?? conversationId
     if (entry.accountId !== undefined) record.accountId = entry.accountId
@@ -920,14 +930,8 @@ export class AgentBridge {
       conversationId: entry.conversationId ?? conversationId,
       senderId: entry.senderId,
     })
-    record.agent.followup(
-      createUserMessage({ content: [{ type: 'text', text: entry.text }], source: { kind: 'user' } }),
-    )
-    try {
-      return await this.#awaitReply({ record, before, onProgress: entry.onProgress, signal: entry.signal, onLateReply: entry.onLateReply })
-    } finally {
-      record.lastDeliveredSeq = Math.max(record.lastDeliveredSeq ?? -1, this.#lastSeq(record.agent))
-    }
+    const message = createUserMessage({ content: [{ type: 'text', text: entry.text }], source: { kind: 'user' } })
+    return this.#submitTurn({ record, before, message, onProgress: entry.onProgress, signal: entry.signal, onLateReply: entry.onLateReply })
   }
 
   /**
@@ -947,6 +951,7 @@ export class AgentBridge {
         entry.resolveDone({ text: '（排队消息处理失败，请重发）', sessionId: record.agent.session?.id ?? '' })
       } finally {
         record.busy = false
+        record.cancelled = false
       }
     }
   }
@@ -1132,7 +1137,91 @@ export class AgentBridge {
     }
   }
 
-  async #awaitReply({ record, before, onProgress, signal, onLateReply }) {
+  #hostUnconfirmed(record) {
+    const pending = record.unconfirmed
+    if (!pending) return false
+    if (record.agent.status !== 'idle') return true
+    const events = record.agent.session?.snapshotEvents?.() ?? []
+    if (!pending.claim.discarded) {
+      const reply = readAssistantReply({ events, afterSeq: pending.before, messageId: pending.messageId, claimedTurn: pending.claim.turn })
+      if (reply.turnReason === undefined) return true
+    }
+    try {
+      assertNoPendingInbox(events, record.agent.inbox)
+    } catch (error) {
+      if (error?.code === 'SESSION_INBOX_PENDING' || error?.code === 'SESSION_INBOX_INVALID') return true
+      throw error
+    }
+    pending.offClaim?.()
+    pending.offDiscard?.()
+    record.unconfirmed = undefined
+    return false
+  }
+
+  async #submitTurn({ record, before, message, onProgress, signal, onLateReply }) {
+    if (typeof message.id !== 'string' || message.id === '') throw new Error('Host did not assign an id to the submitted message')
+    const claim = {}
+    const offClaim = this.ctx.on?.('agent/inbox/claimed', event => {
+      if (event.agent === record.agent && event.message?.id === message.id) claim.turn = event.turn
+    })
+    const offDiscard = this.ctx.on?.('agent/inbox/discarded', event => {
+      if (event.agent === record.agent && event.message?.id === message.id) claim.discarded = true
+    })
+    let retained = false
+    try {
+      record.agent.followup(message)
+      const { settledSeq, discarded, deliveryFailed, ...result } = await this.#awaitReply({ record, before, messageId: message.id, claim, onProgress, signal, onLateReply })
+      if (!record.isSideSession && !result.cancelled && onLateReply && (result.uncertain || deliveryFailed)) {
+        record.pendingLateReplies ??= new Map()
+        record.pendingLateReplies.set(message.id, { callback: onLateReply, before, claim })
+      }
+      if (result.uncertain === true) {
+        record.unconfirmed = { messageId: message.id, before, claim, offClaim, offDiscard }
+        retained = true
+      }
+      if (result.cancelled === true && !discarded && !Number.isFinite(settledSeq)) {
+        record.suppressedInputs ??= new Map()
+        record.suppressedInputs.set(message.id, { before, claim })
+      }
+      if (Number.isFinite(settledSeq)) {
+        const earlier = !record.isSideSession && readSettledTurns({
+          events: record.agent.session?.snapshotEvents?.() ?? [], afterSeq: record.lastDeliveredSeq ?? -1,
+        }).some(turn => turn.settledSeq < settledSeq)
+        if (earlier) {
+          record.deliveredTurns ??= new Set()
+          record.deliveredTurns.add(settledSeq)
+        } else {
+          record.lastDeliveredSeq = Math.max(record.lastDeliveredSeq ?? -1, settledSeq)
+        }
+      }
+      return result
+    } catch (error) {
+      // The host may have accepted the input before throwing. Preserve its
+      // identity and tell the caller it is unsafe to assume non-submission.
+      if (claim.discarded) {
+        if (record.agent.status !== 'idle') {
+          record.unconfirmed = { messageId: message.id, before, claim, offClaim, offDiscard }
+          retained = true
+        }
+        throw error
+      }
+      record.unconfirmed = { messageId: message.id, before, claim, offClaim, offDiscard }
+      retained = true
+      if (!record.isSideSession && onLateReply) {
+        record.pendingLateReplies ??= new Map()
+        record.pendingLateReplies.set(message.id, { callback: onLateReply, before, claim })
+      }
+      this.errLog(`turn submission or wait failed for ${record.agent.session?.id ?? ''}: ${redactSecrets(String(error))}`)
+      return { text: '', sessionId: record.agent.session?.id ?? '', uncertain: true }
+    } finally {
+      if (!retained) {
+        if (typeof offClaim === 'function') offClaim()
+        if (typeof offDiscard === 'function') offDiscard()
+      }
+    }
+  }
+
+  async #awaitReply({ record, before, messageId, claim, onProgress, signal, onLateReply }) {
     const sessionId = record.agent.session?.id ?? ''
     const startedAt = Date.now()
     const deadline = startedAt + this.maxWaitMs
@@ -1142,38 +1231,43 @@ export class AgentBridge {
     // repeated" would stop holding if the text were the key.
     let lastProgressTools = null
     let lateAnnounced = false
+    let cancelNoticeSent = false
 
     while (Date.now() < deadline) {
-      if (signal?.aborted === true) return { text: '（已取消）', sessionId }
-      // `/cancel` set this flag before asking the host to abort. The abort ends
-      // the turn with an error event, and reporting that as "模型调用失败"
-      // would blame the model for something the user asked for — so the flag
-      // wins, and the empty text means the command's own receipt is the only
-      // message the user gets.
-      if (record.cancelled === true) {
-        // A cancelled turn ends with whatever the host already wrote (the
-        // aborted tool's own result may be there) and never with an assistant
-        // message, so this is the last poll that will ever look at its events.
-        this.#auditEvents(record, record.agent.session?.snapshotEvents?.() ?? [], before)
-        this.#auditAbandoned(record)
-        return { text: '', sessionId, cancelled: true }
-      }
+      if (signal?.aborted === true) return { text: '', sessionId, cancelled: true, uncertain: true }
       const events = record.agent.session?.snapshotEvents?.() ?? []
       this.#auditEvents(record, events, before)
-      const reply = readAssistantReply({ events, afterSeq: before })
+      const reply = readAssistantReply({ events, afterSeq: before, messageId, claimedTurn: claim.turn })
+      if (claim.discarded) {
+        if (record.cancelled !== true) {
+          if (record.agent.status !== 'idle') record.unconfirmed = { messageId, before, claim }
+          throw new Error('Host discarded the message before processing')
+        }
+        if (record.agent.status === 'idle') return { text: '', sessionId, cancelled: true, discarded: true }
+      }
+      // A cancellation request is not a terminal event. Keep the busy lock
+      // until this specific turn ends so queued work cannot overlap it.
+      if (record.cancelled === true && (reply.turnReason !== undefined)) {
+        this.#auditAbandoned(record)
+        return { text: '', sessionId, cancelled: true, ...(reply.turnReason !== 'completed' ? { settledSeq: reply.settledSeq } : {}) }
+      }
+      // A failed turn is OVER: no assistant message will ever arrive, and the
+      // turn/end(error) event is already durable. Waiting out the deadline
+      // here holds record.busy for the whole budget, so the user's NEXT
+      // message queues behind a turn that can never answer — the "one model
+      // failure and everything after is stuck" report. Answer immediately.
+      if (reply.superseded && (reply.turnReason !== undefined)) return { text: '', sessionId, superseded: true }
       if (reply.turnReason !== undefined && reply.turnReason !== 'completed') {
         if (reply.turnReason === 'error') logTurnError(this.errLog, sessionId, reply)
-        return { text: terminalNotice(reply.turnReason), sessionId, status: reply.turnReason }
+        return { text: terminalNotice(reply.turnReason), sessionId, settledSeq: reply.settledSeq, status: reply.turnReason }
       }
-      // Intermediate assistant messages can precede tool calls in the same
-      // turn. They are progress, not the final delivery contract.
-      if (reply.turnSettled) return { text: reply.text, sessionId }
+      if (reply.turnSettled) return { text: reply.text, sessionId, settledSeq: reply.settledSeq }
 
       // A long tool run is invisible in WeChat. The first note goes out after
       // progressAfterMs; after that a CHANGED tool set is re-announced at most
       // every progressEveryMs, so "running: bash" becoming "running: read"
       // reaches the user while one long unchanged tool never spams.
-      if (onProgress) {
+      if (onProgress && record.cancelled !== true) {
         const elapsed = Date.now() - startedAt
         const note = describePending(reply.pendingTools, elapsed)
         // Two thresholds, whichever comes first: a turn that is only thinking
@@ -1203,11 +1297,12 @@ export class AgentBridge {
     // its answer would be lost if we simply returned. Keep listening at a
     // slow cadence until the turn settles, then hand the final text to the
     // late-reply callback so the caller can deliver it out of band.
-    if (onLateReply === undefined) return { text: CATALOG['turn.unobserved'].zh, sessionId, status: 'unknown' }
+    if (onLateReply === undefined) return { text: '', sessionId, uncertain: true, ...(record.cancelled === true ? { cancelled: true } : {}) }
     if (!lateAnnounced) {
       lateAnnounced = true
       try {
-        await onLateReply({ kind: 'timeout-notice' })
+        cancelNoticeSent = record.cancelled === true
+        await onLateReply({ kind: cancelNoticeSent ? 'cancel-pending' : 'timeout-notice' })
       } catch {
         // The notice is best effort; the late answer still gets delivered.
       }
@@ -1217,52 +1312,47 @@ export class AgentBridge {
     const latePollMs = this.eventPollMs
     const lateDeadline = Date.now() + (this.lateReplyMaxWaitMs ?? 60 * 60_000)
     while (Date.now() < lateDeadline) {
-      if (signal?.aborted === true) return { text: '', sessionId, late: true }
-      // A cancelled turn is over; the late wait must not keep polling for a
-      // reply the user explicitly asked not to receive.
-      if (record.cancelled === true) {
-        this.#auditEvents(record, record.agent.session?.snapshotEvents?.() ?? [], before)
-        this.#auditAbandoned(record)
-        return { text: '', sessionId, late: true }
-      }
+      if (signal?.aborted === true) return { text: '', sessionId, late: true, cancelled: true, uncertain: true }
       const events = record.agent.session?.snapshotEvents?.() ?? []
       this.#auditEvents(record, events, before)
-      const reply = readAssistantReply({ events, afterSeq: before })
+      const reply = readAssistantReply({ events, afterSeq: before, messageId, claimedTurn: claim.turn })
+      if (claim.discarded) {
+        if (record.cancelled !== true) {
+          if (record.agent.status !== 'idle') record.unconfirmed = { messageId, before, claim }
+          throw new Error('Host discarded the message before processing')
+        }
+        if (record.agent.status === 'idle') return { text: '', sessionId, late: true, cancelled: true, discarded: true }
+      }
+      if (record.cancelled === true && (reply.turnReason !== undefined)) {
+        this.#auditAbandoned(record)
+        return { text: '', sessionId, late: true, cancelled: true, ...(reply.turnReason !== 'completed' ? { settledSeq: reply.settledSeq } : {}) }
+      }
+      if (reply.superseded && (reply.turnReason !== undefined)) return { text: '', sessionId, superseded: true }
       if (reply.turnReason !== undefined && reply.turnReason !== 'completed') {
-        const status = reply.turnReason
-        if (status === 'error') logTurnError(this.errLog, sessionId, reply)
-        record.lastDeliveredSeq = Math.max(record.lastDeliveredSeq ?? -1, reply.settledSeq)
+        if (reply.turnReason === 'error') logTurnError(this.errLog, sessionId, reply)
+        return { text: terminalNotice(reply.turnReason), sessionId, settledSeq: reply.settledSeq, status: reply.turnReason }
+      }
+      if (record.cancelled === true && !cancelNoticeSent) {
+        cancelNoticeSent = true
         try {
-          await onLateReply({ kind: 'reply', text: terminalNotice(status), status })
+          await onLateReply({ kind: 'cancel-pending' })
+        } catch (error) {
+          this.errLog(`cancellation notice failed: ${String(error)}`)
+        }
+      }
+      if (reply.turnSettled) {
+        try {
+          await onLateReply({ kind: 'reply', text: reply.text })
         } catch (error) {
           this.errLog(`late reply delivery failed: ${String(error)}`)
+          return { text: '', sessionId, late: true, deliveryFailed: true }
         }
-        return { text: '', sessionId, late: true }
-      }
-      // The same settlement rule applies after the normal wait expires: a
-      // transition step must not be mistaken for the eventual final answer.
-      if (reply.turnSettled) {
-        record.lastDeliveredSeq = Math.max(record.lastDeliveredSeq ?? -1, this.#lastSeq(record.agent))
-        if (reply.text !== '') {
-          try {
-            await onLateReply({ kind: 'reply', text: reply.text })
-          } catch (error) {
-            this.errLog(`late reply delivery failed: ${String(error)}`)
-          }
-        }
-        // This turn was consumed through the late-reply channel; if it had a
-        // non-empty answer, that callback already delivered it.
-        return { text: '', sessionId, late: true }
+        return { text: '', sessionId, late: true, settledSeq: reply.settledSeq }
       }
       await new Promise((resolve) => setTimeout(resolve, latePollMs))
     }
     this.errLog(`late reply wait gave up for ${sessionId}`)
-    try {
-      await onLateReply({ kind: 'reply', text: CATALOG['turn.unobserved'].zh, status: 'unknown' })
-    } catch (error) {
-      this.errLog(`late reply delivery failed: ${String(error)}`)
-    }
-    return { text: '', sessionId, late: true }
+    return { text: '', sessionId, late: true, uncertain: true, ...(record.cancelled === true ? { cancelled: true } : {}) }
   }
 
   /**
@@ -1276,12 +1366,59 @@ export class AgentBridge {
       if (!record.conversationId) continue
 
       const events = record.agent?.session?.snapshotEvents?.() ?? []
-      if (events.length === 0) continue
-
       const afterSeq = record.lastDeliveredSeq ?? -1
       this.#auditEvents(record, events, afterSeq)
       const turns = readSettledTurns({ events, afterSeq })
       for (const turn of turns) {
+        const pendingInputs = turn.inputs?.filter(input => record.pendingLateReplies?.has(input.id)) ?? []
+        let pendingInput = pendingInputs.find(input => input.seq === turn.latestInstructionSeq)
+        if (!pendingInput && turn.turnReason !== 'completed' && turn.turn !== undefined) {
+          const claimed = [...(record.pendingLateReplies ?? [])].find(([, pending]) => pending.claim.turn === turn.turn
+            && turn.settledSeq > pending.before && !turn.inputs.some(input => input.seq > pending.before))
+          if (claimed) pendingInput = { id: claimed[0], seq: -1 }
+        }
+        for (const input of pendingInputs) {
+          if (input !== pendingInput) record.pendingLateReplies.delete(input.id)
+        }
+        const suppressed = turn.inputIds?.filter(id => record.suppressedInputs?.has(id)) ?? []
+        const claimedSuppression = [...(record.suppressedInputs ?? [])].find(([id, pending]) =>
+          !suppressed.includes(id) && turn.turn !== undefined && pending.claim.turn === turn.turn
+          && turn.settledSeq > pending.before && !turn.inputs.some(input => input.id === id))
+        if (claimedSuppression) suppressed.push(claimedSuppression[0])
+        if (suppressed.length > 0) {
+          const suppressedSeq = Math.max(
+            ...turn.inputs.filter(input => suppressed.includes(input.id)).map(input => input.seq),
+            ...(claimedSuppression ? [claimedSuppression[1].before] : []),
+          )
+          for (const id of suppressed) {
+            record.suppressedInputs.delete(id)
+            record.pendingLateReplies?.delete(id)
+          }
+          if (!(turn.latestInstructionSeq > suppressedSeq)) {
+            record.deliveredTurns?.delete(turn.settledSeq)
+            record.lastDeliveredSeq = Math.max(record.lastDeliveredSeq ?? -1, turn.settledSeq)
+            continue
+          }
+        }
+        if (record.deliveredTurns?.delete(turn.settledSeq)) {
+          record.lastDeliveredSeq = Math.max(record.lastDeliveredSeq ?? -1, turn.settledSeq)
+          continue
+        }
+        const pendingReply = pendingInput && record.pendingLateReplies?.get(pendingInput.id)?.callback
+        if (pendingReply) {
+          record.spontaneousSending = true
+          try {
+            await pendingReply({ kind: 'reply', text: turn.turnReason === 'completed' ? turn.text : terminalNotice(turn.turnReason), ...(turn.turnReason === 'completed' ? {} : { status: turn.turnReason }) })
+            record.pendingLateReplies.delete(pendingInput.id)
+            record.lastDeliveredSeq = Math.max(record.lastDeliveredSeq ?? -1, turn.settledSeq)
+          } catch (error) {
+            this.errLog(`late reply delivery failed for ${sessionId}: ${String(error)}`)
+            break
+          } finally {
+            record.spontaneousSending = false
+          }
+          continue
+        }
         if (turn.turnReason === 'error') logTurnError(this.errLog, sessionId, turn)
         const replyText = turn.turnReason === 'completed' ? turn.text : terminalNotice(turn.turnReason)
         const trimmedReply = replyText.trim()
@@ -1318,6 +1455,31 @@ export class AgentBridge {
           record.lastDeliveredSeq = Math.max(record.lastDeliveredSeq ?? -1, turn.settledSeq)
         }
       }
+      for (const [messageId, pending] of record.pendingLateReplies ?? []) {
+        if (!pending.claim.discarded) continue
+        if (record.suppressedInputs?.delete(messageId)) {
+          record.pendingLateReplies.delete(messageId)
+        } else {
+          record.spontaneousSending = true
+          try {
+            await pending.callback({ kind: 'discarded' })
+            record.pendingLateReplies.delete(messageId)
+          } catch (error) {
+            this.errLog(`discarded input notification failed for ${sessionId}: ${String(error)}`)
+            continue
+          } finally {
+            record.spontaneousSending = false
+          }
+        }
+      }
+      const pending = record.unconfirmed
+      if (pending?.claim.discarded && !record.pendingLateReplies?.has(pending.messageId) && record.agent.status === 'idle') {
+        try {
+          this.#hostUnconfirmed(record)
+        } catch (error) {
+          this.errLog(`discarded input cleanup failed for ${sessionId}: ${String(error)}`)
+        }
+      }
     }
   }
 
@@ -1328,6 +1490,7 @@ export class AgentBridge {
 
   /** Tear down every session this bridge created. */
   async dispose() {
+    this.shutdown.abort()
     await this.sessionDispatcher.dispose()
     if (this.#spontaneousTimer !== undefined) {
       clearInterval(this.#spontaneousTimer)
@@ -1338,6 +1501,8 @@ export class AgentBridge {
     await Promise.all(
       records.map(async (record) => {
         try {
+          record.unconfirmed?.offClaim?.()
+          record.unconfirmed?.offDiscard?.()
           await record.dispose()
         } catch (error) {
           this.errLog(`session dispose failed: ${String(error)}`)
