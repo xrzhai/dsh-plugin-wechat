@@ -20,7 +20,7 @@ import { MessageItemType, MessageState, MessageType, TypingStatus } from '../../
 import { getSyncBufFilePath, loadGetUpdatesBuf, saveGetUpdatesBuf } from '../../vendor/openclaw-weixin/storage/sync-buf.js'
 import { CDN_BASE_URL as DEFAULT_CDN_BASE_URL } from '../../vendor/openclaw-weixin/auth/accounts.js'
 import { OutboundPacer } from '../message/rate-limit.js'
-import { createInboundPendingStore } from '../message/inbound-pending.js'
+import { createInboundPendingStore, INBOUND_NOT_ACCEPTED } from '../message/inbound-pending.js'
 import { parseQuote } from '../message/quote.js'
 
 /** Consecutive failures tolerated before the long backoff kicks in. */
@@ -712,6 +712,7 @@ export class ILinkTransport {
   async #runPersisted(message, onMessage) {
     const record = this.#messageRecords.get(message)
     if (record === undefined) throw new Error('inbound message has no persistence record')
+    if (!this.running) return
     let claimed
     let claimAttempts = 0
     while (true) {
@@ -740,7 +741,11 @@ export class ILinkTransport {
       return
     }
     try {
-      await onMessage(message)
+      const result = await onMessage(message)
+      if (result === INBOUND_NOT_ACCEPTED) {
+        if (!this.pendingStore.release(record.key)) throw new Error('inbound claim could not be released')
+        return
+      }
     } catch (error) {
       try {
         this.pendingStore.markUncertain(record.key)

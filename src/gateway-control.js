@@ -1,3 +1,5 @@
+import { INBOUND_NOT_ACCEPTED } from './message/inbound-pending.js'
+
 /** Live gateway switch. Already admitted turns may finish; queued/new ones may not. */
 export function createGatewayControl({ isEnabled, isPaused, isDisposed, transports, startLoop, warn = () => {} }) {
   const stopping = new Map()
@@ -59,7 +61,7 @@ export function createGatewayControl({ isEnabled, isPaused, isDisposed, transpor
       const canAccept = checkpoint(accountId)
       const transport = transports.get(accountId)
       return async (message) => {
-        if (!canAccept() || transports.get(accountId) !== transport) return
+        if (!canAccept() || transports.get(accountId) !== transport) return INBOUND_NOT_ACCEPTED
         return handler(message)
       }
     },

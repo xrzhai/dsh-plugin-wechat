@@ -24,6 +24,9 @@ import { atomicWriteJson } from '../atomic.js'
 const SCHEMA_VERSION = 1
 const COMPLETED_LIMIT = 4096
 
+// The gateway refused a queued message before the user handler ran.
+export const INBOUND_NOT_ACCEPTED = Symbol('inbound-not-accepted')
+
 export class InboundPendingError extends Error {
   /** @param {string} message */
   constructor(message) {
@@ -224,6 +227,16 @@ export class InboundPendingStore {
     if (current.record.state !== 'queued') return { ok: false, state: current.record.state }
     this.#writeRecord({ ...current.record, state: 'started', startedAt: this.now() })
     return { ok: true }
+  }
+
+  /** Undo a claim only when the gateway confirms the handler never ran. */
+  release(key) {
+    this.#initialize()
+    const current = this.#readRecord(key)
+    if (current.status !== 'ok' || current.record.state !== 'started') return false
+    const { startedAt, ...record } = current.record
+    this.#writeRecord({ ...record, state: 'queued' })
+    return true
   }
 
   /** Preserve a failed/ambiguous handler run without making it replayable. */

@@ -5,6 +5,7 @@ import { setImmediate as tick } from 'node:timers/promises'
 import { test } from 'node:test'
 import { ILinkTransport } from '../src/transport/ilink.js'
 import { createInboundPendingStore } from '../src/message/inbound-pending.js'
+import { createGatewayControl } from '../src/gateway-control.js'
 import { getSyncBufFilePath } from '../vendor/openclaw-weixin/storage/sync-buf.js'
 
 const SENSITIVE_FIXTURE_TOKEN = ['not', 'a', 'real', 'token'].join('-')
@@ -135,6 +136,83 @@ test('startup replays only queued records and leaves an interrupted record with 
   assert.ok(f.warnings.some((line) => line.includes('1 message(s) had started') && line.includes('not replaying')))
   assert.deepEqual(f.transport.pendingStore.recover().queued, [])
   assert.equal(f.transport.pendingStore.recover().unresolved, 1)
+})
+
+test('gateway disable retains queued messages and replays them after restart', async (t) => {
+  const entered = deferred()
+  const release = deferred()
+  const replayed = deferred()
+  let polls = 0
+  const f = fixture(t, {
+    getUpdates: ({ abortSignal }) => ++polls === 1
+      ? Promise.resolve({ ret: 0, get_updates_buf: 'queued-cursor', msgs: [rawText('first'), rawText('second'), rawText('third')] })
+      : idlePoll(abortSignal),
+  })
+  f.setRelease(() => release.resolve())
+  const transports = new Map()
+  const handled = []
+  let enabled = true
+  let control
+  const handler = async (message) => {
+    handled.push(message.id)
+    if (message.id === 'first') { entered.resolve(); await release.promise }
+    if (message.id === 'third') replayed.resolve()
+  }
+  control = createGatewayControl({
+    isEnabled: () => enabled,
+    isPaused: () => false,
+    isDisposed: () => false,
+    transports,
+    startLoop: () => {
+      transports.set(f.accountId, f.transport)
+      return f.transport.start(control.wrapInbound(f.accountId, handler))
+    },
+  })
+  await control.sync()
+  await within(entered.promise, 'first handler')
+  enabled = false
+  await control.sync()
+  release.resolve()
+  await within(control.drain(), 'transport drain')
+  assert.deepEqual(handled, ['first'])
+  assert.deepEqual(f.transport.pendingStore.recover().queued.map((item) => item.message.id), ['second', 'third'])
+
+  enabled = true
+  await control.sync()
+  await within(replayed.promise, 'queued messages replayed')
+  assert.deepEqual(handled, ['first', 'second', 'third'])
+})
+
+test('a replaced gateway releases a claim when its handler never ran', async (t) => {
+  const entered = deferred()
+  const release = deferred()
+  const f = fixture(t, { getUpdates: ({ abortSignal }) => idlePoll(abortSignal) })
+  f.setRelease(() => release.resolve())
+  const transports = new Map([[f.accountId, f.transport]])
+  const control = createGatewayControl({
+    isEnabled: () => true, isPaused: () => false, isDisposed: () => false,
+    transports, startLoop: async () => {},
+  })
+  const seen = []
+  const handler = control.wrapInbound(f.accountId, async (message) => {
+    seen.push(message.id)
+    if (message.id === 'first') { entered.resolve(); await release.promise }
+  })
+  f.transport.pendingStore.stage({ id: 'first', type: 'text', text: 'one', senderId: 'user-a', conversationId: 'chat-a' })
+  f.transport.pendingStore.stage({ id: 'second', type: 'text', text: 'two', senderId: 'user-a', conversationId: 'chat-a' })
+  let claims = 0
+  const claim = f.transport.pendingStore.claim.bind(f.transport.pendingStore)
+  t.mock.method(f.transport.pendingStore, 'claim', (key) => { claims += 1; return claim(key) })
+  await f.transport.start(handler)
+  await within(entered.promise, 'first handler')
+  transports.set(f.accountId, {})
+  release.resolve()
+  for (let i = 0; i < 100 && (claims < 2 || f.transport.pendingStore.recover().unresolved !== 0); i += 1) await tick()
+  const recovery = f.transport.pendingStore.recover()
+  assert.equal(claims, 2)
+  assert.deepEqual(seen, ['first'])
+  assert.deepEqual(recovery.queued.map((item) => item.message.id), ['second'])
+  assert.equal(recovery.unresolved, 0)
 })
 
 test('capacity overflow resumes in-process with per-conversation FIFO and /cancel still bypasses', async (t) => {
